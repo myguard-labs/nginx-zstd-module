@@ -661,7 +661,7 @@ failed:
 static ngx_int_t
 ngx_http_zstd_accept_encoding(ngx_str_t *ae)
 {
-    u_char  *p;
+    u_char  *p, *end;
 
     p = ngx_strcasestrn(ae->data, "zstd", sizeof("zstd") - 1);
     if (p == NULL) {
@@ -673,6 +673,56 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
         p += sizeof("zstd") - 1;
 
         if (p == ae->data + ae->len || *p == ',' || *p == ' ' || *p == ';') {
+            /* Found "zstd" token; now check quality value if present */
+            if (*p == ';') {
+                p++;
+                /* Skip whitespace */
+                while (p < ae->data + ae->len && (*p == ' ' || *p == '\t')) {
+                    p++;
+                }
+
+                /* Look for q= parameter */
+                if (p + 1 < ae->data + ae->len && ngx_tolower(p[0]) == 'q' && p[1] == '=') {
+                    p += 2;
+                    /* Skip whitespace after = */
+                    while (p < ae->data + ae->len && (*p == ' ' || *p == '\t')) {
+                        p++;
+                    }
+
+                    /* Parse quality value; RFC 7231 format is "0" or "1" or "0.x" */
+                    if (p < ae->data + ae->len) {
+                        if (*p == '0') {
+                            /* Check for q=0 (explicitly not acceptable) */
+                            p++;
+                            end = p;
+                            while (end < ae->data + ae->len && (*end == ',' || *end == ' ' || *end == ';')) {
+                                end++;
+                            }
+                            /* If it's just "0" or "0." with nothing after, q=0 */
+                            if (p == ae->data + ae->len || *p == ',' || *p == ' ' || *p == ';') {
+                                return NGX_DECLINED;
+                            }
+                            if (*p == '.') {
+                                p++;
+                                /* Check if all digits after decimal are 0 */
+                                while (p < ae->data + ae->len && ngx_isdigit(*p)) {
+                                    if (*p != '0') {
+                                        return NGX_OK;
+                                    }
+                                    p++;
+                                }
+                                /* All zeros after decimal: q=0.0... means not acceptable */
+                                if (p == ae->data + ae->len || *p == ',' || *p == ' ' || *p == ';') {
+                                    return NGX_DECLINED;
+                                }
+                            }
+                        }
+                        /* For q=1 or q=0.x (x>0), accept */
+                    }
+                }
+
+            }
+
             return NGX_OK;
         }
     }
