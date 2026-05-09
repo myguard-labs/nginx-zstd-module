@@ -103,6 +103,7 @@ static void * ngx_http_zstd_filter_alloc(void *opaque, size_t size);
 static void ngx_http_zstd_filter_free(void *opaque, void *address);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
 static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static void ngx_http_zstd_cleanup_dict(void *data);
 
 
 static ngx_http_zstd_comp_level_bounds_t  ngx_http_zstd_comp_level_bounds = {
@@ -865,6 +866,22 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 rc = NGX_CONF_ERROR;
                 goto close;
             }
+
+            /* Register cleanup handler to free dictionary when config is destroyed */
+            {
+                ngx_pool_cleanup_t  *cln;
+
+                cln = ngx_pool_cleanup_add(cf->pool, sizeof(ZSTD_CDict *));
+                if (cln == NULL) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                       "ngx_pool_cleanup_add() failed");
+                    rc = NGX_CONF_ERROR;
+                    goto close;
+                }
+
+                cln->handler = ngx_http_zstd_cleanup_dict;
+                cln->data = conf->dict;
+            }
         }
     }
 
@@ -971,6 +988,17 @@ ngx_http_zstd_filter_free(void *opaque, void *address)
                    "zstd free: %p", address);
 
 #endif
+}
+
+
+static void
+ngx_http_zstd_cleanup_dict(void *data)
+{
+    ZSTD_CDict  *dict = data;
+
+    if (dict != NULL) {
+        ZSTD_freeCDict(dict);
+    }
 }
 
 
