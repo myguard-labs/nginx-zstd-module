@@ -4,6 +4,7 @@ zstd-nginx-module - Nginx module for the [Zstandard compression](https://faceboo
 # Table of Contents
 
 * [Name](#name)
+* [Table of Contents](#table-of-contents)
 * [Status](#status)
 * [Synopsis](#synopsis)
 * [Installation](#installation)
@@ -13,13 +14,14 @@ zstd-nginx-module - Nginx module for the [Zstandard compression](https://faceboo
     * [zstd](#zstd)
     * [zstd_comp_level](#zstd_comp_level)
     * [zstd_min_length](#zstd_min_length)
+    * [zstd_max_length](#zstd_max_length)
     * [zstd_types](#zstd_types)
     * [zstd_buffers](#zstd_buffers)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
     * [zstd_static](#zstd_static)
 * [Variables](#variables)
-  * [ngx_http_zstd_filter_module](#ngx_http_zstd_filter_module)
-    * [$zstd_ratio](#$zstd_ratio)
+  * [ngx_http_zstd_filter_module](#ngx_http_zstd_filter_module-1)
+    * [$zstd_ratio](#zstd_ratio)
 * [Author](#author)
 
 # Status
@@ -106,6 +108,14 @@ Sets a zstd compression level of a response. Acceptable values are in the range 
 **Context:** *http, server, location*
 
 Sets the minimum length of a response that will be compressed by zstd. The length is determined only from the `Content-Length` response header field.
+
+### zstd_max_length
+
+**Syntax:** *zstd_max_length length;*
+**Default:** *-*
+**Context:** *http, server, location*
+
+Sets the maximum length of a response that will be compressed by zstd. Responses larger than this value will not be compressed. The length is determined only from the `Content-Length` response header field. By default there is no upper limit.
 
 ### zstd_types
 

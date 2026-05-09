@@ -25,6 +25,7 @@ typedef struct {
     ngx_flag_t                   enable;
     ngx_int_t                    level;
     ssize_t                      min_length;
+    ssize_t                      max_length;
 
     ngx_hash_t                   types;
 
@@ -150,6 +151,13 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       offsetof(ngx_http_zstd_loc_conf_t, min_length),
       NULL },
 
+    { ngx_string("zstd_max_length"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_zstd_loc_conf_t, max_length),
+      NULL },
+
     { ngx_string("zstd_dict_file"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_str_slot,
@@ -209,6 +217,12 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
            && r->headers_out.content_encoding->value.len)
        || (r->headers_out.content_length_n != -1
            && r->headers_out.content_length_n < zlcf->min_length)
+       || (zlcf->max_length != NGX_CONF_UNSET
+           && r->headers_out.content_length_n != -1
+           && r->headers_out.content_length_n > zlcf->max_length)
+       || (zlcf->max_length != NGX_CONF_UNSET
+           && r->headers_out.content_length_n != -1
+           && r->headers_out.content_length_n > zlcf->max_length)
        || ngx_http_test_content_type(r, &zlcf->types) == NULL
        || r->header_only)
     {
@@ -854,6 +868,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->enable = NGX_CONF_UNSET;
     conf->level = NGX_CONF_UNSET;
     conf->min_length = NGX_CONF_UNSET;
+    conf->max_length = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -880,6 +895,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
     ngx_conf_merge_value(conf->level, prev->level, 1);
     ngx_conf_merge_value(conf->min_length, prev->min_length, 20);
+    ngx_conf_merge_value(conf->max_length, prev->max_length, NGX_CONF_UNSET);
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                              &prev->types_keys, &prev->types,
