@@ -124,7 +124,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 
     log = r->connection->log;
 
-    p = ngx_http_map_uri_to_path(r, &path, &root, sizeof(".zst") - 1);
+    p = ngx_http_map_uri_to_path(r, &path, &root, sizeof(".zst"));
     if (p == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -132,6 +132,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     *p++ = '.';
     *p++ = 'z';
     *p++ = 's';
+    *p++ = 't';
     *p++ = 't';
     *p = '\0';
 
