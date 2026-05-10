@@ -105,7 +105,8 @@ static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
 static void * ngx_http_zstd_filter_alloc(void *opaque, size_t size);
 static void ngx_http_zstd_filter_free(void *opaque, void *address);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
-static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static void ngx_http_zstd_cleanup_dict(void *data);
 
 
@@ -370,7 +371,8 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
         /* After chain update, buffers may have been recycled or reassigned.
          * Invalidate ctx->out_buf to force fresh buffer allocation/validation
-         * on next compression iteration to prevent use-after-free of recycled buffers. */
+         * on next compression iteration to prevent
+         * use-after-free of recycled buffers. */
         ctx->out_buf = NULL;
 
         ctx->last_out = &ctx->out;
@@ -824,7 +826,8 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
             size = ngx_file_size(&info);
 
-            /* Validate dictionary file size to prevent DoS via memory exhaustion */
+            /* Validate dictionary file size to prevent DoS
+             * via memory exhaustion */
             if (size > NGX_HTTP_ZSTD_MAX_DICT_SIZE) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                    "dictionary file too large: %uz bytes "
@@ -867,11 +870,14 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 goto close;
             }
 
-            /* Register cleanup handler to free dictionary when config is destroyed.
-             * Note: Using ZSTD_createCDict() (copy mode) instead of _byReference()
-             * to avoid use-after-free during config reloads. Dictionary buffer is
-             * copied into ZSTD's internal memory, so config pool cleanup can safely
-             * free the original buf without affecting in-flight compressions. */
+            /* Register cleanup handler to free dictionary when
+             * config is destroyed.
+             * Note: Using ZSTD_createCDict() (copy mode) instead
+             * of _byReference() to avoid use-after-free during
+             * config reloads. Dictionary buffer is copied into
+             * ZSTD's internal memory so config pool cleanup can
+             * safely free the original buf without affecting
+             * in-flight compressions. */
             {
                 ngx_pool_cleanup_t  *cln;
 
@@ -974,7 +980,8 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
 
     ratio_int = (ngx_uint_t) ctx->bytes_in / ctx->bytes_out;
     /* Use uint64_t to prevent integer overflow when multiplying by 1000 */
-    ratio_frac = (ngx_uint_t) ((uint64_t) ctx->bytes_in * 1000 / ctx->bytes_out % 1000);
+    ratio_frac = (ngx_uint_t) ((uint64_t) ctx->bytes_in * 1000
+                 / ctx->bytes_out % 1000);
 
     vv->len = ngx_sprintf(vv->data, "%ui.%03ui", ratio_int, ratio_frac)
               - vv->data;
@@ -1054,7 +1061,8 @@ ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
 }
 
 static char *
-ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf)
 {
     char  *p = conf;
 

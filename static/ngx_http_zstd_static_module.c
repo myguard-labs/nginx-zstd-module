@@ -58,7 +58,7 @@ static ngx_http_module_t  ngx_http_zstd_static_module_ctx = {
     NULL,                                     /* create server configuration */
     NULL,                                     /* merge server configuration */
 
-    ngx_http_zstd_static_create_loc_conf,     /* create location configuration */
+    ngx_http_zstd_static_create_loc_conf,  /* create location configuration */
     ngx_http_zstd_static_merge_loc_conf,      /* merge location configuration */
 };
 
