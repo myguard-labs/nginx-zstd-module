@@ -42,6 +42,9 @@ http {
                      application/javascript text/xml application/xml
                      application/xml+rss text/javascript image/svg+xml;
 
+    # Required: emit Vary: Accept-Encoding so proxies/CDNs cache correctly.
+    gzip_vary        on;
+
     server {
         listen 80;
         server_name example.com;
@@ -96,6 +99,8 @@ load_module modules/ngx_http_zstd_static_module.so;
 ## ngx_http_zstd_filter_module
 
 This filter module compresses responses on the fly using zstd. It runs after the upstream or file handler generates the response, and before nginx sends it to the client. Compression is applied only when the client signals support via `Accept-Encoding: zstd`.
+
+> **Required:** Enable `gzip_vary on;` alongside this module. When compression is applied, the module sets `r->gzip_vary = 1`, which causes nginx to emit a `Vary: Accept-Encoding` response header — but only when `gzip_vary` is enabled. Without it, proxies and CDNs may cache and serve compressed responses to clients that do not support zstd.
 
 ---
 
