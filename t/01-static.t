@@ -57,9 +57,8 @@ GET /test
 --- more_headers
 Accept-Encoding: gzip, zstd
 --- response_headers
-Content-Length: 20706
-ETag: "5be17d33-50e2"
-!Content-Encoding
+Content-Length: 3717
+ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
@@ -77,7 +76,6 @@ GET /test
 --- response_headers
 Content-Length: 59738
 ETag: "5be17d33-e95a"
-Content-Encoding: zstd
 !Content-Encoding
 --- no_error_log
 [error]
@@ -114,8 +112,8 @@ GET /test
 --- more_headers
 Accept-Encoding: gzip, br
 --- response_headers
-Content-Length: 20706
-ETag: "5be17d33-50e2"
+Content-Length: 3717
+ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
@@ -131,8 +129,8 @@ Content-Encoding: zstd
 --- request
 GET /test
 --- response_headers
-Content-Length: 20706
-ETag: "5be17d33-50e2"
+Content-Length: 3717
+ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
@@ -150,8 +148,8 @@ GET /test
 --- more_headers
 Accept-Encoding: gzip, br
 --- response_headers
-Content-Length: 20706
-ETag: "5be17d33-50e2"
+Content-Length: 3717
+ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
@@ -230,8 +228,8 @@ GET /test
 --- more_headers
 Accept-Encoding: zstd;q=0.5
 --- response_headers
-Content-Length: 20706
-ETag: "5be17d33-50e2"
+Content-Length: 3717
+ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
@@ -249,8 +247,8 @@ GET /test
 --- more_headers
 Accept-Encoding: zstd;q=0
 --- response_headers
-Content-Length: 20706
-ETag: "5be17d33-50e2"
+Content-Length: 3717
+ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
@@ -269,8 +267,8 @@ GET /test
 --- more_headers
 Accept-Encoding: gzip, zstd
 --- response_headers
-Content-Length: 20706
-ETag: "5be17d33-50e2"
+Content-Length: 3717
+ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
@@ -308,8 +306,8 @@ HEAD /test
 --- more_headers
 Accept-Encoding: zstd
 --- response_headers
-Content-Length: 20706
-ETag: "5be17d33-50e2"
+Content-Length: 3717
+ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
