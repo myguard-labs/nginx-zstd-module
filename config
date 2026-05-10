@@ -1,11 +1,11 @@
-# Make sure the module knows it is a submodule.
-ngx_addon_name=ngx_zstd
-. $ngx_addon_dir/filter/config
+_ngx_zstd_root=$ngx_addon_dir
 
-# Make sure the module knows it is a submodule.
-ngx_addon_name=ngx_zstd
-. $ngx_addon_dir/static/config
+ngx_addon_dir=$_ngx_zstd_root/filter
+. $_ngx_zstd_root/filter/config
 
-# The final name for reporting.
+ngx_addon_dir=$_ngx_zstd_root/static
+. $_ngx_zstd_root/static/config
+
+ngx_addon_dir=$_ngx_zstd_root
 ngx_addon_name=ngx_zstd
 
