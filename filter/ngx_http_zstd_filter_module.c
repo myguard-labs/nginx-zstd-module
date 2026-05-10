@@ -213,6 +213,8 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     if (!zlcf->enable
         || (r->headers_out.status < NGX_HTTP_OK         /* < 200 */
+            || r->headers_out.status == NGX_HTTP_NO_CONTENT  /* 204: no body */
+            || r->headers_out.status == 205              /* 205: no body */
             || (r->headers_out.status > 299
                 && r->headers_out.status != NGX_HTTP_FORBIDDEN
                 && r->headers_out.status != NGX_HTTP_NOT_FOUND))
