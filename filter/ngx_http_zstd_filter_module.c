@@ -772,7 +772,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     fd = NGX_INVALID_FILE;
 
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
-    ngx_conf_merge_value(conf->level, prev->level, 1);
+    ngx_conf_merge_value(conf->level, prev->level, 3);
     ngx_conf_merge_value(conf->min_length, prev->min_length, 20);
     ngx_conf_merge_value(conf->max_length, prev->max_length, NGX_CONF_UNSET);
 

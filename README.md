@@ -112,7 +112,7 @@ Enables or disables on-the-fly zstd compression for responses.
 ### zstd_comp_level
 
 **Syntax:** `zstd_comp_level level;`  
-**Default:** `zstd_comp_level 1;`  
+**Default:** `zstd_comp_level 3;`  
 **Context:** `http, server, location`
 
 Sets the zstd compression level. Accepted values depend on the installed zstd library version:
@@ -125,8 +125,8 @@ Sets the zstd compression level. Accepted values depend on the installed zstd li
 
 **Choosing a level:**
 
-* `1` (default) — Fastest compression; suitable for high-throughput APIs or when latency is critical.
-* `3` — Good all-around balance of ratio and speed; the zstd library's own default.
+* `1` — Fastest compression; suitable for high-throughput APIs or when latency is critical.
+* `3` (default) — Good all-around balance of ratio and speed; the zstd library's own default.
 * `6`–`9` — Better ratios with moderate CPU cost; suitable for large, infrequently-changed responses.
 * Negative levels (`-1` to `-5`) — Ultra-fast, for cases where you want some compression with nearly zero overhead.
 
