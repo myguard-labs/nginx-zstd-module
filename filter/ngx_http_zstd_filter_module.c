@@ -13,10 +13,6 @@
 #include "../ngx_http_zstd_common.h"
 
 
-#define NGX_HTTP_ZSTD_FILTER_COMPRESS       0
-#define NGX_HTTP_ZSTD_FILTER_FLUSH          1
-#define NGX_HTTP_ZSTD_FILTER_END            2
-
 #define NGX_HTTP_ZSTD_MAX_DICT_SIZE  (10 * 1024 * 1024)  /* 10 MB limit */
 
 
@@ -62,12 +58,12 @@ typedef struct {
     size_t                       bytes_in;
     size_t                       bytes_out;
 
-    unsigned                     action:2;
     unsigned                     last:1;
     unsigned                     redo:1;
     unsigned                     flush:1;
     unsigned                     done:1;
     unsigned                     nomem:1;
+    unsigned                     ending:1;   /* endStream in progress */
 } ngx_http_zstd_ctx_t;
 
 
@@ -417,77 +413,73 @@ failed:
 static ngx_int_t
 ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
-    size_t        rc, pos_in, pos_out;
-    const char   *hint;
-    ngx_chain_t  *cl;
-    ngx_buf_t    *b;
+    size_t            rc, pos_in, pos_out;
+    ZSTD_EndDirective directive;
+    ngx_chain_t      *cl;
+    ngx_buf_t        *b;
 
-    ngx_log_debug8(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "zstd compress in: src:%p pos:%ud size: %ud, "
-                   "dst:%p pos:%ud size:%ud flush:%d redo:%d",
-                   ctx->buffer_in.src, ctx->buffer_in.pos, ctx->buffer_in.size,
+    ngx_log_debug6(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "zstd compress in: src:%p pos:%uz size:%uz "
+                   "dst:%p pos:%uz size:%uz",
+                   ctx->buffer_in.src,  ctx->buffer_in.pos,
+                   ctx->buffer_in.size,
                    ctx->buffer_out.dst, ctx->buffer_out.pos,
-                   ctx->buffer_out.size, ctx->flush, ctx->redo);
+                   ctx->buffer_out.size);
 
-    pos_in = ctx->buffer_in.pos;
+    pos_in  = ctx->buffer_in.pos;
     pos_out = ctx->buffer_out.pos;
 
-    switch (ctx->action) {
-
-    case NGX_HTTP_ZSTD_FILTER_FLUSH:
-        hint = "ZSTD_flushStream() ";
-        rc = ZSTD_flushStream(ctx->cstream, &ctx->buffer_out);
-        break;
-
-    case NGX_HTTP_ZSTD_FILTER_END:
-        hint = "ZSTD_endStream() ";
-        rc = ZSTD_endStream(ctx->cstream, &ctx->buffer_out);
-        break;
-
-    default:
-        hint = "ZSTD_compressStream() ";
-        rc = ZSTD_compressStream(ctx->cstream, &ctx->buffer_out,
-                                 &ctx->buffer_in);
-        break;
+    if (ctx->ending) {
+        directive = ZSTD_e_end;
+    } else if (ctx->flush) {
+        directive = ZSTD_e_flush;
+    } else {
+        directive = ZSTD_e_continue;
     }
+
+    rc = ZSTD_compressStream2(ctx->cstream,
+                              &ctx->buffer_out, &ctx->buffer_in, directive);
 
     if (ZSTD_isError(rc)) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                      "%s failed: %s", hint, ZSTD_getErrorName(rc));
-
+                      "zstd: ZSTD_compressStream2() failed: %s",
+                      ZSTD_getErrorName(rc));
         return NGX_ERROR;
     }
 
     ngx_log_debug6(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "zstd compress out: src:%p pos:%ud size: %ud, "
-                   "dst:%p pos:%ud size:%ud",
-                   ctx->buffer_in.src, ctx->buffer_in.pos, ctx->buffer_in.size,
+                   "zstd compress out: src:%p pos:%uz size:%uz "
+                   "dst:%p pos:%uz size:%uz",
+                   ctx->buffer_in.src,  ctx->buffer_in.pos,
+                   ctx->buffer_in.size,
                    ctx->buffer_out.dst, ctx->buffer_out.pos,
                    ctx->buffer_out.size);
 
-    ctx->in_buf->pos += ctx->buffer_in.pos - pos_in;
+    ctx->in_buf->pos   += ctx->buffer_in.pos  - pos_in;
     ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
     ctx->redo = 0;
 
     if (rc > 0) {
-        if (ctx->action == NGX_HTTP_ZSTD_FILTER_COMPRESS) {
-            ctx->action = NGX_HTTP_ZSTD_FILTER_FLUSH;
+        /*
+         * rc > 0: zstd still has internal data to flush.  Keep calling with
+         * the same directive until rc == 0 (all output drained).
+         */
+        ctx->redo = 1;
+
+    } else if (ctx->last && !ctx->ending
+               && ctx->buffer_in.pos >= ctx->buffer_in.size
+               && ctx->in == NULL)
+    {
+        /* All input consumed; switch to end-stream on next iteration. */
+        ctx->ending = 1;
+        ctx->redo   = 1;
+
+        if (ngx_buf_size(ctx->out_buf) == 0) {
+            return NGX_AGAIN;
         }
 
-        ctx->redo = 1;
-
-    } else if (ctx->last && ctx->action != NGX_HTTP_ZSTD_FILTER_END
-              && ctx->buffer_in.pos >= ctx->buffer_in.size
-              && ctx->in == NULL) {
-        ctx->redo = 1;
-        ctx->action = NGX_HTTP_ZSTD_FILTER_END;
-
-        /* pending to call the ZSTD_endStream() */
-
-        return NGX_AGAIN;
-
-    } else if (ctx->action != NGX_HTTP_ZSTD_FILTER_END) {
-        ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS; /* restore */
+    } else if (!ctx->ending) {
+        ctx->flush = 0;
     }
 
     if (ngx_buf_size(ctx->out_buf) == 0) {
@@ -501,29 +493,27 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     b = ctx->out_buf;
 
-    if (rc == 0
-        && (ctx->flush
-            || (ctx->last && ctx->action == NGX_HTTP_ZSTD_FILTER_END))) {
+    if (rc == 0 && (ctx->flush || (ctx->ending && ctx->last))) {
         r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
 
-        b->flush = ctx->flush;
-        b->last_buf = ctx->last;
+        b->flush    = ctx->flush && !ctx->last;
+        b->last_buf = ctx->last && ctx->ending && rc == 0;
 
-        ctx->done = ctx->last;
+        ctx->done  = b->last_buf;
         ctx->flush = 0;
     }
 
     ctx->bytes_out += ngx_buf_size(b);
 
     cl->next = NULL;
-    cl->buf = b;
+    cl->buf  = b;
 
     *ctx->last_out = cl;
-    ctx->last_out = &cl->next;
+    ctx->last_out  = &cl->next;
 
     ngx_memzero(&ctx->buffer_out, sizeof(ZSTD_outBuffer));
 
-    return ctx->last && rc == 0 ? NGX_OK : NGX_AGAIN;
+    return (ctx->last && ctx->ending && rc == 0) ? NGX_OK : NGX_AGAIN;
 }
 
 
