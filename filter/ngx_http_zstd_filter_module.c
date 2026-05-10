@@ -37,6 +37,14 @@ typedef struct {
 } ngx_http_zstd_loc_conf_t;
 
 
+/* PR #49: Action state machine for compression lifecycle */
+typedef enum {
+    NGX_HTTP_ZSTD_FILTER_COMPRESS = 0,
+    NGX_HTTP_ZSTD_FILTER_FLUSH    = 1,
+    NGX_HTTP_ZSTD_FILTER_END      = 2,
+} ngx_http_zstd_action_t;
+
+
 typedef struct {
     ngx_chain_t                 *in;
     ngx_chain_t                 *free;
@@ -62,6 +70,9 @@ typedef struct {
     unsigned                     done:1;
     unsigned                     nomem:1;
     unsigned                     ending:1;   /* endStream in progress */
+
+    /* PR #49: Action state machine (COMPRESS, FLUSH, or END) */
+    ngx_http_zstd_action_t       action;
 } ngx_http_zstd_ctx_t;
 
 
@@ -449,9 +460,10 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     pos_in  = ctx->buffer_in.pos;
     pos_out = ctx->buffer_out.pos;
 
-    if (ctx->ending) {
+    /* Determine the compression directive based on action state */
+    if (ctx->action == NGX_HTTP_ZSTD_FILTER_END) {
         directive = ZSTD_e_end;
-    } else if (ctx->flush) {
+    } else if (ctx->action == NGX_HTTP_ZSTD_FILTER_FLUSH) {
         directive = ZSTD_e_flush;
     } else {
         directive = ZSTD_e_continue;
@@ -479,27 +491,38 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
     ctx->redo = 0;
 
+    /* PR #49: State machine logic for action transitions */
     if (rc > 0) {
         /*
-         * rc > 0: zstd still has internal data to flush.  Keep calling with
-         * the same directive until rc == 0 (all output drained).
+         * rc > 0: zstd has buffered data. For COMPRESS, transition to FLUSH
+         * to drain libzstd's internal buffers. For FLUSH/END, keep the action.
          */
+        if (ctx->action == NGX_HTTP_ZSTD_FILTER_COMPRESS) {
+            ctx->action = NGX_HTTP_ZSTD_FILTER_FLUSH;
+        }
         ctx->redo = 1;
 
-    } else if (ctx->last && !ctx->ending
+    } else if (ctx->last && ctx->action != NGX_HTTP_ZSTD_FILTER_END
                && ctx->buffer_in.pos >= ctx->buffer_in.size
                && ctx->in == NULL)
     {
-        /* All input consumed; switch to end-stream on next iteration. */
-        ctx->ending = 1;
+        /*
+         * PR #49: All input consumed; transition to END only when:
+         * - last flag is set (we know this is the final chunk)
+         * - input buffer fully drained (no more bytes to feed libzstd)
+         * - no more chain links queued (all input streams exhausted)
+         * This prevents premature END transitions that cause 131072-byte truncation.
+         */
+        ctx->action = NGX_HTTP_ZSTD_FILTER_END;
         ctx->redo   = 1;
 
         if (ngx_buf_size(ctx->out_buf) == 0) {
             return NGX_AGAIN;
         }
 
-    } else if (!ctx->ending) {
-        ctx->flush = 0;
+    } else if (ctx->action != NGX_HTTP_ZSTD_FILTER_END) {
+        /* Restore to COMPRESS after FLUSH drains (unless transitioning to END) */
+        ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS;
     }
 
     if (ngx_buf_size(ctx->out_buf) == 0) {
@@ -512,12 +535,22 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     }
 
     b = ctx->out_buf;
+    
+    /* PR #23: Allocate fresh buffer if output buffer is empty when transitioning
+     * state (e.g., during FLUSH→COMPRESS restore). This prevents infinite loops
+     * on empty buffers. */
+    if (ngx_buf_size(b) == 0) {
+        b = ngx_calloc_buf(r->pool);
+        if (b == NULL) {
+            return NGX_ERROR;
+        }
+    }
 
-    if (rc == 0 && (ctx->flush || (ctx->ending && ctx->last))) {
+    if (rc == 0 && (ctx->flush || (ctx->last && ctx->action == NGX_HTTP_ZSTD_FILTER_END))) {
         r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
 
-        b->flush    = ctx->flush && !ctx->last;
-        b->last_buf = ctx->last && ctx->ending && rc == 0;
+        b->flush = ctx->flush && !ctx->last;
+        b->last_buf = ctx->last && ctx->action == NGX_HTTP_ZSTD_FILTER_END && rc == 0;
 
         ctx->done  = b->last_buf;
         ctx->flush = 0;
@@ -533,7 +566,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     ngx_memzero(&ctx->buffer_out, sizeof(ZSTD_outBuffer));
 
-    return (ctx->last && ctx->ending && rc == 0) ? NGX_OK : NGX_AGAIN;
+    return (ctx->last && ctx->action == NGX_HTTP_ZSTD_FILTER_END && rc == 0) ? NGX_OK : NGX_AGAIN;
 }
 
 
