@@ -148,7 +148,7 @@ END
     fi
 fi
 
-HTTP_ZSTD_SRCS="$ngx_addon_dir/filter/ngx_http_zstd_filter_module.c"
+HTTP_ZSTD_SRCS="$ngx_addon_dir/ngx_http_zstd_filter_module.c"
 
 ngx_addon_name=ngx_http_zstd_filter_module
 ngx_module_type=HTTP_FILTER
