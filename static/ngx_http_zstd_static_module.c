@@ -251,6 +251,12 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     ngx_str_set(&h->value, "zstd");
     r->headers_out.content_encoding = h;
 
+    /* Byte ranges are meaningless on a compressed body: offsets in the
+     * .zst file do not correspond to positions in the original content.
+     * RFC 9110 §14.2 — clear Accept-Ranges so clients do not request
+     * ranges that would yield undecipherable fragments. */
+    ngx_http_clear_accept_ranges(r);
+
     b = ngx_calloc_buf(r->pool);
     if (b == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
