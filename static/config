@@ -1,7 +1,7 @@
 ngx_feature_incs="#include <zstd.h>"
 ngx_feature_test="(void) ZSTD_createCCtx();"
 ngx_feature_libs=
-ngx_feature_run=yes
+ngx_feature_run=no
 
 ngx_zstd_opt_I=
 ngx_zstd_opt_L=
