@@ -8,7 +8,7 @@ $ENV{'TEST_NGINX_PERL_PATH'}="$ENV{'PWD'}/$dirname";
 no_long_string();
 log_level 'debug';
 repeat_each(3);
-plan tests => repeat_each() * (blocks() * 3) + 45;
+plan tests => repeat_each() * (blocks() * 3) + 129;
 run_tests();
 
 

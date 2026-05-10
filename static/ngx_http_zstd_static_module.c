@@ -135,7 +135,6 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     *p++ = 'z';
     *p++ = 's';
     *p++ = 't';
-    *p++ = 't';
     *p = '\0';
 
     path.len = p - path.data;
@@ -224,7 +223,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         return rc;
     }
 
-    log->action = "sending response to client";
+    log->action = (char *) "sending response to client";
 
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.content_length_n = of.size;
@@ -308,9 +307,7 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    if (ngx_memcmp(ae->value.data, "zstd", 4) != 0
-        && ngx_http_zstd_accept_encoding(&ae->value) != NGX_OK)
-    {
+    if (ngx_http_zstd_accept_encoding(&ae->value) != NGX_OK) {
         return NGX_DECLINED;
     }
 
@@ -327,7 +324,7 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
 {
     u_char  *p;
 
-    p = ngx_strcasestrn(ae->data, "zstd", sizeof("zstd") - 1);
+    p = ngx_strcasestrn(ae->data, (char *) "zstd", sizeof("zstd") - 2);
     if (p == NULL) {
         return NGX_DECLINED;
     }

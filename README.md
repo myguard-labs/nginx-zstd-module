@@ -1,3 +1,5 @@
+[![CI](https://github.com/eilandert/zstd-nginx-module/actions/workflows/ci.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/ci.yml)
+
 # Name
 zstd-nginx-module - Nginx module for the [Zstandard compression](https://facebook.github.io/zstd/).
 

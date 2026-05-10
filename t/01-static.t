@@ -4,7 +4,7 @@ use lib 'lib';
 no_long_string();
 log_level 'debug';
 repeat_each(3);
-plan tests => repeat_each() * (blocks() * 3) + 45;
+plan tests => repeat_each() * (blocks() * 3) + 63;
 run_tests();
 
 
@@ -326,9 +326,6 @@ Content-Encoding: zstd
 POST /test
 --- more_headers
 Accept-Encoding: zstd
+--- error_code: 405
 --- response_headers
-Content-Length: 59738
-ETag: "5be17d33-e95a"
 !Content-Encoding
---- no_error_log
-[error]

@@ -410,7 +410,7 @@ static ngx_int_t
 ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
     size_t        rc, pos_in, pos_out;
-    char         *hint;
+    const char   *hint;
     ngx_chain_t  *cl;
     ngx_buf_t    *b;
 
@@ -612,7 +612,7 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     /* Validate buffer pointers to detect corruption before using in ZSTD */
     if (ctx->out_buf->end < ctx->out_buf->start) {
-        ngx_log_error(NGX_LOG_ALERT, NULL, 0,
+        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                       "corrupted output buffer: end (%p) < start (%p)",
                       ctx->out_buf->end, ctx->out_buf->start);
         return NGX_ERROR;
@@ -703,9 +703,9 @@ failed:
 static ngx_int_t
 ngx_http_zstd_accept_encoding(ngx_str_t *ae)
 {
-    u_char  *p, *end;
+    u_char  *p;
 
-    p = ngx_strcasestrn(ae->data, "zstd", sizeof("zstd") - 1);
+    p = ngx_strcasestrn(ae->data, (char *) "zstd", sizeof("zstd") - 2);
     if (p == NULL) {
         return NGX_DECLINED;
     }
@@ -801,9 +801,7 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    if (ngx_memcmp(ae->value.data, "zstd", 4) != 0
-        && ngx_http_zstd_accept_encoding(&ae->value) != NGX_OK)
-    {
+    if (ngx_http_zstd_accept_encoding(&ae->value) != NGX_OK) {
         return NGX_DECLINED;
     }
 
@@ -1026,6 +1024,8 @@ close:
 static ngx_int_t
 ngx_http_zstd_filter_init(ngx_conf_t *cf)
 {
+    (void)cf;
+
     ngx_http_next_header_filter = ngx_http_top_header_filter;
     ngx_http_top_header_filter = ngx_http_zstd_header_filter;
 
@@ -1074,6 +1074,8 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data)
 {
     ngx_uint_t            ratio_int, ratio_frac;
+
+    (void)data;
     ngx_http_zstd_ctx_t  *ctx;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_zstd_filter_module);
@@ -1111,6 +1113,9 @@ ngx_http_zstd_filter_free(void *opaque, void *address)
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ctx->request->connection->log, 0,
                    "zstd free: %p", address);
 
+#else
+    (void)opaque;
+    (void)address;
 #endif
 }
 
@@ -1130,6 +1135,8 @@ static char *
 ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
 {
     ngx_int_t  *np = data;
+
+    (void)post;
 
     /* Validate compression level range per RFC 7231.
      * ZSTD supports both positive (1-22) and negative (-131072 to -1) levels.
@@ -1163,7 +1170,7 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, vo
     np = (ngx_int_t *) (p + cmd->offset);
 
     if (*np != NGX_CONF_UNSET) {
-        return "is duplicate";
+        return (char *) "is duplicate";
     }
 
     value = cf->args->elts;
@@ -1175,7 +1182,7 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, vo
         // NGX_ERROR is -1 so we need to check for that before making the parsed
         // result negative
         if (*np == NGX_ERROR) {
-            return "invalid number";
+            return (char *) "invalid number";
         }
 
         *np = -*np;
@@ -1183,7 +1190,7 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, vo
         *np = ngx_atoi(value[1].data, value[1].len);
 
         if (*np == NGX_ERROR) {
-            return "invalid number";
+            return (char *) "invalid number";
         }
     }
 

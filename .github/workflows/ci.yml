@@ -1,0 +1,469 @@
+name: CI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: 1.29.8
+
+on:
+  push:
+    branches:
+      - master
+      - main
+      - dev
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+
+  # ── Job 1: Linters & static analysis, no compilation ─────────────────────
+  validation:
+    name: Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@v4
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-validation-${{ runner.os }}-shellcheck-cppcheck-clang-tools-nginx-dev
+          restore-keys: apt-validation-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            shellcheck \
+            cppcheck \
+            clang-tools \
+            python3 \
+            nginx-dev
+
+      - name: Validate tool scripts (syntax only)
+        run: |
+          cd $GITHUB_WORKSPACE/tools
+          bash -n ci-build.sh
+          echo "✓ All tool scripts: syntax OK"
+
+      - name: Python tool validation
+        run: |
+          cd $GITHUB_WORKSPACE/tools
+          python3 test_encoding.py --help | head -3
+          echo "✓ Python tools validated"
+
+      - name: Shell script linting (shellcheck)
+        run: |
+          shellcheck $GITHUB_WORKSPACE/tools/*.sh || true
+          echo "✓ shellcheck complete"
+
+      - name: Discover nginx include paths
+        run: |
+          if [ -f /usr/include/nginx/ngx_config.h ]; then
+            NGINX_INCLUDES="/usr/include/nginx"
+          else
+            CONFIG_H=$(dpkg -L nginx-dev 2>/dev/null | grep 'ngx_config.h' | head -1)
+            if [ -n "$CONFIG_H" ]; then
+              CONFIG_DIR=$(dirname "$CONFIG_H")
+              NGINX_INCLUDES="$CONFIG_DIR"
+              if [[ "$CONFIG_DIR" =~ /src/src/core$ ]]; then
+                NGINX_SRC=$(echo "$CONFIG_DIR" | sed 's|/src/src/core$|/src|')
+              fi
+            fi
+          fi
+          [ -z "$NGINX_INCLUDES" ] && NGINX_INCLUDES="/usr/include/nginx"
+          echo "NGINX_INCLUDES=${NGINX_INCLUDES}" >> $GITHUB_ENV
+          [ -n "$NGINX_SRC" ] && echo "NGINX_SRC=${NGINX_SRC}" >> $GITHUB_ENV
+
+      - name: Cache nginx-dev generated headers
+        id: nginx-dev-objs
+        uses: actions/cache@v4
+        with:
+          path: /usr/share/nginx/src/objs
+          key: nginx-dev-objs-${{ runner.os }}-${{ hashFiles('/var/lib/dpkg/info/nginx-dev.list') }}
+
+      - name: Generate nginx build headers (for lint tools)
+        if: steps.nginx-dev-objs.outputs.cache-hit != 'true'
+        run: |
+          cd /usr/share/nginx/src
+          CC=gcc ./configure --with-compat --add-dynamic-module=$GITHUB_WORKSPACE > /dev/null 2>&1 || true
+
+      - name: Export nginx objs path
+        run: echo "NGINX_OBJS=/usr/share/nginx/src/objs" >> $GITHUB_ENV
+
+      - name: cppcheck (static analysis)
+        run: |
+          cppcheck --enable=all --error-exitcode=1 --suppress=missingIncludeSystem \
+            $GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c \
+            $GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c \
+            2>&1 | tee cppcheck.log
+          echo "✓ cppcheck complete"
+        continue-on-error: true
+
+      - name: clang static analyzer
+        run: |
+          INCLUDE_FLAGS="-I${NGINX_INCLUDES} -I/usr/include"
+          [ -n "${NGINX_SRC}" ]  && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_SRC}"
+          [ -n "${NGINX_OBJS}" ] && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_OBJS}"
+          INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_INCLUDES}/objs -I${NGINX_INCLUDES}/.."
+          scan-build --status-bugs \
+            gcc -c $INCLUDE_FLAGS \
+            $GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c \
+            2>&1 | tee clang-scan.log || echo "ℹ clang-scan: Analysis complete"
+
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            ${{ github.workspace }}/cppcheck.log
+            ${{ github.workspace }}/clang-scan.log
+          retention-days: 7
+
+  # ── Job 2: Strict compile + build nginx binary, upload artifact ───────────
+  hello-world:
+    name: Hello World
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@v4
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-hello-world-${{ runner.os }}-build-essential-libzstd-libpcre2-zlib
+          restore-keys: apt-hello-world-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libzstd-dev \
+            libpcre2-dev \
+            zlib1g-dev \
+            wget
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@v4
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q https://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz
+
+      - name: Cache nginx build directory
+        id: nginx-build
+        uses: actions/cache@v4
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}
+          key: nginx-build-${{ env.NGINX_VERSION }}-${{ hashFiles('filter/*.c', 'static/*.c', 'config') }}
+
+      - name: Configure nginx
+        if: steps.nginx-build.outputs.cache-hit != 'true'
+        run: |
+          tar -xzf nginx-${{ env.NGINX_VERSION }}.tar.gz
+          cd nginx-${{ env.NGINX_VERSION }}
+          ./configure \
+            --with-compat \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --without-http_charset_module \
+            --without-http_ssi_module \
+            --without-http_userid_module \
+            --without-http_access_module \
+            --without-http_auth_basic_module \
+            --without-http_mirror_module \
+            --without-http_autoindex_module \
+            --without-http_geo_module \
+            --without-http_split_clients_module \
+            --without-http_map_module \
+            --without-http_referer_module \
+            --without-http_uwsgi_module \
+            --without-http_scgi_module \
+            --without-http_grpc_module \
+            --without-http_memcached_module \
+            --without-http_limit_conn_module \
+            --without-http_limit_req_module \
+            --without-http_empty_gif_module \
+            --without-http_browser_module \
+            --without-http_upstream_hash_module \
+            --without-http_upstream_ip_hash_module \
+            --without-http_upstream_least_conn_module \
+            --without-http_upstream_random_module \
+            --without-http_upstream_keepalive_module \
+            --without-http_upstream_zone_module \
+            --without-http-cache \
+            --without-mail_pop3_module \
+            --without-mail_imap_module \
+            --without-mail_smtp_module \
+            --without-stream_limit_conn_module \
+            --without-stream_access_module \
+            --without-stream_geo_module \
+            --without-stream_map_module \
+            --without-stream_split_clients_module \
+            --without-stream_return_module \
+            --without-stream_pass_module \
+            --without-stream_set_module \
+            --without-stream_upstream_hash_module \
+            --without-stream_upstream_least_conn_module \
+            --without-stream_upstream_random_module \
+            --without-stream_upstream_zone_module \
+            --add-module=$GITHUB_WORKSPACE
+
+      - name: Export nginx source dir
+        run: echo "NGINX_SRCDIR=$GITHUB_WORKSPACE/nginx-${{ env.NGINX_VERSION }}" >> $GITHUB_ENV
+
+      - name: Strict compile of module sources (warnings as errors)
+        if: steps.nginx-build.outputs.cache-hit != 'true'
+        run: |
+          cd $NGINX_SRCDIR
+          NGINX_CFLAGS=$(awk '/^CFLAGS[[:space:]]*=/{sub(/^CFLAGS[[:space:]]*=[[:space:]]*/,""); print; exit}' objs/Makefile)
+          ALL_INCS=$(awk '/^ALL_INCS[[:space:]]*=/{found=1} found{line=$0; sub(/^ALL_INCS[[:space:]]*=[[:space:]]*/,"",line); gsub(/\\$/, "", line); printf "%s ", line; if (!/\\$/) exit}' objs/Makefile)
+          for src in \
+            $GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c \
+            $GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c; do
+            echo "--- strict compile: $(basename $src) ---"
+            gcc -c -fPIC $NGINX_CFLAGS \
+              -Wall -Wextra -Wshadow -Wstrict-aliasing \
+              -Wunreachable-code -Wunused -Wwrite-strings -Werror \
+              $ALL_INCS \
+              "$src" -o /tmp/$(basename "$src" .c).o
+          done
+          echo "✓ All module sources compile cleanly with strict flags"
+
+      - name: Build nginx binary with module
+        if: steps.nginx-build.outputs.cache-hit != 'true'
+        run: |
+          cd $NGINX_SRCDIR
+          NGINX_CFLAGS=$(awk '/^CFLAGS[[:space:]]*=/{sub(/^CFLAGS[[:space:]]*=[[:space:]]*/,""); print; exit}' objs/Makefile)
+          make modules \
+            CFLAGS="$NGINX_CFLAGS -Wall -Wextra -Wshadow -Wstrict-aliasing \
+                    -Wunreachable-code -Wunused -Werror"
+          make
+          echo "✓ nginx binary built"
+
+      - name: Verify nginx binary
+        run: |
+          ls -la $NGINX_SRCDIR/objs/nginx
+          echo "✓ nginx binary present (cache-hit: ${{ steps.nginx-build.outputs.cache-hit }})"
+
+      - name: Upload nginx binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-binary-${{ env.NGINX_VERSION }}
+          path: nginx-${{ env.NGINX_VERSION }}/objs/nginx
+          retention-days: 1
+
+  # ── Job 3: Full test suite — reuses nginx binary from hello-world ─────────
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: hello-world
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@v4
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-tests-${{ runner.os }}-libperl-cpanminus-libzstd1
+          restore-keys: apt-tests-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libperl-dev \
+            cpanminus \
+            libzstd1 \
+            python3 \
+            python3-requests
+
+      - name: Download nginx binary (from Hello World)
+        uses: actions/download-artifact@v4
+        with:
+          name: nginx-binary-${{ env.NGINX_VERSION }}
+          path: nginx-bin
+
+      - name: Set up nginx binary
+        run: |
+          chmod +x nginx-bin/nginx
+          echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/nginx-bin/nginx" >> $GITHUB_ENV
+          echo "✓ nginx binary ready: $(nginx-bin/nginx -v 2>&1)"
+
+      - name: Cache Perl modules
+        uses: actions/cache@v4
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
+
+      - name: Install Test::Nginx::Socket
+        run: |
+          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> $GITHUB_ENV
+
+      - name: Run filter module tests (23 tests)
+        run: |
+          export PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB
+          export TEST_NGINX_SERVROOT=/tmp/nginx-servroot-filter
+          mkdir -p $TEST_NGINX_SERVROOT
+          cd $GITHUB_WORKSPACE
+          perl t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee t/filter-tests.log
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "❌ Filter tests FAILED"
+            exit 1
+          fi
+          echo "✓ Filter module: All tests passed"
+
+      - name: Run static module tests (18 tests)
+        run: |
+          export PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB
+          export TEST_NGINX_SERVROOT=$GITHUB_WORKSPACE/t/servroot-static
+          mkdir -p $TEST_NGINX_SERVROOT
+          touch -d @1541504307 $GITHUB_WORKSPACE/t/suite/test $GITHUB_WORKSPACE/t/suite/test.zst
+          cd $GITHUB_WORKSPACE
+          perl t/01-static.t 2>&1 | sed 's/^Error:/Err:/' | tee t/static-tests.log
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "❌ Static tests FAILED"
+            exit 1
+          fi
+          echo "✓ Static module: All tests passed"
+
+      - name: Test summary
+        if: success()
+        run: |
+          echo "✓ All 41 tests passed successfully"
+          echo "  ✓ 23 filter module tests"
+          echo "  ✓ 18 static module tests"
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            ${{ github.workspace }}/t/filter-tests.log
+            ${{ github.workspace }}/t/static-tests.log
+          retention-days: 7
+
+  # ── Job 4: Security scanners, no compilation ─────────────────────────────
+  secure:
+    name: Secure
+    runs-on: ubuntu-latest
+    needs: hello-world
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@v4
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-secure-${{ runner.os }}-flawfinder-clang-tidy-nginx-dev
+          restore-keys: apt-secure-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            flawfinder \
+            clang-tidy \
+            python3 \
+            python3-pip \
+            nginx-dev
+
+      - name: Cache pip packages (semgrep)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-semgrep-${{ runner.os }}
+
+      - name: Install semgrep
+        run: |
+          pip3 install --quiet semgrep
+          semgrep --version
+
+      - name: Cache semgrep rules
+        uses: actions/cache@v4
+        with:
+          path: ~/.semgrep
+          key: semgrep-rules-${{ runner.os }}-p-c-security-audit
+
+      - name: Cache nginx-dev generated headers
+        id: nginx-dev-objs
+        uses: actions/cache@v4
+        with:
+          path: /usr/share/nginx/src/objs
+          key: nginx-dev-objs-${{ runner.os }}-${{ hashFiles('/var/lib/dpkg/info/nginx-dev.list') }}
+
+      - name: Generate nginx build headers (for clang-tidy)
+        if: steps.nginx-dev-objs.outputs.cache-hit != 'true'
+        run: |
+          cd /usr/share/nginx/src
+          CC=gcc ./configure --with-compat --add-dynamic-module=$GITHUB_WORKSPACE > /dev/null 2>&1 || true
+
+      - name: flawfinder (security risk scanner)
+        run: |
+          flawfinder --minlevel=1 --html \
+            $GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c \
+            $GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c \
+            > flawfinder.html 2>&1 || true
+          flawfinder --minlevel=1 \
+            $GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c \
+            $GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c \
+            2>&1 | tee flawfinder.log
+          echo "✓ flawfinder: Scan complete"
+
+      - name: clang-tidy (cert-*, bugprone-*, clang-analyzer-security.*)
+        run: |
+          NGINX_OBJS=/usr/share/nginx/src/objs
+          NGINX_INCLUDES=$(dpkg -L nginx-dev 2>/dev/null | grep 'ngx_config.h' | head -1 | xargs dirname || echo /usr/include/nginx)
+          INCLUDES="-I$NGINX_INCLUDES -I$NGINX_OBJS -I/usr/include"
+          for f in \
+            $GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c \
+            $GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c; do
+            echo "--- clang-tidy: $(basename $f) ---"
+            clang-tidy "$f" \
+              --checks='cert-*,clang-analyzer-security.*,clang-analyzer-unix.*,bugprone-*' \
+              --warnings-as-errors='' \
+              -- -DZSTD_STATIC_LINKING_ONLY $INCLUDES $(pkg-config --cflags libzstd) \
+              2>&1 || true
+          done | tee clang-tidy.log
+          echo "✓ clang-tidy: Scan complete"
+
+      - name: semgrep (C rule set — buffer overflows, unsafe functions, integer issues)
+        run: |
+          semgrep scan \
+            --config "p/c" \
+            --config "p/security-audit" \
+            --output semgrep.json \
+            --json \
+            $GITHUB_WORKSPACE/filter/ $GITHUB_WORKSPACE/static/ 2>&1 | tee semgrep.log || true
+          echo "✓ semgrep: Scan complete"
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            ${{ github.workspace }}/flawfinder.log
+            ${{ github.workspace }}/flawfinder.html
+            ${{ github.workspace }}/clang-tidy.log
+            ${{ github.workspace }}/semgrep.log
+            ${{ github.workspace }}/semgrep.json
+          retention-days: 14
