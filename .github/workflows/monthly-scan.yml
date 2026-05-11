@@ -1,0 +1,72 @@
+name: Monthly Security Scan
+
+on:
+  schedule:
+    - cron: '0 3 1 * *'
+  workflow_dispatch:
+
+jobs:
+  codeql:
+    name: CodeQL (dataflow)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libzstd-dev libpcre2-dev zlib1g-dev wget
+
+      - name: Download nginx source
+        run: wget -q https://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz
+        env:
+          NGINX_VERSION: 1.29.8
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-extended
+
+      - name: Build (CodeQL traceert de compile)
+        run: |
+          tar -xzf nginx-*.tar.gz
+          cd nginx-*/
+          ./configure \
+            --with-compat \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $(pkg-config --cflags libzstd)" \
+            --with-ld-opt="$(pkg-config --libs libzstd)" \
+            --add-module=$GITHUB_WORKSPACE
+          make modules
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          upload: true  # → Security → Code scanning tab
+
+  trivy:
+    name: Trivy (CVE in libzstd)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for CVEs
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy.sarif
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif

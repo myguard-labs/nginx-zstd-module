@@ -110,8 +110,8 @@ This filter module compresses responses on the fly using zstd. It runs after the
 
 ### zstd
 
-**Syntax:** `zstd on | off;`  
-**Default:** `zstd off;`  
+**Syntax:** `zstd on | off;`
+**Default:** `zstd off;`
 **Context:** `http, server, location, if in location`
 
 Enables or disables on-the-fly zstd compression for responses.
@@ -120,8 +120,8 @@ Enables or disables on-the-fly zstd compression for responses.
 
 ### zstd_comp_level
 
-**Syntax:** `zstd_comp_level level;`  
-**Default:** `zstd_comp_level 3;`  
+**Syntax:** `zstd_comp_level level;`
+**Default:** `zstd_comp_level 3;`
 **Context:** `http, server, location`
 
 Sets the zstd compression level. Accepted values depend on the installed zstd library version:
@@ -145,8 +145,8 @@ For most web-serving workloads, levels `1`–`3` are recommended. Avoid high lev
 
 ### zstd_min_length
 
-**Syntax:** `zstd_min_length length;`  
-**Default:** `zstd_min_length 20;`  
+**Syntax:** `zstd_min_length length;`
+**Default:** `zstd_min_length 20;`
 **Context:** `http, server, location`
 
 Sets the minimum response size (in bytes) required for compression to apply. The size is taken from the `Content-Length` response header; responses without `Content-Length` are always eligible.
@@ -163,8 +163,8 @@ zstd_min_length 1000;  # skip compression for responses smaller than 1KB
 
 ### zstd_max_length
 
-**Syntax:** `zstd_max_length length;`  
-**Default:** `—` (no limit)  
+**Syntax:** `zstd_max_length length;`
+**Default:** `—` (no limit)
 **Context:** `http, server, location`
 
 Sets the maximum response size that will be compressed. Responses larger than this value are passed through uncompressed. The size is taken from the `Content-Length` response header.
@@ -183,8 +183,8 @@ zstd_max_length 10m;  # don't compress responses larger than 10 MB
 
 ### zstd_types
 
-**Syntax:** `zstd_types mime-type ...;`  
-**Default:** `zstd_types text/html;`  
+**Syntax:** `zstd_types mime-type ...;`
+**Default:** `zstd_types text/html;`
 **Context:** `http, server, location`
 
 Compresses responses with the listed MIME types in addition to `text/html`. Use `*` to match all MIME types.
@@ -211,8 +211,8 @@ zstd_types
 
 ### zstd_buffers
 
-**Syntax:** `zstd_buffers number size;`  
-**Default:** `zstd_buffers 32 4k;` (on 4 KB pages) or `zstd_buffers 16 8k;` (on 8 KB pages)  
+**Syntax:** `zstd_buffers number size;`
+**Default:** `zstd_buffers 32 4k;` (on 4 KB pages) or `zstd_buffers 16 8k;` (on 8 KB pages)
 **Context:** `http, server, location`
 
 Configures the number and size of output buffers used during compression. The total buffer space is `number × size`. The defaults give a fixed 128 KB of buffer space regardless of platform page size, which is appropriate for most workloads.
@@ -223,9 +223,9 @@ Increasing these values allows larger chunks to be accumulated before writing, p
 
 ### zstd_target_cblock_size
 
-**Syntax:** `zstd_target_cblock_size size;`  
-**Default:** `—` (disabled, uses ZSTD library defaults)  
-**Context:** `http, server, location`  
+**Syntax:** `zstd_target_cblock_size size;`
+**Default:** `—` (disabled, uses ZSTD library defaults)
+**Context:** `http, server, location`
 **Requires:** libzstd ≥ v1.5.6
 
 Sets the target compressed block size for zstd frames. Controlling block size improves incremental response parsing, particularly in browsers where CSS/JavaScript in the response head must be available as soon as possible.
@@ -256,8 +256,8 @@ http {
 
 ### zstd_dict_file
 
-**Syntax:** `zstd_dict_file /path/to/dict;`  
-**Default:** `—`  
+**Syntax:** `zstd_dict_file /path/to/dict;`
+**Default:** `—`
 **Context:** `http`
 
 Loads a pre-trained zstd dictionary for use during compression. Dictionaries can significantly improve compression ratios for small, structurally similar responses (e.g. JSON API responses).
@@ -274,8 +274,8 @@ This module serves pre-compressed `.zst` files in place of the originals, withou
 
 ### zstd_static
 
-**Syntax:** `zstd_static on | off | always;`  
-**Default:** `zstd_static off;`  
+**Syntax:** `zstd_static on | off | always;`
+**Default:** `zstd_static off;`
 **Context:** `http, server, location`
 
 Controls how pre-compressed `.zst` files are served.
