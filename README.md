@@ -1,4 +1,5 @@
 [![CI](https://github.com/eilandert/zstd-nginx-module/actions/workflows/ci.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/eilandert/zstd-nginx-module/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/github-code-scanning/codeql)
 
 # zstd-nginx-module
 
