@@ -291,7 +291,8 @@ jobs:
             cpanminus \
             libzstd1 \
             python3 \
-            python3-requests
+            python3-requests \
+            zstd
 
       - name: Download nginx binary (from Hello World)
         uses: actions/download-artifact@v4
@@ -343,12 +344,21 @@ jobs:
           fi
           echo "✓ Static module: All tests passed"
 
+      - name: Run truncation smoke test
+        run: |
+          cd $GITHUB_WORKSPACE
+          python3 tools/test_encoding.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18080
+          echo "✓ Truncation smoke test passed"
+
       - name: Test summary
         if: success()
         run: |
-          echo "✓ All 41 tests passed successfully"
+          echo "✓ All 41 Perl tests passed successfully"
           echo "  ✓ 23 filter module tests"
           echo "  ✓ 18 static module tests"
+          echo "  ✓ 1 JavaScript truncation smoke test"
 
       - name: Upload test logs on failure
         if: failure()

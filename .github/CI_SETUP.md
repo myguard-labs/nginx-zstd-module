@@ -28,10 +28,11 @@ Validates C code syntax without compiling full nginx:
 **Runtime:** ~30 seconds
 
 #### 2. Test Suite
-Runs the Perl test suite:
+Runs the Perl test suite plus a truncation smoke test:
 - 23 filter module tests
 - 18 static module tests
-- Total: 41 comprehensive tests
+- 1 JavaScript truncation smoke test
+- Total: 41 Perl tests + 1 end-to-end smoke test
 
 **What it covers:**
 - ✓ Encoding detection and priority
@@ -40,6 +41,7 @@ Runs the Perl test suite:
 - ✓ HTTP method handling
 - ✓ Pre-compressed file serving
 - ✓ gzip interaction
+- ✓ Large JavaScript response integrity after zstd decompression
 
 **Runtime:** ~1-2 minutes
 
@@ -215,6 +217,7 @@ The `tools/ci-build.sh` script supports testing against:
 - `perl` - Perl interpreter
 - `libtest-nginx-perl` - Test framework
 - `libzstd-dev` - zstd library
+- `zstd` - CLI decompressor for the truncation smoke test
 - `python3`, `python3-requests` - Python test tools
 
 **Tools Validation:**
@@ -248,6 +251,7 @@ gcc -c -Wall -Wextra -Werror \
 cd t
 perl 00-filter.t
 perl 01-static.t
+python3 ../tools/test_encoding.py --nginx-binary /path/to/nginx
 ```
 
 ### Tools Validation fails
