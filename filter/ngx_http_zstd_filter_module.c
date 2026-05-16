@@ -586,7 +586,10 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->bytes_in += ngx_buf_size(ctx->in_buf);
 
     if (ctx->buffer_in.size == 0) {
-        return NGX_AGAIN;
+        /* Empty buffer: only skip to next if there is no pending signal.
+         * If last or flush was just set above, return OK so the compress
+         * step runs the end/flush immediately without a wasted iteration. */
+        return (ctx->last || ctx->flush) ? NGX_OK : NGX_AGAIN;
     }
 
     return NGX_OK;
