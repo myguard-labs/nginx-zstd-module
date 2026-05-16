@@ -9,8 +9,10 @@ name: CI
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # Latest mainline nginx. This is the default build + the artifact shared
-  # with the test jobs. The matrix below also exercises the current stable line.
+  # Latest mainline nginx. This is the default build + the artifact the
+  # full test/ASAN suite runs against. The build matrix additionally
+  # compiles the module against Angie (the actively-developed nginx fork
+  # this module also ships packages for).
   NGINX_VERSION: "1.31.0"
 
 on:
@@ -226,15 +228,27 @@ jobs:
         with:
           category: "/language:c-cpp"
 
-  # ── Build nginx binary (matrix: stable + mainline) ────────────────────────
+  # ── Build the module against each supported server flavour ───────────────
+  #    nginx mainline + Angie (the actively-developed nginx fork this module
+  #    also ships packages for — see tools/test_package_artifact.py). Angie
+  #    builds with the same ./configure --add-module interface; only the
+  #    download host and tarball/dir names differ, hence the include matrix.
   build:
-    name: Build (nginx ${{ matrix.nginx }})
+    name: Build (${{ matrix.flavor }} ${{ matrix.version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        nginx: ["1.28.3", "1.31.0"]
+        include:
+          - flavor: nginx
+            version: "1.31.0"
+            url: "https://nginx.org/download/nginx-1.31.0.tar.gz"
+            dir: "nginx-1.31.0"
+          - flavor: angie
+            version: "1.11.5"
+            url: "https://download.angie.software/files/angie-1.11.5.tar.gz"
+            dir: "angie-1.11.5"
 
     steps:
       - name: Checkout module
@@ -268,26 +282,26 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-nginx-${{ matrix.nginx }}-${{ hashFiles('filter/*.c', 'static/*.c', '*.h', 'config') }}
+          key: ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('filter/*.c', 'static/*.c', '*.h', 'config') }}
           restore-keys: |
-            ccache-${{ runner.os }}-nginx-${{ matrix.nginx }}-
+            ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-
             ccache-${{ runner.os }}-
 
-      - name: Cache nginx source tarball
-        id: nginx-tarball
+      - name: Cache server source tarball
+        id: src-tarball
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: nginx-${{ matrix.nginx }}.tar.gz
-          key: nginx-src-${{ matrix.nginx }}
+          path: ${{ matrix.dir }}.tar.gz
+          key: src-${{ matrix.flavor }}-${{ matrix.version }}
 
-      - name: Download nginx source tarball
-        if: steps.nginx-tarball.outputs.cache-hit != 'true'
-        run: wget -q "https://nginx.org/download/nginx-${{ matrix.nginx }}.tar.gz"
+      - name: Download server source tarball
+        if: steps.src-tarball.outputs.cache-hit != 'true'
+        run: wget -q -O "${{ matrix.dir }}.tar.gz" "${{ matrix.url }}"
 
-      - name: Configure nginx (full debug build)
+      - name: Configure (full debug build)
         run: |
-          tar -xzf "nginx-${{ matrix.nginx }}.tar.gz"
-          cd "nginx-${{ matrix.nginx }}"
+          tar -xzf "${{ matrix.dir }}.tar.gz"
+          cd "${{ matrix.dir }}"
           # Full debug compile flags:
           #   --with-debug          nginx debug logging (ngx_log_debug*)
           #   -g3                   max debug info incl. macro definitions
@@ -318,7 +332,7 @@ jobs:
 
       - name: Strict compile of module sources (warnings as errors)
         run: |
-          cd "nginx-${{ matrix.nginx }}"
+          cd "${{ matrix.dir }}"
           NGINX_CFLAGS=$(awk '/^CFLAGS[[:space:]]*=/{sub(/^CFLAGS[[:space:]]*=[[:space:]]*/,""); print; exit}' objs/Makefile)
           ALL_INCS=$(awk '/^ALL_INCS[[:space:]]*=/{found=1} found{line=$0; sub(/^ALL_INCS[[:space:]]*=[[:space:]]*/,"",line); gsub(/\\$/, "", line); printf "%s ", line; if (!/\\$/) exit}' objs/Makefile)
           for src in \
@@ -336,9 +350,9 @@ jobs:
           done
           echo "✓ All module sources compile cleanly with strict flags"
 
-      - name: Build nginx binary with module
+      - name: Build binary with module
         run: |
-          cd "nginx-${{ matrix.nginx }}"
+          cd "${{ matrix.dir }}"
           NGINX_CFLAGS=$(awk '/^CFLAGS[[:space:]]*=/{sub(/^CFLAGS[[:space:]]*=[[:space:]]*/,""); print; exit}' objs/Makefile)
           make -j"$(nproc)" modules \
             CFLAGS="$NGINX_CFLAGS -Wall -Wextra -Wshadow -Wstrict-aliasing \
@@ -347,16 +361,16 @@ jobs:
           ccache -s || true
           echo "✓ nginx binary built"
 
-      - name: Verify nginx binary
+      - name: Verify built binary
         run: |
-          ls -la "nginx-${{ matrix.nginx }}/objs/nginx"
-          "nginx-${{ matrix.nginx }}/objs/nginx" -V 2>&1
+          ls -la "${{ matrix.dir }}/objs/${{ matrix.flavor }}"
+          "${{ matrix.dir }}/objs/${{ matrix.flavor }}" -V 2>&1
 
-      - name: Upload nginx binary artifact
+      - name: Upload server binary artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: nginx-binary-${{ matrix.nginx }}
-          path: nginx-${{ matrix.nginx }}/objs/nginx
+          name: server-binary-${{ matrix.flavor }}-${{ matrix.version }}
+          path: ${{ matrix.dir }}/objs/${{ matrix.flavor }}
           retention-days: 1
 
   # ── ASAN + UBSAN build — catches the lifetime/UB bugs in this module's
@@ -444,7 +458,9 @@ jobs:
       - name: Download nginx binary (mainline, from build matrix)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: nginx-binary-${{ env.NGINX_VERSION }}
+          # The build matrix uploads server-binary-<flavor>-<version>; the
+          # full Perl/Python suite runs against nginx mainline specifically.
+          name: server-binary-nginx-${{ env.NGINX_VERSION }}
           path: nginx-bin
 
       - name: Set up nginx binary
