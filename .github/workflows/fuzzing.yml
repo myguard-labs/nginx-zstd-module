@@ -1,4 +1,4 @@
-name: Fuzz
+name: Fuzzing
 
 # Coverage-guided fuzzing of the Accept-Encoding parser
 # (ngx_http_zstd_accept_encoding). Kept OUT of ci.yml on purpose so it never
@@ -19,7 +19,7 @@ on:
       # Short regression run only when the parser or harness changes.
       - "ngx_http_zstd_common.h"
       - "fuzz/**"
-      - ".github/workflows/fuzz.yml"
+      - ".github/workflows/fuzzing.yml"
   workflow_dispatch:
     inputs:
       duration:

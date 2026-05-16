@@ -1,8 +1,9 @@
-name: CI
+name: Build & Test
 
 # Third-party actions are pinned to commit SHAs for supply-chain safety.
 # This pin table is the canonical reference for ALL workflow files
-# (ci.yml, codeql.yml, security.yml, fuzz.yml) — keep them consistent.
+# (build-test.yml, codeql.yml, security-scanners.yml, fuzzing.yml) —
+# keep them consistent.
 # actions/checkout@v4          -> 34e114876b0b11c390a56381ad16ebd13914f8d5
 # actions/cache@v4             -> 0057852bfaa89a56745cba8c7296529d2fc39830
 # actions/upload-artifact@v4   -> ea165f8d65b6e75b540449e92b4886f43607fa02

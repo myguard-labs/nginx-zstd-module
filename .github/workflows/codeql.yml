@@ -1,8 +1,8 @@
 name: CodeQL
 
-# Standalone CodeQL workflow (split out of ci.yml so security analysis
+# Standalone CodeQL workflow (split out of build-test.yml so security analysis
 # evolves independently of the build/test pipeline and shows as its own
-# PR check). Third-party actions pinned to commit SHAs — see ci.yml header.
+# PR check). Third-party actions pinned to commit SHAs — see build-test.yml header.
 
 env:
   NGINX_VERSION: "1.31.0"

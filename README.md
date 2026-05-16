@@ -1,5 +1,7 @@
-[![CI](https://github.com/eilandert/zstd-nginx-module/actions/workflows/ci.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/eilandert/zstd-nginx-module/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/github-code-scanning/codeql)
+[![Build & Test](https://github.com/eilandert/zstd-nginx-module/actions/workflows/build-test.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/build-test.yml)
+[![CodeQL](https://github.com/eilandert/zstd-nginx-module/actions/workflows/codeql.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/codeql.yml)
+[![Security Scanners](https://github.com/eilandert/zstd-nginx-module/actions/workflows/security-scanners.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/security-scanners.yml)
+[![Fuzzing](https://github.com/eilandert/zstd-nginx-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/fuzzing.yml)
 
 # zstd-nginx-module
 

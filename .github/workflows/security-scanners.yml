@@ -1,8 +1,8 @@
-name: Security
+name: Security Scanners
 
-# Standalone security-scanner workflow (split out of ci.yml). Runs
+# Standalone security-scanner workflow (split out of build-test.yml). Runs
 # flawfinder, clang-tidy and semgrep, uploading SARIF to the Security
-# tab. Third-party actions pinned to commit SHAs — see ci.yml header.
+# tab. Third-party actions pinned to commit SHAs — see build-test.yml header.
 
 on:
   push:
