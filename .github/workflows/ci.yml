@@ -45,6 +45,20 @@ jobs:
       - name: Checkout module
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # Lint the workflow files themselves. actionlint validates GitHub
+      # Actions expression contexts (e.g. "env is not allowed in a job
+      # name:") that a plain YAML parser cannot catch — exactly the class
+      # of error that previously took the whole pipeline down. Runs first
+      # so a broken workflow fails fast and obviously.
+      - name: Lint workflows (actionlint)
+        run: |
+          ACTIONLINT_VERSION=1.7.7
+          curl -fsSL -o /tmp/actionlint.tgz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/actionlint.tgz -C /tmp actionlint
+          /tmp/actionlint -color "$GITHUB_WORKSPACE"/.github/workflows/*.yml
+          echo "✓ actionlint: workflows valid"
+
       - name: Cache apt packages
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
