@@ -109,7 +109,7 @@ jobs:
               CONFIG_DIR=$(dirname "$CONFIG_H")
               NGINX_INCLUDES="$CONFIG_DIR"
               if [[ "$CONFIG_DIR" =~ /src/src/core$ ]]; then
-                NGINX_SRC=$(echo "$CONFIG_DIR" | sed 's|/src/src/core$|/src|')
+                NGINX_SRC="${CONFIG_DIR%/src/src/core}/src"
               fi
             fi
           fi
@@ -148,6 +148,9 @@ jobs:
           [ -n "${NGINX_SRC}" ]  && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_SRC}"
           [ -n "${NGINX_OBJS}" ] && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_OBJS}"
           INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_INCLUDES}/objs -I${NGINX_INCLUDES}/.."
+          # INCLUDE_FLAGS is a list of -I flags that MUST word-split into
+          # separate gcc arguments; quoting it would pass one bogus arg.
+          # shellcheck disable=SC2086
           scan-build --status-bugs \
             gcc -c $INCLUDE_FLAGS \
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
@@ -203,13 +206,20 @@ jobs:
         run: |
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
           cd "nginx-${NGINX_VERSION}"
+          # --add-module (static) compiles the zstd module objects INTO the
+          # nginx binary, so a full `make` is what the CodeQL tracer sees.
+          # `make modules` only builds --add-dynamic-module .so targets and
+          # leaves the static add-module untouched, which is why CodeQL
+          # reported "no source code seen during build". Do not redirect
+          # configure to /dev/null — a silent configure failure would also
+          # produce an empty CodeQL database.
           ./configure \
             --with-compat \
             --with-debug \
             --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $(pkg-config --cflags libzstd zlib libpcre2-8)" \
             --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
-            --add-module="$GITHUB_WORKSPACE" > /dev/null
-          make modules
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
@@ -315,6 +325,9 @@ jobs:
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
             echo "--- strict compile: $(basename "$src") ---"
+            # NGINX_CFLAGS and ALL_INCS are flag lists that MUST word-split
+            # into individual gcc arguments.
+            # shellcheck disable=SC2086
             gcc -c -fPIC $NGINX_CFLAGS \
               -Wall -Wextra -Wshadow -Wstrict-aliasing \
               -Wunreachable-code -Wunused -Wwrite-strings -Werror \
@@ -453,23 +466,23 @@ jobs:
 
       - name: Run filter module tests
         run: |
-          export PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB
-          export TEST_NGINX_SERVROOT=/tmp/nginx-servroot-filter
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
           perl t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee t/filter-tests.log
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then echo "❌ Filter tests FAILED"; exit 1; fi
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Filter tests FAILED"; exit 1; fi
           echo "✓ Filter module: All tests passed"
 
       - name: Run static module tests
         run: |
-          export PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB
-          export TEST_NGINX_SERVROOT=$GITHUB_WORKSPACE/t/servroot-static
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
           mkdir -p "$TEST_NGINX_SERVROOT"
           touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
           cd "$GITHUB_WORKSPACE"
           perl t/01-static.t 2>&1 | sed 's/^Error:/Err:/' | tee t/static-tests.log
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then echo "❌ Static tests FAILED"; exit 1; fi
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Static tests FAILED"; exit 1; fi
           echo "✓ Static module: All tests passed"
 
       - name: Run truncation smoke test
@@ -662,6 +675,9 @@ jobs:
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
             echo "--- clang-tidy: $(basename "$f") ---"
+            # INCLUDES and the pkg-config output are flag lists that MUST
+            # word-split into individual clang-tidy compiler arguments.
+            # shellcheck disable=SC2086,SC2046
             clang-tidy "$f" \
               --checks='cert-*,clang-analyzer-security.*,clang-analyzer-unix.*,bugprone-*' \
               --warnings-as-errors='' \

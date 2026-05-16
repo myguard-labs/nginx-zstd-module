@@ -86,7 +86,8 @@ jobs:
           cd fuzz
           mkdir -p corpus-min
           ./../fuzz_accept_encoding -merge=1 corpus-min/ corpus/
-          echo "Merged corpus: $(ls corpus-min | wc -l) units"
+          merged=$(find corpus-min -type f | wc -l)
+          echo "Merged corpus: $merged units"
 
       - name: Upload crash artifacts
         if: failure()
