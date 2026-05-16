@@ -60,6 +60,7 @@ typedef struct {
     size_t                       bytes_out;
 
     unsigned                     action:2;
+    unsigned                     last_action:2;
     unsigned                     last:1;
     unsigned                     redo:1;
     unsigned                     flush:1;
@@ -482,6 +483,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     if (rc > 0) {
         if (ctx->action == NGX_HTTP_ZSTD_FILTER_COMPRESS) {
+            ctx->last_action = ctx->action;
             ctx->action = NGX_HTTP_ZSTD_FILTER_FLUSH;
         }
 
@@ -491,6 +493,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
               && ctx->buffer_in.pos >= ctx->buffer_in.size
               && ctx->in == NULL) {
         ctx->redo = 1;
+        ctx->last_action = ctx->action;
         ctx->action = NGX_HTTP_ZSTD_FILTER_END;
 
         /* pending to call the ZSTD_endStream() */
@@ -498,6 +501,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_AGAIN;
 
     } else if (ctx->action != NGX_HTTP_ZSTD_FILTER_END) {
+        ctx->last_action = ctx->action;
         ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS; /* restore */
     }
 
