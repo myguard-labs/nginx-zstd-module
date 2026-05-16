@@ -237,9 +237,16 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    /* Temporarily remove ".zst" suffix to detect correct Content-Type
+     * based on original file, not the compressed .zst file */
+    path.len -= sizeof(".zst") - 1;
+
     if (ngx_http_set_content_type(r) != NGX_OK) {
+        path.len += sizeof(".zst") - 1;
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
+
+    path.len += sizeof(".zst") - 1;
 
     h = ngx_list_push(&r->headers_out.headers);
     if (h == NULL) {
