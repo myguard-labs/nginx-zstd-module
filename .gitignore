@@ -1,54 +1,32 @@
-# Prerequisites
-*.d
-
-# Object files
+# C build artifacts
 *.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
+*.d
 *.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
 *.so
 *.so.*
-*.dylib
+*.lo
+*.la
 
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
+# Compiled nginx modules
+*.so
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# nginx build tree (when building out-of-tree inside this repo)
+objs/
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# Test runner working directories (nginx test::nginx servroot)
+t/servroot/
+t/servroot-*/
 
-t/servroot/*
+# Editor and IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# CI / local build leftovers
+*.log
+*.pid
