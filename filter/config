@@ -123,9 +123,10 @@ if [ -n "$ngx_zstd_ver" ]; then
     if [ "$ngx_zstd_ver" -lt 10400 ] 2>/dev/null; then
         cat << END
         Warning: zstd version $ngx_zstd_ver detected (< 1.4.0 / 10400).
-        ZSTD_minCLevel() is not available; the module will use a fixed
-        lower bound of -5 for compression levels. Consider upgrading zstd
-        to 1.4.0 or later for full negative-level support.
+        ZSTD_minCLevel() is not available; negative compression levels
+        are not supported and will be rejected at config load time.
+        Consider upgrading zstd to 1.4.0 or later for negative-level
+        support.
 END
     elif [ "$ngx_zstd_ver" -lt 10500 ] 2>/dev/null; then
         cat << END
