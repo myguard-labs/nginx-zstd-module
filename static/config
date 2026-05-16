@@ -49,12 +49,12 @@ END
 
     fi
 else
-    # auto-discovery
-    ngx_feature="ZStandard static library"
-    ngx_zstd_opt_I="-DZSTD_STATIC_LINKING_ONLY"
-    ngx_zstd_opt_L="-l:libzstd.a"
+    # auto-discovery: prefer dynamic linking (static libzstd.a lacks -fPIC
+    # and cannot be linked into a shared .so dynamic module)
+    ngx_feature="ZStandard dynamic library"
+    ngx_zstd_opt_I=
+    ngx_zstd_opt_L="-lzstd"
 
-    # still we consider the static library firstly
     SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
     CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
     SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
@@ -68,8 +68,9 @@ else
 
     if [ $ngx_found = no ]; then
 
-        ngx_feature="ZStandard dynamic library"
-        ngx_zstd_opt_L="-lzstd"
+        ngx_feature="ZStandard static library"
+        ngx_zstd_opt_I="-DZSTD_STATIC_LINKING_ONLY"
+        ngx_zstd_opt_L="-l:libzstd.a"
         SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
         CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
         SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
