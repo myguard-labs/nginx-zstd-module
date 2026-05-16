@@ -383,9 +383,9 @@ jobs:
       - name: Run concurrent-request smoke test
         run: |
           cd $GITHUB_WORKSPACE
-          python3 tools/test_encoding.py \\
-            --nginx-binary "$TEST_NGINX_BINARY" \\
-            --port 18084 \\
+          python3 tools/test_encoding.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18084 \
             --concurrent-requests 2
           echo "✓ Concurrent-request smoke test passed"
 
