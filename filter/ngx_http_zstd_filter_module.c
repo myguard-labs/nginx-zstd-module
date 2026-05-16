@@ -400,7 +400,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             if (ZSTD_isError(rv)) {
                 ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                               "ZSTD_freeCStream() failed: %s",
-                              ZSTD_getErrorName(rc));
+                              ZSTD_getErrorName(rv));
 
                 rc = NGX_ERROR;
             }
@@ -669,14 +669,13 @@ ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
         }
 #else
         rc = ZSTD_initCStream_usingCDict(cstream, zlcf->dict);
-#endif
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                           "ZSTD_initCStream_usingCDict() failed: %s",
                           ZSTD_getErrorName(rc));
-
             goto failed;
         }
+#endif
 
     } else {
         rc = ZSTD_initCStream(cstream, zlcf->level);
