@@ -2,6 +2,7 @@
 import argparse
 import concurrent.futures
 import pathlib
+import re
 import shutil
 import socket
 import subprocess
@@ -153,6 +154,10 @@ events {{
 
 http {{
     access_log logs/access.log;
+    # $zstd_ratio is a log-phase variable; capture it to its own file so
+    # the harness can assert it is a finite N.NNN value (regression for
+    # 064895c, the compression-ratio integer-overflow fix).
+    log_format zstd_ratio_fmt "$zstd_ratio";
     default_type application/octet-stream;
     sendfile off;
     gzip_vary {gzip_vary};
@@ -169,6 +174,7 @@ http {{
             zstd on;
             zstd_min_length 1;
             zstd_types application/javascript;
+            access_log logs/zstd_ratio.log zstd_ratio_fmt;
         }}
     }}
 }}
@@ -230,6 +236,38 @@ def validate_response(
         )
     if FIXTURE_SENTINEL.encode("utf-8") not in decoded:
         raise RuntimeError("fixture sentinel missing from decoded response")
+
+
+RATIO_RE = re.compile(r"^\d+\.\d{3}$")
+
+
+def validate_ratio_log(log_path: pathlib.Path, request_count: int) -> None:
+    """Assert every logged $zstd_ratio is a finite N.NNN value.
+
+    Regression for 064895c ("integer overflow in compression ratio
+    calculation"): before the fix bytes_in*1000 could overflow and yield a
+    garbage or zero ratio. The CI JavaScript fixture is highly compressible,
+    so a correct ratio must parse AND be > 1.0 (output smaller than input).
+    """
+    content = read_if_exists(log_path)
+    lines = [line for line in content.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError(
+            f"$zstd_ratio log {log_path} is empty — the variable was not "
+            "populated (the ratio code path did not run)"
+        )
+    for line in lines:
+        value = line.strip()
+        if not RATIO_RE.match(value):
+            raise RuntimeError(
+                f"$zstd_ratio {value!r} is not a finite N.NNN value "
+                "(integer-overflow / garbage regression, cf. 064895c)"
+            )
+        if float(value) <= 1.0:
+            raise RuntimeError(
+                f"$zstd_ratio {value!r} <= 1.0 for a highly compressible "
+                "fixture — ratio computed wrong"
+            )
 
 
 def main() -> int:
@@ -317,6 +355,11 @@ def main() -> int:
                     ]
                     for future in futures:
                         future.result()
+
+            validate_ratio_log(
+                pathlib.Path(temp_dir) / "logs" / "zstd_ratio.log",
+                args.request_count,
+            )
 
             print(
                 "OK: verified zstd response integrity"

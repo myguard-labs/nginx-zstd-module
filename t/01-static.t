@@ -345,3 +345,62 @@ Accept-Encoding: zstd
 --- error_code: 405
 --- response_headers
 !Content-Encoding
+
+
+
+=== TEST 18: zstd_dict_file loads and serves correctly (filter path)
+# Regression for the untested zstd_dict_file feature, which had three
+# distinct historical bug fixes with NO test: 0fb40d9 (CDict leak on
+# cleanup), 50f27a8 (version-specific init error handling), f735a5d
+# (cleanup handler size). This is the first test that exercises a
+# dictionary at all: nginx must start with zstd_dict_file set and still
+# produce a valid compressed response.
+# zstd_dict_file is an http{}-context directive (NGX_HTTP_MAIN_CONF), so
+# it goes in --- http_config, not --- main_config (global, before http{}).
+# Relative paths resolve against the *configuration* prefix (conf/), while
+# --- user_files land in <servroot>/html, so use the absolute servroot
+# token Test::Nginx exports for this exact purpose.
+--- http_config
+    zstd_dict_file $TEST_NGINX_SERVER_ROOT/html/zstd.dict;
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/src;
+    }
+    location /src {
+        default_type text/plain;
+        return 200 "dictionary compressed body, long enough to compress\n";
+    }
+--- user_files
+>>> zstd.dict
+the quick brown fox jumps over the lazy dog 0123456789 dictionary sample payload for zstd training corpus padding padding padding
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 19: zstd_static handles a long URI without buffer overflow
+# Regression for 9789448 "buffer overflow when appending .zst extension".
+# A long request path stresses the .zst path-build reservation made via
+# ngx_http_map_uri_to_path(sizeof(".zst")). Missing file -> clean 404,
+# no crash, no ASAN abort (the ASAN test job runs this binary too).
+--- config
+    location /s/ {
+        zstd_static on;
+        root ../../t/suite;
+    }
+--- request eval
+"GET /s/" . ("a" x 2000) . "/nonexistent-resource-name"
+--- error_code: 404
+--- response_headers
+!Content-Encoding
+--- no_error_log
+[alert]

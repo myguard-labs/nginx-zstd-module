@@ -1,0 +1,106 @@
+name: Fuzz
+
+# Coverage-guided fuzzing of the Accept-Encoding parser
+# (ngx_http_zstd_accept_encoding). Kept OUT of ci.yml on purpose so it never
+# slows PR feedback: a long nightly run for discovery, plus a short bounded
+# run only when the parser or its shim actually changes.
+#
+# Action pins (see ci.yml header for rationale):
+# actions/checkout@v4        -> 34e114876b0b11c390a56381ad16ebd13914f8d5
+# actions/upload-artifact@v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
+
+on:
+  schedule:
+    # Nightly 03:41 UTC — discovery run, longer budget, no one waiting.
+    - cron: "41 3 * * *"
+  pull_request:
+    branches: [master, main]
+    paths:
+      # Short regression run only when the parser or harness changes.
+      - "ngx_http_zstd_common.h"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Fuzz duration in seconds"
+        required: false
+        default: "900"
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Accept-Encoding parser fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install clang + libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build fuzz target
+        run: bash fuzz/build.sh "$GITHUB_WORKSPACE/fuzz_accept_encoding"
+
+      - name: Select fuzz duration
+        run: |
+          # Nightly / dispatch: long. PR regression run: short and bounded.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "FUZZ_SECS=120" >> "$GITHUB_ENV"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "FUZZ_SECS=${{ github.event.inputs.duration }}" >> "$GITHUB_ENV"
+          else
+            echo "FUZZ_SECS=900" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run fuzzer
+        run: |
+          cd fuzz
+          set +e
+          ./../fuzz_accept_encoding \
+            -max_total_time="$FUZZ_SECS" \
+            -print_final_stats=1 \
+            -artifact_prefix=crash- \
+            corpus/
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "❌ Fuzzer found a crash (exit $rc)"
+            exit 1
+          fi
+          echo "✓ No crashes in ${FUZZ_SECS}s"
+
+      - name: Minimize and persist corpus growth
+        if: success() && github.event_name == 'schedule'
+        run: |
+          cd fuzz
+          mkdir -p corpus-min
+          ./../fuzz_accept_encoding -merge=1 corpus-min/ corpus/
+          echo "Merged corpus: $(ls corpus-min | wc -l) units"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-crashes
+          path: |
+            ${{ github.workspace }}/fuzz/crash-*
+          retention-days: 30
+
+      - name: Upload minimized corpus
+        if: success() && github.event_name == 'schedule'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-corpus
+          path: ${{ github.workspace }}/fuzz/corpus-min
+          retention-days: 30

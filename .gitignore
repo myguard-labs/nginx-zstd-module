@@ -17,6 +17,10 @@ objs/
 t/servroot/
 t/servroot-*/
 
+# Python bytecode cache (test tooling under tools/)
+__pycache__/
+*.pyc
+
 # Editor and IDE
 .vscode/
 .idea/
@@ -30,3 +34,14 @@ t/servroot-*/
 # CI / local build leftovers
 *.log
 *.pid
+
+# Fuzzing build artifacts (seed corpus IS tracked; everything else is not)
+fuzz/fuzz_accept_encoding
+fuzz/generated_parser.inc
+fuzz/crash-*
+fuzz/corpus-min/
+fuzz/*.profraw
+# Local fuzz runs dump discovered units into corpus/; keep only the
+# curated NN_name seeds under version control.
+fuzz/corpus/*
+!fuzz/corpus/[0-9][0-9]_*

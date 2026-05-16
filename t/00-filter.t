@@ -25,7 +25,7 @@ add_block_preprocessor(sub {
 no_long_string();
 log_level 'debug';
 repeat_each(3);
-plan tests => repeat_each() * (blocks() * 3) + 150;
+plan tests => repeat_each() * (blocks() * 3) + 147;
 run_tests();
 
 
@@ -680,5 +680,214 @@ Accept-Encoding: zstd
 Transfer-Encoding: chunked
 Content-Encoding: zstd
 Content-Type: text/plain
+--- no_error_log
+[error]
+
+
+
+=== TEST 30: no infinite loop / CPU spin on a zero-length proxied body
+# Regression for the recurring "100% CPU infinite loop" class:
+#   7f86e5b, 2af5889, 924c9bf, PR #23/#49.
+# An empty upstream body with Content-Encoding still set must terminate
+# (emit a valid empty zstd frame) and not spin. Test::Nginx enforces a
+# request timeout, so a hang fails the test instead of running forever.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/empty;
+    }
+    location /empty {
+        default_type text/plain;
+        return 200 "";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- error_code: 200
+--- timeout: 5
+--- no_error_log
+[error]
+
+
+
+=== TEST 31: no infinite loop on a single-byte body below the stream-in size
+# Same loop class — a tiny body must flush a terminal frame and stop.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/one;
+    }
+    location /one {
+        default_type text/plain;
+        return 200 "x";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- error_code: 200
+--- timeout: 5
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 32: $zstd_ratio computation path on a large body (overflow guard)
+# Regression for 064895c "integer overflow in compression ratio calc".
+# $zstd_ratio is a log-phase variable; its value is asserted to be a
+# finite N.NNN string by tools/test_encoding.py (which can read it). Here
+# we exercise the computation path itself — a ~58 KB body makes
+# bytes_in*1000 large, the exact arithmetic that overflowed pre-064895c.
+# A clean compressed response with no error proves the math did not trap.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        set $unused $zstd_ratio;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 33: zstd composes correctly with sub_filter (filter ordering)
+# Regression for the recurring filter-order class: f4ba115, 2d2e641,
+# cae80f9, 3f73e15, 8a6e370, 18c778d. zstd must run AFTER sub_filter so
+# the substitution is present in the (decompressed) output, not skipped.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        sub_filter 'ORIGINAL' 'REWRITTEN';
+        sub_filter_once off;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/src;
+    }
+    location /src {
+        default_type text/plain;
+        return 200 "ORIGINAL ORIGINAL ORIGINAL\n";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 34: negative compression level produces a valid zstd stream
+# Regression for cc9f6ec / b58c7cd: negative levels are accepted by
+# zstd_comp_level but were never exercised by a test.
+--- config
+    location /filter {
+        zstd on;
+        zstd_comp_level -5;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 35: explicit non-default zstd_types only compresses listed types
+# Regression for 46f95bf "passed default mime/types to zstd_types parser":
+# a type NOT in the list must not be compressed.
+--- config
+    location /json {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types application/json;
+        default_type text/plain;
+        return 200 "plain text not in zstd_types\n";
+    }
+--- request
+GET /json
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 36: zstd_types match DOES compress the listed type
+# Positive half of TEST 35 — application/json is listed, so it compresses.
+--- config
+    location /json {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types application/json;
+        default_type application/json;
+        return 200 "{\"compress\":\"this is a json body long enough\"}\n";
+    }
+--- request
+GET /json
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 37: max_length enforced when Content-Length is known (proxy)
+# Pins the documented contract from d94b220 / f065cb6: when the response
+# length IS known (the common proxied case), a body larger than
+# zstd_max_length must NOT be compressed. The complementary "length
+# unknown / chunked -> cannot be enforced" half is a documented behaviour
+# (see README) not cleanly unit-testable via `return` (which always sets
+# Content-Length); it is covered by the docs, not by a brittle test.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_max_length 4;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/big;
+    }
+    location /big {
+        default_type text/plain;
+        return 200 "this body is far larger than the 4 byte max_length\n";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+!Content-Encoding
 --- no_error_log
 [error]
