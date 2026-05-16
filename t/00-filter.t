@@ -5,6 +5,23 @@ use lib 'lib';
 my $dirname = dirname(__FILE__);
 $ENV{'TEST_NGINX_PERL_PATH'}="$ENV{'PWD'}/$dirname";
 
+my @dynamic_modules;
+if (defined $ENV{'TEST_NGINX_BINARY'}) {
+    my $nginx_dir = dirname($ENV{'TEST_NGINX_BINARY'});
+    for my $module_name (qw(ngx_http_zstd_filter_module.so ngx_http_zstd_static_module.so)) {
+        my $module_path = "$nginx_dir/$module_name";
+        push @dynamic_modules, $module_path if -f $module_path;
+    }
+}
+
+add_block_preprocessor(sub {
+    my $block = shift;
+    return if !@dynamic_modules;
+
+    my $main_config = join "\n", map { "load_module $_;" } @dynamic_modules;
+    $block->set_value("main_config", $main_config);
+});
+
 no_long_string();
 log_level 'debug';
 repeat_each(3);

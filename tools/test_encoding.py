@@ -23,6 +23,20 @@ def parse_args() -> argparse.Namespace:
         help="Path to the nginx binary to start for the smoke test.",
     )
     parser.add_argument(
+        "--filter-module",
+        help=(
+            "Optional path to ngx_http_zstd_filter_module.so. "
+            "If omitted, the helper auto-detects a sibling module next to the nginx binary."
+        ),
+    )
+    parser.add_argument(
+        "--static-module",
+        help=(
+            "Optional path to ngx_http_zstd_static_module.so. "
+            "If omitted, the helper auto-detects a sibling module next to the nginx binary."
+        ),
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=18080,
@@ -102,10 +116,34 @@ def build_fixture(path: pathlib.Path, lines: int) -> bytes:
     return data
 
 
-def write_config(conf_path: pathlib.Path, root_dir: pathlib.Path, port: int, gzip_vary: str) -> None:
+def detect_module_path(
+    explicit_path: str | None,
+    nginx_binary: pathlib.Path,
+    module_name: str,
+) -> pathlib.Path | None:
+    if explicit_path:
+        return pathlib.Path(explicit_path)
+
+    sibling = nginx_binary.parent / module_name
+    if sibling.exists():
+        return sibling
+
+    return None
+
+
+def write_config(
+    conf_path: pathlib.Path,
+    root_dir: pathlib.Path,
+    port: int,
+    gzip_vary: str,
+    modules: list[pathlib.Path],
+) -> None:
+    load_modules = "".join(
+        f"load_module {module};\n" for module in modules
+    )
     conf_path.write_text(
         f"""
-worker_processes  1;
+{load_modules}worker_processes  1;
 error_log  logs/error.log info;
 pid        logs/nginx.pid;
 
@@ -208,6 +246,22 @@ def main() -> int:
             f"concurrent-requests must be >= 1, got {args.concurrent_requests}"
         )
 
+    filter_module = detect_module_path(
+        args.filter_module,
+        nginx_binary,
+        "ngx_http_zstd_filter_module.so",
+    )
+    static_module = detect_module_path(
+        args.static_module,
+        nginx_binary,
+        "ngx_http_zstd_static_module.so",
+    )
+    modules = [module for module in (filter_module, static_module) if module is not None]
+
+    for module in modules:
+        if not module.exists():
+            raise FileNotFoundError(f"zstd module not found: {module}")
+
     with tempfile.TemporaryDirectory(prefix="zstd-ci-smoke-") as temp_dir_str:
         temp_dir = pathlib.Path(temp_dir_str)
         html_dir = temp_dir / "html"
@@ -220,7 +274,7 @@ def main() -> int:
         fixture_path = html_dir / "test.js"
         expected = build_fixture(fixture_path, args.fixture_lines)
         conf_path = conf_dir / "nginx.conf"
-        write_config(conf_path, html_dir, args.port, args.gzip_vary)
+        write_config(conf_path, html_dir, args.port, args.gzip_vary, modules)
 
         process = subprocess.Popen(
             [
