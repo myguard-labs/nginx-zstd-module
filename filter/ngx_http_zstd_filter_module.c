@@ -27,6 +27,7 @@ typedef struct {
     ssize_t                      min_length;
     ssize_t                      max_length;
     ssize_t                      target_cblock_size;  /* Issue #38: ZSTD_c_targetCBlockSize */
+    ngx_int_t                    window_log;          /* ZSTD_c_windowLog: bounds per-request memory */
 
     ngx_hash_t                   types;
 
@@ -170,6 +171,13 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       ngx_conf_set_size_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, target_cblock_size),
+      NULL },
+
+    { ngx_string("zstd_window_log"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_zstd_loc_conf_t, window_log),
       NULL },
 
     { ngx_string("zstd_dict_file"),
@@ -731,6 +739,26 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
     }
 #endif
 
+    /*
+     * Cap the compression window. zstd's per-context working memory is
+     * dominated by the window size (~2^windowLog bytes plus match-table
+     * overhead). Without a cap, a high level on large bodies lets each
+     * concurrent request inflate worker RSS unpredictably. Bounding
+     * windowLog gives operators a hard, predictable per-request memory
+     * ceiling at a small ratio cost on inputs larger than the window.
+     * Unset (0) keeps zstd's level-derived default.
+     */
+    if (zlcf->window_log > 0) {
+        rc = ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog,
+                                     (int) zlcf->window_log);
+        if (ZSTD_isError(rc)) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "zstd: ZSTD_CCtx_setParameter(windowLog=%d) failed: %s",
+                          (int) zlcf->window_log, ZSTD_getErrorName(rc));
+            return NGX_ERROR;
+        }
+    }
+
     if (zlcf->dict) {
         rc = ZSTD_CCtx_refCDict(cctx, zlcf->dict);
         if (ZSTD_isError(rc)) {
@@ -800,6 +828,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->min_length = NGX_CONF_UNSET;
     conf->max_length = NGX_CONF_UNSET;
     conf->target_cblock_size = NGX_CONF_UNSET;
+    conf->window_log = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -828,6 +857,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->min_length, prev->min_length, 20);
     ngx_conf_merge_value(conf->max_length, prev->max_length, NGX_CONF_UNSET);
     ngx_conf_merge_value(conf->target_cblock_size, prev->target_cblock_size, 0);
+    ngx_conf_merge_value(conf->window_log, prev->window_log, 0);
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                              &prev->types_keys, &prev->types,

@@ -25,6 +25,7 @@ This is a hardened fork: every build is exercised against **nginx mainline and [
     * [zstd_types](#zstd_types)
     * [zstd_buffers](#zstd_buffers)
     * [zstd_target_cblock_size](#zstd_target_cblock_size)
+    * [zstd_window_log](#zstd_window_log)
     * [zstd_dict_file](#zstd_dict_file)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
     * [zstd_static](#zstd_static)
@@ -266,6 +267,41 @@ http {
 | `16384` (16 KB) | Very aggressive incremental parsing; reduces ratio notably |
 | `65536` (64 KB) | Moderate; CSS/JS in head typically available faster |
 | `262144` (256 KB) | Conservative; minimal ratio impact |
+
+---
+
+### zstd_window_log
+
+**Syntax:** `zstd_window_log exponent;`
+**Default:** `—` (disabled; zstd uses its level-derived default)
+**Context:** `http, server, location`
+
+Caps the zstd compression **window** at `2^exponent` bytes. zstd's
+per-request working memory is dominated by the window size (roughly the
+window plus match-table overhead), so without a cap a high compression
+level on large response bodies lets each concurrent request inflate the
+worker's resident memory unpredictably. Bounding `window_log` gives a
+hard, predictable per-request memory ceiling.
+
+Typical values are `20`–`24` (1–16 MB). Lower values reduce memory and
+the compression ratio on inputs larger than the window; on responses
+smaller than the window there is no ratio impact. Unset (or `0`) keeps
+zstd's default window for the configured level.
+
+> **Note:** This bounds compressor memory, not the amount of response
+> body buffered by nginx (that is governed by `zstd_buffers`). For a hard
+> limit on how much input is ever fed to the compressor regardless of
+> `Content-Length`, see also `zstd_max_length`.
+
+**Example:**
+
+```nginx
+http {
+    zstd on;
+    zstd_comp_level   9;
+    zstd_window_log   21;   # cap the window at 2 MB per request
+}
+```
 
 ---
 

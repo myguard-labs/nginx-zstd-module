@@ -891,3 +891,31 @@ Accept-Encoding: zstd
 !Content-Encoding
 --- no_error_log
 [error]
+
+
+
+=== TEST 38: zstd_window_log caps the window and still produces valid output
+# Regression for the zstd_window_log memory-bounding directive. With a
+# 15-bit (32 KB) window and a body well over 32 KB, zstd must still emit
+# a well-formed stream: the directive bounds per-request memory, it must
+# not corrupt the response. Served from the on-disk test fixture (~58 KB)
+# so the capped window is genuinely exercised.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_window_log 15;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
