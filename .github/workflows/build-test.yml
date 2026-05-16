@@ -1,6 +1,9 @@
-name: CI
+name: Build & Test
 
 # Third-party actions are pinned to commit SHAs for supply-chain safety.
+# This pin table is the canonical reference for ALL workflow files
+# (build-test.yml, codeql.yml, security-scanners.yml, fuzzing.yml) —
+# keep them consistent.
 # actions/checkout@v4          -> 34e114876b0b11c390a56381ad16ebd13914f8d5
 # actions/cache@v4             -> 0057852bfaa89a56745cba8c7296529d2fc39830
 # actions/upload-artifact@v4   -> ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -9,8 +12,10 @@ name: CI
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # Latest mainline nginx. This is the default build + the artifact shared
-  # with the test jobs. The matrix below also exercises the current stable line.
+  # Latest mainline nginx. This is the default build + the artifact the
+  # full test/ASAN suite runs against. The build matrix additionally
+  # compiles the module against Angie (the actively-developed nginx fork
+  # this module also ships packages for).
   NGINX_VERSION: "1.31.0"
 
 on:
@@ -44,6 +49,20 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Lint the workflow files themselves. actionlint validates GitHub
+      # Actions expression contexts (e.g. "env is not allowed in a job
+      # name:") that a plain YAML parser cannot catch — exactly the class
+      # of error that previously took the whole pipeline down. Runs first
+      # so a broken workflow fails fast and obviously.
+      - name: Lint workflows (actionlint)
+        run: |
+          ACTIONLINT_VERSION=1.7.7
+          curl -fsSL -o /tmp/actionlint.tgz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/actionlint.tgz -C /tmp actionlint
+          /tmp/actionlint -color "$GITHUB_WORKSPACE"/.github/workflows/*.yml
+          echo "✓ actionlint: workflows valid"
 
       - name: Cache apt packages
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -95,7 +114,7 @@ jobs:
               CONFIG_DIR=$(dirname "$CONFIG_H")
               NGINX_INCLUDES="$CONFIG_DIR"
               if [[ "$CONFIG_DIR" =~ /src/src/core$ ]]; then
-                NGINX_SRC=$(echo "$CONFIG_DIR" | sed 's|/src/src/core$|/src|')
+                NGINX_SRC="${CONFIG_DIR%/src/src/core}/src"
               fi
             fi
           fi
@@ -134,6 +153,9 @@ jobs:
           [ -n "${NGINX_SRC}" ]  && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_SRC}"
           [ -n "${NGINX_OBJS}" ] && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_OBJS}"
           INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_INCLUDES}/objs -I${NGINX_INCLUDES}/.."
+          # INCLUDE_FLAGS is a list of -I flags that MUST word-split into
+          # separate gcc arguments; quoting it would pass one bogus arg.
+          # shellcheck disable=SC2086
           scan-build --status-bugs \
             gcc -c $INCLUDE_FLAGS \
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
@@ -149,68 +171,27 @@ jobs:
             ${{ github.workspace }}/clang-scan.log
           retention-days: 7
 
-  # ── CodeQL — GitHub first-party C/C++ security analysis ───────────────────
-  codeql:
-    name: CodeQL
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      security-events: write
-
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libzstd-dev \
-            libpcre2-dev zlib1g-dev wget
-
-      - name: Cache nginx source tarball
-        id: nginx-tarball
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
-          key: nginx-src-${{ env.NGINX_VERSION }}
-
-      - name: Download nginx source tarball
-        if: steps.nginx-tarball.outputs.cache-hit != 'true'
-        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
-        with:
-          languages: c-cpp
-          queries: security-extended
-
-      - name: Build module sources for CodeQL
-        run: |
-          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
-          cd "nginx-${NGINX_VERSION}"
-          ./configure \
-            --with-compat \
-            --with-debug \
-            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $(pkg-config --cflags libzstd zlib libpcre2-8)" \
-            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
-            --add-module="$GITHUB_WORKSPACE" > /dev/null
-          make modules
-
-      - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
-        with:
-          category: "/language:c-cpp"
-
-  # ── Build nginx binary (matrix: stable + mainline) ────────────────────────
+  # ── Build the module against each supported server flavour ───────────────
+  #    nginx mainline + Angie (the actively-developed nginx fork this module
+  #    also ships packages for — see tools/test_package_artifact.py). Angie
+  #    builds with the same ./configure --add-module interface; only the
+  #    download host and tarball/dir names differ, hence the include matrix.
   build:
-    name: Build (nginx ${{ matrix.nginx }})
+    name: Build (${{ matrix.flavor }} ${{ matrix.version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        nginx: ["1.28.3", "1.31.0"]
+        include:
+          - flavor: nginx
+            version: "1.31.0"
+            url: "https://nginx.org/download/nginx-1.31.0.tar.gz"
+            dir: "nginx-1.31.0"
+          - flavor: angie
+            version: "1.11.5"
+            url: "https://download.angie.software/files/angie-1.11.5.tar.gz"
+            dir: "angie-1.11.5"
 
     steps:
       - name: Checkout module
@@ -244,26 +225,26 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-nginx-${{ matrix.nginx }}-${{ hashFiles('filter/*.c', 'static/*.c', '*.h', 'config') }}
+          key: ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('filter/*.c', 'static/*.c', '*.h', 'config') }}
           restore-keys: |
-            ccache-${{ runner.os }}-nginx-${{ matrix.nginx }}-
+            ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-
             ccache-${{ runner.os }}-
 
-      - name: Cache nginx source tarball
-        id: nginx-tarball
+      - name: Cache server source tarball
+        id: src-tarball
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: nginx-${{ matrix.nginx }}.tar.gz
-          key: nginx-src-${{ matrix.nginx }}
+          path: ${{ matrix.dir }}.tar.gz
+          key: src-${{ matrix.flavor }}-${{ matrix.version }}
 
-      - name: Download nginx source tarball
-        if: steps.nginx-tarball.outputs.cache-hit != 'true'
-        run: wget -q "https://nginx.org/download/nginx-${{ matrix.nginx }}.tar.gz"
+      - name: Download server source tarball
+        if: steps.src-tarball.outputs.cache-hit != 'true'
+        run: wget -q -O "${{ matrix.dir }}.tar.gz" "${{ matrix.url }}"
 
-      - name: Configure nginx (full debug build)
+      - name: Configure (full debug build)
         run: |
-          tar -xzf "nginx-${{ matrix.nginx }}.tar.gz"
-          cd "nginx-${{ matrix.nginx }}"
+          tar -xzf "${{ matrix.dir }}.tar.gz"
+          cd "${{ matrix.dir }}"
           # Full debug compile flags:
           #   --with-debug          nginx debug logging (ngx_log_debug*)
           #   -g3                   max debug info incl. macro definitions
@@ -294,13 +275,16 @@ jobs:
 
       - name: Strict compile of module sources (warnings as errors)
         run: |
-          cd "nginx-${{ matrix.nginx }}"
+          cd "${{ matrix.dir }}"
           NGINX_CFLAGS=$(awk '/^CFLAGS[[:space:]]*=/{sub(/^CFLAGS[[:space:]]*=[[:space:]]*/,""); print; exit}' objs/Makefile)
           ALL_INCS=$(awk '/^ALL_INCS[[:space:]]*=/{found=1} found{line=$0; sub(/^ALL_INCS[[:space:]]*=[[:space:]]*/,"",line); gsub(/\\$/, "", line); printf "%s ", line; if (!/\\$/) exit}' objs/Makefile)
           for src in \
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
             echo "--- strict compile: $(basename "$src") ---"
+            # NGINX_CFLAGS and ALL_INCS are flag lists that MUST word-split
+            # into individual gcc arguments.
+            # shellcheck disable=SC2086
             gcc -c -fPIC $NGINX_CFLAGS \
               -Wall -Wextra -Wshadow -Wstrict-aliasing \
               -Wunreachable-code -Wunused -Wwrite-strings -Werror \
@@ -309,9 +293,9 @@ jobs:
           done
           echo "✓ All module sources compile cleanly with strict flags"
 
-      - name: Build nginx binary with module
+      - name: Build binary with module
         run: |
-          cd "nginx-${{ matrix.nginx }}"
+          cd "${{ matrix.dir }}"
           NGINX_CFLAGS=$(awk '/^CFLAGS[[:space:]]*=/{sub(/^CFLAGS[[:space:]]*=[[:space:]]*/,""); print; exit}' objs/Makefile)
           make -j"$(nproc)" modules \
             CFLAGS="$NGINX_CFLAGS -Wall -Wextra -Wshadow -Wstrict-aliasing \
@@ -320,16 +304,16 @@ jobs:
           ccache -s || true
           echo "✓ nginx binary built"
 
-      - name: Verify nginx binary
+      - name: Verify built binary
         run: |
-          ls -la "nginx-${{ matrix.nginx }}/objs/nginx"
-          "nginx-${{ matrix.nginx }}/objs/nginx" -V 2>&1
+          ls -la "${{ matrix.dir }}/objs/${{ matrix.flavor }}"
+          "${{ matrix.dir }}/objs/${{ matrix.flavor }}" -V 2>&1
 
-      - name: Upload nginx binary artifact
+      - name: Upload server binary artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: nginx-binary-${{ matrix.nginx }}
-          path: nginx-${{ matrix.nginx }}/objs/nginx
+          name: server-binary-${{ matrix.flavor }}-${{ matrix.version }}
+          path: ${{ matrix.dir }}/objs/${{ matrix.flavor }}
           retention-days: 1
 
   # ── ASAN + UBSAN build — catches the lifetime/UB bugs in this module's
@@ -384,7 +368,10 @@ jobs:
 
   # ── Full test suite — runs against the mainline binary ────────────────────
   tests:
-    name: Tests (nginx ${{ env.NGINX_VERSION }})
+    # The job-level name: is evaluated before the env context is available,
+    # so it cannot use ${{ env.NGINX_VERSION }} (GitHub rejects the whole
+    # workflow file). Keep this literal in sync with NGINX_VERSION above.
+    name: Tests (nginx 1.31.0 mainline)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: build
@@ -414,7 +401,9 @@ jobs:
       - name: Download nginx binary (mainline, from build matrix)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: nginx-binary-${{ env.NGINX_VERSION }}
+          # The build matrix uploads server-binary-<flavor>-<version>; the
+          # full Perl/Python suite runs against nginx mainline specifically.
+          name: server-binary-nginx-${{ env.NGINX_VERSION }}
           path: nginx-bin
 
       - name: Set up nginx binary
@@ -436,23 +425,23 @@ jobs:
 
       - name: Run filter module tests
         run: |
-          export PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB
-          export TEST_NGINX_SERVROOT=/tmp/nginx-servroot-filter
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
           perl t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee t/filter-tests.log
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then echo "❌ Filter tests FAILED"; exit 1; fi
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Filter tests FAILED"; exit 1; fi
           echo "✓ Filter module: All tests passed"
 
       - name: Run static module tests
         run: |
-          export PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB
-          export TEST_NGINX_SERVROOT=$GITHUB_WORKSPACE/t/servroot-static
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
           mkdir -p "$TEST_NGINX_SERVROOT"
           touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
           cd "$GITHUB_WORKSPACE"
           perl t/01-static.t 2>&1 | sed 's/^Error:/Err:/' | tee t/static-tests.log
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then echo "❌ Static tests FAILED"; exit 1; fi
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Static tests FAILED"; exit 1; fi
           echo "✓ Static module: All tests passed"
 
       - name: Run truncation smoke test
@@ -555,130 +544,3 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           bash tools/test_reload_leak.sh "$TEST_NGINX_BINARY" 5
-
-  # ── Security scanners — independent, no nginx build needed ────────────────
-  secure:
-    name: Secure
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      security-events: write
-
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Cache apt packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-secure-${{ runner.os }}-flawfinder-clang-tidy-nginx-dev
-          restore-keys: apt-secure-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            flawfinder \
-            clang-tidy \
-            python3 \
-            python3-pip \
-            nginx-dev
-
-      - name: Cache pip packages (semgrep)
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.cache/pip
-          key: pip-semgrep-${{ runner.os }}
-
-      - name: Install semgrep
-        run: |
-          pip3 install --quiet semgrep
-          semgrep --version
-
-      - name: Cache semgrep rules
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.semgrep
-          key: semgrep-rules-${{ runner.os }}-p-c-security-audit
-
-      - name: Cache nginx-dev generated headers
-        id: nginx-dev-objs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: /usr/share/nginx/src/objs
-          key: nginx-dev-objs-${{ runner.os }}-${{ hashFiles('/var/lib/dpkg/info/nginx-dev.list') }}
-
-      - name: Generate nginx build headers (for clang-tidy)
-        if: steps.nginx-dev-objs.outputs.cache-hit != 'true'
-        run: |
-          cd /usr/share/nginx/src
-          CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null 2>&1 || true
-
-      - name: flawfinder (security risk scanner, SARIF)
-        run: |
-          flawfinder --minlevel=1 --sarif \
-            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
-            > flawfinder.sarif 2>/dev/null || true
-          flawfinder --minlevel=1 \
-            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
-            2>&1 | tee flawfinder.log
-          echo "✓ flawfinder: Scan complete"
-
-      - name: Upload flawfinder SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
-        with:
-          sarif_file: flawfinder.sarif
-          category: flawfinder
-        continue-on-error: true
-
-      - name: clang-tidy (cert-*, bugprone-*, clang-analyzer-security.*)
-        run: |
-          NGINX_OBJS=/usr/share/nginx/src/objs
-          NGINX_INCLUDES=$(dpkg -L nginx-dev 2>/dev/null | grep 'ngx_config.h' | head -1 | xargs dirname || echo /usr/include/nginx)
-          INCLUDES="-I$NGINX_INCLUDES -I$NGINX_OBJS -I/usr/include"
-          for f in \
-            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
-            echo "--- clang-tidy: $(basename "$f") ---"
-            clang-tidy "$f" \
-              --checks='cert-*,clang-analyzer-security.*,clang-analyzer-unix.*,bugprone-*' \
-              --warnings-as-errors='' \
-              -- -DZSTD_STATIC_LINKING_ONLY $INCLUDES $(pkg-config --cflags libzstd) \
-              2>&1 || true
-          done | tee clang-tidy.log
-          echo "✓ clang-tidy: Scan complete"
-
-      - name: semgrep (C rule set — buffer overflows, unsafe fns, integer issues)
-        run: |
-          semgrep scan \
-            --config "p/c" \
-            --config "p/security-audit" \
-            --sarif --output semgrep.sarif \
-            "$GITHUB_WORKSPACE/filter/" "$GITHUB_WORKSPACE/static/" 2>&1 | tee semgrep.log || true
-          echo "✓ semgrep: Scan complete"
-
-      - name: Upload semgrep SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
-        with:
-          sarif_file: semgrep.sarif
-          category: semgrep
-        continue-on-error: true
-
-      - name: Upload security reports
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: security-reports
-          path: |
-            ${{ github.workspace }}/flawfinder.log
-            ${{ github.workspace }}/flawfinder.sarif
-            ${{ github.workspace }}/clang-tidy.log
-            ${{ github.workspace }}/semgrep.log
-            ${{ github.workspace }}/semgrep.sarif
-          retention-days: 14

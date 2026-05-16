@@ -1,0 +1,86 @@
+name: CodeQL
+
+# Standalone CodeQL workflow (split out of build-test.yml so security analysis
+# evolves independently of the build/test pipeline and shows as its own
+# PR check). Third-party actions pinned to commit SHAs — see build-test.yml header.
+
+env:
+  NGINX_VERSION: "1.31.0"
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Weekly Monday 04:17 UTC — catch nginx/source drift with no commits.
+    - cron: "17 4 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+            libpcre2-dev zlib1g-dev wget
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
+        with:
+          languages: c-cpp
+          queries: security-extended
+
+      - name: Build module sources for CodeQL
+        run: |
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          # --add-module (static) compiles the zstd module objects INTO the
+          # nginx binary, so a full `make` is what the CodeQL tracer sees.
+          # `make modules` only builds --add-dynamic-module .so targets and
+          # leaves the static add-module untouched, which is why CodeQL
+          # reported "no source code seen during build". Do not redirect
+          # configure to /dev/null — a silent configure failure would also
+          # produce an empty CodeQL database.
+          ./configure \
+            --with-compat \
+            --with-debug \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
+        with:
+          category: "/language:c-cpp"
+

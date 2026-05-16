@@ -1,0 +1,151 @@
+name: Security Scanners
+
+# Standalone security-scanner workflow (split out of build-test.yml). Runs
+# flawfinder, clang-tidy and semgrep, uploading SARIF to the Security
+# tab. Third-party actions pinned to commit SHAs — see build-test.yml header.
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  secure:
+    name: Secure
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Cache apt packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-secure-${{ runner.os }}-flawfinder-clang-tidy-nginx-dev
+          restore-keys: apt-secure-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            flawfinder \
+            clang-tidy \
+            python3 \
+            python3-pip \
+            nginx-dev
+
+      - name: Cache pip packages (semgrep)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/pip
+          key: pip-semgrep-${{ runner.os }}
+
+      - name: Install semgrep
+        run: |
+          pip3 install --quiet semgrep
+          semgrep --version
+
+      - name: Cache semgrep rules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.semgrep
+          key: semgrep-rules-${{ runner.os }}-p-c-security-audit
+
+      - name: Cache nginx-dev generated headers
+        id: nginx-dev-objs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /usr/share/nginx/src/objs
+          key: nginx-dev-objs-${{ runner.os }}-${{ hashFiles('/var/lib/dpkg/info/nginx-dev.list') }}
+
+      - name: Generate nginx build headers (for clang-tidy)
+        if: steps.nginx-dev-objs.outputs.cache-hit != 'true'
+        run: |
+          cd /usr/share/nginx/src
+          CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null 2>&1 || true
+
+      - name: flawfinder (security risk scanner, SARIF)
+        run: |
+          flawfinder --minlevel=1 --sarif \
+            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
+            > flawfinder.sarif 2>/dev/null || true
+          flawfinder --minlevel=1 \
+            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
+            2>&1 | tee flawfinder.log
+          echo "✓ flawfinder: Scan complete"
+
+      - name: Upload flawfinder SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
+        with:
+          sarif_file: flawfinder.sarif
+          category: flawfinder
+        continue-on-error: true
+
+      - name: clang-tidy (cert-*, bugprone-*, clang-analyzer-security.*)
+        run: |
+          NGINX_OBJS=/usr/share/nginx/src/objs
+          NGINX_INCLUDES=$(dpkg -L nginx-dev 2>/dev/null | grep 'ngx_config.h' | head -1 | xargs dirname || echo /usr/include/nginx)
+          INCLUDES="-I$NGINX_INCLUDES -I$NGINX_OBJS -I/usr/include"
+          for f in \
+            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
+            echo "--- clang-tidy: $(basename "$f") ---"
+            # INCLUDES and the pkg-config output are flag lists that MUST
+            # word-split into individual clang-tidy compiler arguments.
+            # shellcheck disable=SC2086,SC2046
+            clang-tidy "$f" \
+              --checks='cert-*,clang-analyzer-security.*,clang-analyzer-unix.*,bugprone-*' \
+              --warnings-as-errors='' \
+              -- -DZSTD_STATIC_LINKING_ONLY $INCLUDES $(pkg-config --cflags libzstd) \
+              2>&1 || true
+          done | tee clang-tidy.log
+          echo "✓ clang-tidy: Scan complete"
+
+      - name: semgrep (C rule set — buffer overflows, unsafe fns, integer issues)
+        run: |
+          semgrep scan \
+            --config "p/c" \
+            --config "p/security-audit" \
+            --sarif --output semgrep.sarif \
+            "$GITHUB_WORKSPACE/filter/" "$GITHUB_WORKSPACE/static/" 2>&1 | tee semgrep.log || true
+          echo "✓ semgrep: Scan complete"
+
+      - name: Upload semgrep SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+        continue-on-error: true
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-reports
+          path: |
+            ${{ github.workspace }}/flawfinder.log
+            ${{ github.workspace }}/flawfinder.sarif
+            ${{ github.workspace }}/clang-tidy.log
+            ${{ github.workspace }}/semgrep.log
+            ${{ github.workspace }}/semgrep.sarif
+          retention-days: 14

@@ -2,9 +2,18 @@
 
 Automated build, test, and security analysis for the zstd-nginx-module.
 
-## Workflow
+## Workflows
 
-Defined in [`.github/workflows/ci.yml`](workflows/ci.yml). Triggers:
+The pipeline is split across four workflow files:
+
+| File | Purpose |
+|---|---|
+| [`build-test.yml`](workflows/build-test.yml) | Lint/validation, build matrix (nginx mainline + Angie), Perl/Python tests, ASAN/UBSAN |
+| [`codeql.yml`](workflows/codeql.yml) | CodeQL `security-extended` analysis |
+| [`security-scanners.yml`](workflows/security-scanners.yml) | flawfinder, clang-tidy, semgrep + SARIF upload |
+| [`fuzzing.yml`](workflows/fuzzing.yml) | libFuzzer Accept-Encoding parser fuzzing |
+
+Common triggers (`build-test.yml`, `codeql.yml`, `security-scanners.yml`):
 
 - **Push** to `master`, `main`, `dev`
 - **Pull requests** to `master`, `main`
@@ -19,18 +28,21 @@ Workflow-level hardening:
   `security-events: write` only where needed
 - `timeout-minutes` on every job — a hung nginx test cannot burn runner hours
 - All third-party actions are **pinned to commit SHAs** (see the header
-  comment in `ci.yml`), not floating tags
+  comment in `build-test.yml`), not floating tags
 
 ## nginx versions
 
 | Role | Version | Where |
 |---|---|---|
-| Mainline (default + artifact + tests) | **1.31.0** | `env.NGINX_VERSION`, `build` matrix, `build-asan` |
-| Stable | **1.28.3** | `build` matrix |
+| nginx mainline (default + artifact + tests) | **1.31.0** | `env.NGINX_VERSION`, `build` matrix, `build-asan` |
+| Angie (nginx fork, also packaged) | **1.11.5** | `build` matrix |
 
 `1.31.0` is the current nginx mainline release. The `build` job uses a
-`strategy.matrix` over both so module/nginx API drift is caught on the stable
-line as well as mainline. The shared test binary is the mainline one.
+`strategy.matrix` (include entries with `flavor`/`version`/`url`/`dir`) so the
+module is compiled against both nginx mainline and Angie — the actively
+developed fork this module also ships packages for (see
+`tools/test_package_artifact.py`). The shared test binary is the nginx
+mainline one.
 
 There is **no special "CI module" for nginx** — CI builds nginx from source
 with `--add-module` (full binary) or `--with-compat` + nginx-dev headers (for
@@ -56,19 +68,20 @@ Module sources additionally get a strict compile pass with
 
 ## Jobs
 
-| Job | Depends on | Purpose |
-|---|---|---|
-| `validation` | — | shellcheck, cppcheck, clang static analyzer, Python harness unit tests |
-| `codeql` | — | GitHub first-party C/C++ security analysis (`security-extended`) |
-| `build` | — | Build nginx binary (matrix: stable + mainline), strict module compile, ccache, upload artifact |
-| `build-asan` | — | Build nginx with `-fsanitize=address,undefined` |
-| `tests` | `build` | Perl `Test::Nginx::Socket` suites + Python end-to-end smoke tests |
-| `tests-asan` | `build-asan` | Re-run smoke tests under ASAN+UBSAN, fail on any memory/UB error |
-| `secure` | — | flawfinder, clang-tidy, semgrep — results uploaded as SARIF to the Security tab |
+| Workflow | Job | Depends on | Purpose |
+|---|---|---|---|
+| build-test | `validation` | — | actionlint, shellcheck, cppcheck, clang static analyzer, Python harness unit tests |
+| build-test | `build` | — | Build matrix (nginx mainline + Angie), strict module compile, ccache, upload artifact |
+| build-test | `build-asan` | — | Build nginx with `-fsanitize=address,undefined` |
+| build-test | `tests` | `build` | Perl `Test::Nginx::Socket` suites + Python end-to-end smoke tests |
+| build-test | `tests-asan` | `build-asan` | Re-run smoke tests under ASAN+UBSAN, fail on any memory/UB error |
+| codeql | `codeql` | — | GitHub first-party C/C++ security analysis (`security-extended`) |
+| security-scanners | `secure` | — | flawfinder, clang-tidy, semgrep — results uploaded as SARIF to the Security tab |
 
-`validation`, `codeql`, `build`, `build-asan`, and `secure` all start in
-parallel. Only `tests`/`tests-asan` wait, on their respective build job.
-(The scanners no longer have a pointless dependency on the nginx build.)
+Within `build-test`, `validation`, `build`, and `build-asan` start in
+parallel; only `tests`/`tests-asan` wait on their respective build job.
+`codeql` and `security-scanners` are independent workflows running in
+parallel with it.
 
 ### `tests` coverage
 
@@ -111,7 +124,7 @@ Build against nginx locally before pushing:
 
 ```bash
 bash tools/ci-build.sh            # default nginx 1.31.0
-bash tools/ci-build.sh 1.28.3     # specific version
+bash tools/ci-build.sh 1.29.8     # specific nginx version
 ```
 
 Run the test suites locally (requires `Test::Nginx::Socket`):
@@ -134,12 +147,12 @@ python3 -m unittest test_test_encoding test_test_package_artifact
 ## Status badge
 
 ```markdown
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![Build & Test](https://github.com/OWNER/REPO/actions/workflows/build-test.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/build-test.yml)
 ```
 
 ## See also
 
-- [`workflows/ci.yml`](workflows/ci.yml) — workflow definition
+- [`workflows/build-test.yml`](workflows/build-test.yml) — main build/test workflow definition
 - `tools/ci-build.sh` — local build script
 - `tools/test_encoding.py` — end-to-end encoding tester
 - `tools/test_terminal_frame.py` — terminal-frame regression test
