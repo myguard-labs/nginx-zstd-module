@@ -10,6 +10,8 @@
 
 #include <zstd.h>
 
+#include <limits.h>  /* INT_MAX — config-load bound on (int)-narrowed sizes */
+
 #include "../ngx_http_zstd_common.h"
 
 
@@ -119,6 +121,10 @@ static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
 static ngx_int_t ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
+static char *ngx_http_zstd_check_size_int_max(ngx_conf_t *cf, void *post,
+    void *data);
+static char *ngx_http_zstd_check_num_int_max(ngx_conf_t *cf, void *post,
+    void *data);
 static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static void ngx_http_zstd_cleanup_dict(void *data);
@@ -127,6 +133,26 @@ static void ngx_http_zstd_cleanup_cctx(void *data);
 
 static ngx_http_zstd_comp_level_bounds_t  ngx_http_zstd_comp_level_bounds = {
     ngx_http_zstd_comp_level
+};
+
+
+/*
+ * Config-load bound for the two directives whose parsed value is later
+ * narrowed with an (int) cast before being handed to libzstd
+ * (zstd_target_cblock_size -> ssize_t, zstd_window_log -> ngx_int_t).
+ * On a 64-bit platform a configured value above INT_MAX would silently
+ * truncate (and possibly wrap negative) in that cast, bypassing zstd's
+ * own range check with a meaningless value. Reject it at config load
+ * with a clear error instead of a confusing runtime failure. Separate
+ * handlers because set_size_slot stores ssize_t and set_num_slot
+ * stores ngx_int_t; both defer to the same INT_MAX comparison.
+ */
+static ngx_conf_post_t  ngx_http_zstd_check_size_int_max_post = {
+    ngx_http_zstd_check_size_int_max
+};
+
+static ngx_conf_post_t  ngx_http_zstd_check_num_int_max_post = {
+    ngx_http_zstd_check_num_int_max
 };
 
 
@@ -180,14 +206,14 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       ngx_conf_set_size_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, target_cblock_size),
-      NULL },
+      &ngx_http_zstd_check_size_int_max_post },
 
     { ngx_string("zstd_window_log"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, window_log),
-      NULL },
+      &ngx_http_zstd_check_num_int_max_post },
 
     { ngx_string("zstd_long"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
@@ -1409,6 +1435,52 @@ ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
 
     return NGX_CONF_OK;
 }
+
+
+/*
+ * Shared INT_MAX bound check for the size/num post-handlers below. The
+ * value is rejected if negative (these directives have no meaningful
+ * negative setting) or above INT_MAX, since both are later passed to
+ * libzstd through an (int) cast. `name` is the directive label for the
+ * error message.
+ */
+static char *
+ngx_http_zstd_int_max_bound(ngx_conf_t *cf, ngx_int_t value,
+    const char *name)
+{
+    if (value < 0 || value > INT_MAX) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"%s\" must be between 0 and %d",
+                           name, INT_MAX);
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+static char *
+ngx_http_zstd_check_size_int_max(ngx_conf_t *cf, void *post, void *data)
+{
+    ssize_t  *sp = data;
+
+    (void) post;
+
+    return ngx_http_zstd_int_max_bound(cf, (ngx_int_t) *sp,
+                                       "zstd_target_cblock_size");
+}
+
+
+static char *
+ngx_http_zstd_check_num_int_max(ngx_conf_t *cf, void *post, void *data)
+{
+    ngx_int_t  *np = data;
+
+    (void) post;
+
+    return ngx_http_zstd_int_max_bound(cf, *np, "zstd_window_log");
+}
+
 
 static char *
 ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
