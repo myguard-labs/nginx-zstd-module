@@ -756,7 +756,21 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ngx_chain_t               *cl;
     ngx_http_zstd_loc_conf_t  *zlcf;
 
-    if (ctx->buffer_out.pos < ctx->buffer_out.size) {
+    /*
+     * Keep using the current output buffer only if it still exists AND has
+     * room. The body filter deliberately sets ctx->out_buf = NULL after
+     * ngx_chain_update_chains() (to avoid touching a buffer that was just
+     * recycled onto the free/busy chains). On a response large enough to
+     * need more than one ZSTD_CStreamOutSize output buffer (chunked /
+     * no-Content-Length is the common trigger), the inner compress loop can
+     * re-enter get_buf with ctx->out_buf == NULL while ctx->buffer_out still
+     * looks non-full. Without the NULL check this returned NGX_OK and the
+     * very next ngx_http_zstd_filter_compress() dereferenced the NULL
+     * ctx->out_buf ("ctx->out_buf->last += ...") — a worker SIGSEGV that
+     * only manifests past the first ~128 KB of output. Require a live
+     * out_buf here so an invalidated one always forces a fresh acquire.
+     */
+    if (ctx->out_buf != NULL && ctx->buffer_out.pos < ctx->buffer_out.size) {
         return NGX_OK;
     }
 

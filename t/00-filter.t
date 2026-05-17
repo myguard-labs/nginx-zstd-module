@@ -25,7 +25,7 @@ add_block_preprocessor(sub {
 no_long_string();
 log_level 'debug';
 repeat_each(3);
-plan tests => repeat_each() * (blocks() * 3) + 150;
+plan tests => repeat_each() * (blocks() * 3) + 153;
 run_tests();
 
 
@@ -1092,3 +1092,79 @@ sub {
 }
 --- response_body
 pledged-src-size round-trip body, long enough to compress and exercise the known-Content-Length path end to end
+
+
+
+=== TEST 44: chunked no-Content-Length body > one ZSTD_CStreamOutSize buffer round-trips
+# Regression for the multi-output-buffer use-after-free / NULL-deref:
+# get_buf()'s early return ("buffer_out not full -> keep current out_buf")
+# did not check that ctx->out_buf was still non-NULL. On a chunked /
+# no-Content-Length response large enough to need more than one
+# ZSTD_CStreamOutSize output buffer, the body filter's recycle guard
+# (ctx->out_buf = NULL after ngx_chain_update_chains) left out_buf NULL
+# while buffer_out still looked non-full; the next compress() dereferenced
+# it ("ctx->out_buf->last += ...") -> worker SIGSEGV, the response
+# truncated at exactly 131072 decoded bytes with no zstd end-of-frame.
+# Single-buffer responses never recycle so never crashed, which is why
+# the homepage worked but wp-admin (large chunked CSS) broke in prod.
+#
+# A mock TCP backend streams a chunked body with NO Content-Length, far
+# larger than one ~128 KB output buffer and highly compressible. The
+# response must come back zstd-encoded, decompress cleanly (no premature
+# end), and equal the original byte-for-byte (asserted via a len:md5
+# checksum so the body need not be inlined). A pre-fix module crashes
+# the worker here / yields a short body; the fixed module round-trips.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        proxy_http_version 1.1;
+        proxy_buffering on;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/up;
+    }
+    location /up {
+        proxy_http_version 1.1;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_RAND_PORT_1/;
+    }
+--- tcp_listen: $TEST_NGINX_RAND_PORT_1
+--- tcp_no_close
+--- tcp_reply eval
+my $unit = "ABCDEFGHIJ0123456789zstd-multibuffer-regression-payload-";
+my $body = $unit x 5000;            # ~290 KB, >2x ZSTD_CStreamOutSize
+my $hdr  = "HTTP/1.1 200 OK\r\n"
+         . "Content-Type: text/plain\r\n"
+         . "Transfer-Encoding: chunked\r\n"
+         . "Connection: close\r\n\r\n";
+my $out = $hdr;
+# emit in 8 KB chunks so it is genuinely chunked, no Content-Length
+for (my $i = 0; $i < length($body); $i += 8192) {
+    my $c = substr($body, $i, 8192);
+    $out .= sprintf("%x\r\n", length($c)) . $c . "\r\n";
+}
+$out .= "0\r\n\r\n";
+$out
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+!Content-Length
+Content-Encoding: zstd
+--- response_body_filters eval
+sub {
+    my $zstd = $_[0];
+    open(my $fh, "|-", "zstd -dq -c >/tmp/zstd_t44.out 2>/dev/null") or return "ERR-OPEN";
+    print $fh $zstd; close($fh);
+    my $rc = $?;
+    open(my $r, "<", "/tmp/zstd_t44.out") or return "ERR-READ";
+    local $/; my $d = <$r>; close($r); unlink "/tmp/zstd_t44.out";
+    return "ERR-DECODE rc=$rc" if $rc != 0;          # premature end -> non-zero
+    require Digest::MD5;
+    return length($d) . ":" . Digest::MD5::md5_hex($d);
+}
+--- response_body eval
+my $unit = "ABCDEFGHIJ0123456789zstd-multibuffer-regression-payload-";
+my $body = $unit x 5000;
+require Digest::MD5;
+length($body) . ":" . Digest::MD5::md5_hex($body)
