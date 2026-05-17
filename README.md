@@ -272,12 +272,14 @@ zstd_types
 ### zstd_buffers
 
 **Syntax:** `zstd_buffers number size;`
-**Default:** `zstd_buffers 4 32k;`
+**Default:** `zstd_buffers 2 <ZSTD_CStreamOutSize()>;` (the size is libzstd's recommended streaming output unit, ~128 KB)
 **Context:** `http, server, location`
 
-Configures the number and size of output buffers used during compression. The total buffer space is `number × size`, which the default keeps at ~128 KB.
+Configures the number and size of output buffers used during compression. The total buffer space is `number × size`.
 
-The default was changed from many page-sized buffers (`32 4k`) to a few large ones (`4 32k`). zstd's natural output unit is roughly 128 KB; draining each compress call into a 4 KB buffer forced many extra compression round-trips and output-chain allocations per response. Larger buffers let each compress call flush a much bigger slice, reducing per-response CPU and allocation overhead at the same total memory. Configurations that set `zstd_buffers` explicitly are unaffected.
+The default buffer **size** is `ZSTD_CStreamOutSize()` — the value libzstd documents as the minimum at which `ZSTD_compressStream2()` can flush a complete internal block in a single call. With any smaller buffer, zstd is forced to fragment a block across calls, costing extra compression round-trips and output-chain allocations per response. Earlier versions used a heuristic (`32 4k`, then `4 32k`) that approximated this; the module now asks libzstd for the exact value so it stays correct if the library changes it.
+
+The default **count** is `2`: one buffer being filled by the compressor while the other is in flight down the output chain. This sets the per-request filter-memory floor at roughly `2 × ZSTD_CStreamOutSize()` (~256 KB), up from the previous ~128 KB — the deliberate cost of never forcing zstd to flush mid-block. If that trade is wrong for your workload (many concurrent connections, memory-constrained), set `zstd_buffers` explicitly to a smaller value; configurations that set it are unaffected by this default.
 
 Increasing these values allows larger chunks to be accumulated before writing, potentially improving throughput at the cost of higher per-request memory usage.
 

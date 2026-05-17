@@ -999,16 +999,29 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_ptr_value(conf->dict, prev->dict, NULL);
     /*
-     * Default to a few large buffers rather than many page-sized ones.
-     * zstd's natural output unit is ZSTD_CStreamOutSize() (~128 KB);
-     * draining each ZSTD_compressStream2() call into a 4 KB buffer forced
-     * many extra compress round-trips and ngx_alloc_chain_link() calls per
-     * response. 4 x 32 KB keeps total filter memory at the previous
-     * ~128 KB while letting each compress call flush a far larger slice,
-     * cutting inner-loop iterations and chain churn. Operators who tuned
-     * zstd_buffers explicitly are unaffected (merge keeps their value).
+     * Default the output buffer size to ZSTD_CStreamOutSize() — the
+     * encoder's own recommended output granularity (~128 KB). It is the
+     * documented minimum at which ZSTD_compressStream2() can flush a full
+     * internal block in a single call; with any smaller buffer zstd is
+     * forced to fragment a block across calls, costing extra
+     * compress round-trips and ngx_alloc_chain_link() churn per response.
+     * The previous 4 x 32 KB heuristic approximated this; using the API's
+     * value is the principled form and tracks libzstd if it ever changes.
+     *
+     * Two such buffers: one being filled by the compressor while the
+     * other is in flight down the output chain. This raises the
+     * per-request filter-memory floor to ~2 x ZSTD_CStreamOutSize()
+     * (~256 KB) from the prior ~128 KB — the deliberate cost of never
+     * forcing zstd to mid-block flush. Operators who set zstd_buffers
+     * explicitly are unaffected (the merge keeps their value), and can
+     * tune it down if the memory trade is wrong for their workload.
+     *
+     * ZSTD_CStreamOutSize() is a constant-returning libzstd call (no
+     * allocation, no per-call cost); it is evaluated once here at config
+     * merge, not per request.
      */
-    ngx_conf_merge_bufs_value(conf->bufs, prev->bufs, 4, 32 * 1024);
+    ngx_conf_merge_bufs_value(conf->bufs, prev->bufs,
+                              2, ZSTD_CStreamOutSize());
 
     zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
 
