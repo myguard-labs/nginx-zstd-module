@@ -31,6 +31,8 @@ This is a hardened fork: every build is exercised against **nginx mainline and [
     * [zstd_static](#zstd_static)
 * [Variables](#variables)
   * [$zstd_ratio](#zstd_ratio)
+  * [$zstd_bytes_in](#zstd_bytes_in)
+  * [$zstd_bytes_out](#zstd_bytes_out)
 * [Testing & CI](#testing--ci)
 * [Author](#author)
 * [License](#license)
@@ -370,6 +372,28 @@ Useful in access logs:
 
 ```nginx
 log_format main '$remote_addr - $request - ratio: $zstd_ratio';
+```
+
+---
+
+## $zstd_bytes_in
+
+The number of uncompressed (input) bytes the filter consumed for the
+current response. Only set once the filter has finished compressing the
+response (log phase); not found otherwise.
+
+## $zstd_bytes_out
+
+The number of compressed (output) bytes the filter produced for the
+current response. Same availability as `$zstd_bytes_in`.
+
+Together these expose the **absolute** transfer saving, where
+`$zstd_ratio` only gives the ratio. By construction
+`$zstd_bytes_in / $zstd_bytes_out` equals `$zstd_ratio`:
+
+```nginx
+log_format zstd '$request in=$zstd_bytes_in out=$zstd_bytes_out '
+                'ratio=$zstd_ratio';
 ```
 
 ---

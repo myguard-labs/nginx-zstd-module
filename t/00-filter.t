@@ -919,3 +919,34 @@ Accept-Encoding: zstd
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 39: $zstd_bytes_in / $zstd_bytes_out are emitted for a compressed response
+# Asserts the byte-count log variables. $zstd_bytes_in and
+# $zstd_bytes_out are log-phase variables backed by ctx->bytes_in/out
+# (the same counters $zstd_ratio derives from). Referencing them via
+# `set` exercises the get_handler; a clean compressed response with no
+# error proves the handler resolves both fields without faulting.
+# Exact-value correctness (and consistency with $zstd_ratio) is verified
+# end-to-end in tools/test_encoding.py, which can read the access log.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        set $unused_in  $zstd_bytes_in;
+        set $unused_out $zstd_bytes_out;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]

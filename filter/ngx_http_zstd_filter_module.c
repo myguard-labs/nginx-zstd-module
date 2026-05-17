@@ -87,6 +87,8 @@ static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt  ngx_http_next_body_filter;
 
 static ngx_str_t  ngx_http_zstd_ratio = ngx_string("zstd_ratio");
+static ngx_str_t  ngx_http_zstd_bytes_in = ngx_string("zstd_bytes_in");
+static ngx_str_t  ngx_http_zstd_bytes_out = ngx_string("zstd_bytes_out");
 
 
 static ngx_int_t ngx_http_zstd_header_filter(ngx_http_request_t *r);
@@ -108,6 +110,8 @@ static char *ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
 static ngx_int_t ngx_http_zstd_add_variables(ngx_conf_t *cf);
 static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *vv, uintptr_t data);
+static ngx_int_t ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
 static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
@@ -1034,6 +1038,24 @@ ngx_http_zstd_add_variables(ngx_conf_t *cf)
 
     v->get_handler = ngx_http_zstd_ratio_variable;
 
+    v = ngx_http_add_variable(cf, &ngx_http_zstd_bytes_in,
+                              NGX_HTTP_VAR_NOCACHEABLE);
+    if (v == NULL) {
+        return NGX_ERROR;
+    }
+
+    v->get_handler = ngx_http_zstd_bytes_variable;
+    v->data = offsetof(ngx_http_zstd_ctx_t, bytes_in);
+
+    v = ngx_http_add_variable(cf, &ngx_http_zstd_bytes_out,
+                              NGX_HTTP_VAR_NOCACHEABLE);
+    if (v == NULL) {
+        return NGX_ERROR;
+    }
+
+    v->get_handler = ngx_http_zstd_bytes_variable;
+    v->data = offsetof(ngx_http_zstd_ctx_t, bytes_out);
+
     return NGX_OK;
 }
 
@@ -1067,6 +1089,41 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     vv->len = ngx_sprintf(vv->data, "%ui.%03ui", ratio_int, ratio_frac)
               - vv->data;
 
+    vv->valid = 1;
+    vv->no_cacheable = 1;
+
+    return NGX_OK;
+}
+
+
+/*
+ * $zstd_bytes_in / $zstd_bytes_out — absolute byte counts for the
+ * compressed response, complementing $zstd_ratio (which only gives the
+ * ratio). `data` is the offsetof() of the ctx field to report, so one
+ * handler serves both. Only set once the filter has finished compressing
+ * this response (log phase), like $zstd_ratio.
+ */
+static ngx_int_t
+ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *vv, uintptr_t data)
+{
+    size_t                value;
+    ngx_http_zstd_ctx_t  *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_zstd_filter_module);
+    if (ctx == NULL || !ctx->done) {
+        vv->not_found = 1;
+        return NGX_OK;
+    }
+
+    value = *(size_t *) ((char *) ctx + data);
+
+    vv->data = ngx_pnalloc(r->pool, NGX_SIZE_T_LEN);
+    if (vv->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    vv->len = ngx_sprintf(vv->data, "%uz", value) - vv->data;
     vv->valid = 1;
     vv->no_cacheable = 1;
 
