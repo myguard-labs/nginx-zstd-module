@@ -26,6 +26,7 @@ This is a hardened fork: every build is exercised against **nginx mainline and [
     * [zstd_buffers](#zstd_buffers)
     * [zstd_target_cblock_size](#zstd_target_cblock_size)
     * [zstd_window_log](#zstd_window_log)
+    * [zstd_long](#zstd_long)
     * [zstd_bypass](#zstd_bypass)
     * [zstd_dict_file](#zstd_dict_file)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
@@ -343,6 +344,31 @@ http {
     zstd on;
     zstd_comp_level   9;
     zstd_window_log   21;   # cap the window at 2 MB per request
+}
+```
+
+---
+
+### zstd_long
+
+**Syntax:** `zstd_long on | off;`
+**Default:** `zstd_long off;`
+**Context:** `http, server, location`
+
+Enables zstd **long-distance matching** (`ZSTD_c_enableLongDistanceMatching`). zstd keeps a secondary long-range hash table that finds repeated sequences far beyond the regular match window, which can meaningfully improve the compression ratio on large, internally repetitive bodies — concatenated JSON, HTML with repeated boilerplate, log dumps, sitemaps.
+
+Off by default: the win only appears on inputs large enough to exceed the match window, and it costs a modest, bounded amount of extra per-request memory for the long-range table. Small responses should not pay that allocation, so enable it only on locations that serve large repetitive payloads.
+
+Interacts with [`zstd_window_log`](#zstd_window_log): an explicit `zstd_window_log` still takes precedence over the window zstd would otherwise derive when long mode is on, so the per-request memory ceiling remains under your control.
+
+**Example:**
+
+```nginx
+location /api/bulk-export {
+    zstd on;
+    zstd_comp_level  12;
+    zstd_long        on;    # large, highly repetitive JSON
+    zstd_window_log  24;    # keep the memory ceiling explicit
 }
 ```
 

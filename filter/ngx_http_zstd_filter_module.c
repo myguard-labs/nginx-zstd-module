@@ -28,6 +28,7 @@ typedef struct {
     ssize_t                      max_length;
     ssize_t                      target_cblock_size;  /* Issue #38: ZSTD_c_targetCBlockSize */
     ngx_int_t                    window_log;          /* ZSTD_c_windowLog: bounds per-request memory */
+    ngx_flag_t                   long_mode;           /* ZSTD_c_enableLongDistanceMatching */
 
     ngx_array_t                 *bypass;              /* ngx_http_complex_value_t: per-request bypass */
 
@@ -184,6 +185,13 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, window_log),
+      NULL },
+
+    { ngx_string("zstd_long"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_zstd_loc_conf_t, long_mode),
       NULL },
 
     { ngx_string("zstd_bypass"),
@@ -803,6 +811,29 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
 #endif
 
     /*
+     * Long-distance matching. zstd keeps a secondary long-range hash
+     * table that finds repeats far beyond the regular match window —
+     * a meaningful ratio win on large, internally repetitive bodies
+     * (concatenated JSON, HTML with repeated boilerplate, logs) at a
+     * modest, bounded extra memory cost. Off by default; the win only
+     * materialises on inputs large enough to exceed the window, and
+     * small responses should not pay the table allocation. Set before
+     * zstd_window_log below so an explicit window cap still takes
+     * precedence over the LDM-derived default.
+     */
+    if (zlcf->long_mode) {
+        rc = ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching,
+                                     1);
+        if (ZSTD_isError(rc)) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "zstd: ZSTD_CCtx_setParameter("
+                          "enableLongDistanceMatching) failed: %s",
+                          ZSTD_getErrorName(rc));
+            return NGX_ERROR;
+        }
+    }
+
+    /*
      * Cap the compression window. zstd's per-context working memory is
      * dominated by the window size (~2^windowLog bytes plus match-table
      * overhead). Without a cap, a high level on large bodies lets each
@@ -925,6 +956,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->max_length = NGX_CONF_UNSET;
     conf->target_cblock_size = NGX_CONF_UNSET;
     conf->window_log = NGX_CONF_UNSET;
+    conf->long_mode = NGX_CONF_UNSET;
     conf->bypass = NGX_CONF_UNSET_PTR;
 
     return conf;
@@ -955,6 +987,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->max_length, prev->max_length, NGX_CONF_UNSET);
     ngx_conf_merge_value(conf->target_cblock_size, prev->target_cblock_size, 0);
     ngx_conf_merge_value(conf->window_log, prev->window_log, 0);
+    ngx_conf_merge_value(conf->long_mode, prev->long_mode, 0);
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
