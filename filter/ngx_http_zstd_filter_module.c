@@ -101,6 +101,8 @@ static ngx_int_t ngx_http_zstd_filter_add_data(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
 static ngx_int_t ngx_http_zstd_filter_get_buf(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
+static ngx_int_t ngx_http_zstd_set_param(ngx_http_request_t *r,
+    ZSTD_CCtx *cctx, ZSTD_cParameter param, int value, const char *name);
 static ngx_int_t ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
 static ngx_int_t ngx_http_zstd_filter_compress(ngx_http_request_t *r,
@@ -779,6 +781,32 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
 
 /*
+ * Set one ZSTD_CCtx parameter, logging a uniform NGX_LOG_ALERT and
+ * returning NGX_ERROR on failure. Collapses the five structurally
+ * identical setParameter+isError+log blocks in init_cctx into one
+ * call site each, and gives every parameter the same error-message
+ * format (they previously diverged slightly per call). `name` is the
+ * human-readable parameter label for the log line.
+ */
+static ngx_int_t
+ngx_http_zstd_set_param(ngx_http_request_t *r, ZSTD_CCtx *cctx,
+    ZSTD_cParameter param, int value, const char *name)
+{
+    size_t  rc;
+
+    rc = ZSTD_CCtx_setParameter(cctx, param, value);
+    if (ZSTD_isError(rc)) {
+        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "zstd: ZSTD_CCtx_setParameter(%s=%d) failed: %s",
+                      name, value, ZSTD_getErrorName(rc));
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+/*
  * Configure a per-request CCtx on first body data.
  * The CCtx is allocated outside the request pool but attached to the request
  * cleanup chain, so overlapping requests in one worker never share libzstd
@@ -826,24 +854,21 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    rc = ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel,
-                                 (int) zlcf->level);
-    if (ZSTD_isError(rc)) {
-        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                      "zstd: ZSTD_CCtx_setParameter(level=%d) failed: %s",
-                      (int) zlcf->level, ZSTD_getErrorName(rc));
+    if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_compressionLevel,
+                                (int) zlcf->level, "level")
+        != NGX_OK)
+    {
         return NGX_ERROR;
     }
 
     /* Issue #38: Apply target compressed block size if configured */
 #ifdef ZSTD_c_targetCBlockSize
     if (zlcf->target_cblock_size > 0) {
-        rc = ZSTD_CCtx_setParameter(cctx, ZSTD_c_targetCBlockSize,
-                                     (int) zlcf->target_cblock_size);
-        if (ZSTD_isError(rc)) {
-            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                          "zstd: ZSTD_CCtx_setParameter(targetCBlockSize=%d) failed: %s",
-                          (int) zlcf->target_cblock_size, ZSTD_getErrorName(rc));
+        if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_targetCBlockSize,
+                                    (int) zlcf->target_cblock_size,
+                                    "targetCBlockSize")
+            != NGX_OK)
+        {
             return NGX_ERROR;
         }
     }
@@ -861,13 +886,11 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
      * precedence over the LDM-derived default.
      */
     if (zlcf->long_mode) {
-        rc = ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching,
-                                     1);
-        if (ZSTD_isError(rc)) {
-            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                          "zstd: ZSTD_CCtx_setParameter("
-                          "enableLongDistanceMatching) failed: %s",
-                          ZSTD_getErrorName(rc));
+        if (ngx_http_zstd_set_param(r, cctx,
+                                    ZSTD_c_enableLongDistanceMatching, 1,
+                                    "enableLongDistanceMatching")
+            != NGX_OK)
+        {
             return NGX_ERROR;
         }
     }
@@ -882,12 +905,10 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
      * Unset (0) keeps zstd's level-derived default.
      */
     if (zlcf->window_log > 0) {
-        rc = ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog,
-                                     (int) zlcf->window_log);
-        if (ZSTD_isError(rc)) {
-            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                          "zstd: ZSTD_CCtx_setParameter(windowLog=%d) failed: %s",
-                          (int) zlcf->window_log, ZSTD_getErrorName(rc));
+        if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_windowLog,
+                                    (int) zlcf->window_log, "windowLog")
+            != NGX_OK)
+        {
             return NGX_ERROR;
         }
     }
