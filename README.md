@@ -376,8 +376,12 @@ Increasing these values allows larger chunks to be accumulated before writing, p
 http {
     zstd on;
 
-    # Leave it unset to use the tuned default
-    # (2 x ZSTD_CStreamOutSize(), ~256 KB/request).
+    # The built-in default (applied when the directive is omitted):
+    # 2 buffers sized to ZSTD_CStreamOutSize() (~128 KB each on
+    # libzstd 1.5.x), i.e. ~256 KB/request. The line below is that
+    # default written explicitly — leaving zstd_buffers unset is
+    # equivalent and recommended:
+    zstd_buffers 2 128k;
 
     server {
         # Memory-constrained box with very high concurrency:
@@ -388,6 +392,12 @@ http {
     }
 }
 ```
+
+> The default **size** is whatever `ZSTD_CStreamOutSize()` returns for
+> the linked libzstd (~128 KB on 1.5.x); `2 128k` above is the
+> human-readable equivalent for that version. Prefer leaving the
+> directive unset so the size always tracks the library — only write it
+> explicitly when you are deliberately overriding it.
 
 ---
 
