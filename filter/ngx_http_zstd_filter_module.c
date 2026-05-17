@@ -1217,10 +1217,19 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    ratio_int = (ngx_uint_t) ctx->bytes_in / ctx->bytes_out;
-    /* Use uint64_t to prevent integer overflow when multiplying by 1000 */
-    ratio_frac = (ngx_uint_t) ((uint64_t) ctx->bytes_in * 1000
-                 / ctx->bytes_out % 1000);
+    /*
+     * Compute the scaled ratio once and derive both the integer and the
+     * three-decimal fractional part from it, instead of dividing
+     * bytes_in by bytes_out twice. uint64_t scaling is required anyway to
+     * avoid overflow in the *1000 step, so the single division carries no
+     * extra precondition over the previous two.
+     */
+    {
+        uint64_t  scaled = (uint64_t) ctx->bytes_in * 1000 / ctx->bytes_out;
+
+        ratio_int  = (ngx_uint_t) (scaled / 1000);
+        ratio_frac = (ngx_uint_t) (scaled % 1000);
+    }
 
     vv->len = ngx_sprintf(vv->data, "%ui.%03ui", ratio_int, ratio_frac)
               - vv->data;
