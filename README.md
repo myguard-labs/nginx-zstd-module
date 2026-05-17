@@ -15,6 +15,7 @@ This is a hardened fork: every build is exercised against **nginx mainline and [
 
 * [Status](#status)
 * [Synopsis](#synopsis)
+* [Set and forget](#set-and-forget)
 * [Installation](#installation)
 * [Directives](#directives)
   * [ngx_http_zstd_filter_module](#ngx_http_zstd_filter_module)
@@ -94,6 +95,58 @@ find /var/www/static -name "*.js" -o -name "*.css" | \
     xargs -I{} zstd -3 -k {}
 # This creates file.js.zst next to file.js, etc.
 ```
+
+# Set and forget
+
+If you just want sane production compression without reading every
+directive, paste this into the `http {}` block of `nginx.conf` and move
+on. It is tuned for typical web traffic (HTML/JSON/JS/CSS/SVG) and
+relies on the module's built-in defaults for everything not shown.
+
+```nginx
+http {
+    # --- zstd: set and forget ---
+    zstd              on;
+    zstd_comp_level   3;     # sweet spot: strong ratio, cheap CPU
+    zstd_min_length   256;   # don't bother compressing tiny responses
+    zstd_types        text/plain text/css application/json
+                      application/javascript text/xml application/xml
+                      application/xml+rss text/javascript image/svg+xml;
+
+    # Required so proxies/CDNs cache compressed and identity variants
+    # separately. The module warns at startup if this is missing.
+    gzip_vary         on;
+
+    # Pre-compressed static assets (optional but free if you ship .zst)
+    # zstd_static     on;
+}
+```
+
+Why these values, and why nothing else is needed:
+
+* **`zstd_comp_level 3`** — for real web content this beats `gzip -6`
+  on ratio at comparable or better speed (see [Benchmarks](#benchmarks)).
+  Levels ≥ 9 cost CPU steeply for marginal gain; only raise it for
+  infrequently-generated, cached responses.
+* **`zstd_min_length 256`** — below a few hundred bytes the zstd frame
+  overhead outweighs any saving. 256 is a safe floor; the built-in
+  default is 20 if you omit it.
+* **`zstd_buffers` is intentionally not set.** The default is now
+  `2 × ZSTD_CStreamOutSize()` — libzstd's own recommended streaming
+  output unit (~128 KB each). This lets every compress call flush a
+  full internal block without fragmentation. Only override it if you
+  run thousands of concurrent connections on a memory-constrained box
+  and need to trade some throughput for a lower per-request memory
+  floor (see [`zstd_buffers`](#zstd_buffers)).
+* **`zstd_long`, `zstd_window_log`, `zstd_dict_file`,
+  `zstd_target_cblock_size` are intentionally not set.** They are
+  specialist levers (very large repetitive bodies, hard per-request
+  memory caps, shared dictionaries). The defaults are correct for
+  general traffic; reach for these only with a measured reason.
+
+That is the entire recommended baseline. Everything past this point in
+the README is reference detail and tuning for specific workloads — you
+do not need it to run the module well.
 
 # Installation
 
@@ -586,6 +639,34 @@ Honest reading of these numbers:
 * High levels (≥ 9) cost CPU steeply for marginal gain on web content —
   reserve them for infrequently-generated, cached responses.
 
+**How recent module changes affect these numbers.** The table above is
+driven by the `zstd`/`gzip` CLIs against the same libzstd, so it
+measures the *codec* — it is deliberately independent of nginx and does
+**not** move when the module's internals change. The compression
+**ratio** for a given level is therefore unchanged by any recent work.
+What changed is the module's per-response *overhead* inside nginx:
+
+* **Output buffers now default to `2 × ZSTD_CStreamOutSize()`**
+  (previously a `4 × 32 KB` heuristic, and originally `32 × 4 KB`).
+  Each `ZSTD_compressStream2()` call can now flush a complete internal
+  block in one go instead of fragmenting it across calls, removing
+  redundant compress round-trips and output-chain allocations per
+  response. This shows up as lower CPU-per-response and less allocator
+  churn under load — not as a different ratio or a different CLI MB/s
+  figure. The trade is a higher per-request memory floor (~256 KB);
+  see [`zstd_buffers`](#zstd_buffers).
+* **`$zstd_ratio` now computes with a single division** instead of two
+  — a log-path micro-cost, no effect on the response itself.
+* **`zstd_long` (off by default)** can materially improve ratio on
+  large, internally repetitive bodies that exceed the match window —
+  but only when explicitly enabled, and the gain is workload-specific,
+  so it is not reflected in the synthetic table above. Measure on your
+  own assets before enabling.
+
+In short: the codec figures here are stable by design; the recent
+changes make the module *cheaper to run at the same ratio*, and add an
+opt-in ratio lever (`zstd_long`) for specific workloads.
+
 # Operations
 
 **Reloads (`nginx -s reload`).** Compression state is per request: a
@@ -642,7 +723,8 @@ is built and load-tested under ASAN/UBSAN.
 
 Alex Zhang (张超) \<zchao1995@gmail.com\>, UPYUN Inc.
 
-Hardening, test suite, fuzzing and CI by the [deb.myguard.nl](https://deb.myguard.nl/) maintainers.
+Hardening, test suite, fuzzing and CI by Thijs Eilander and the
+[deb.myguard.nl](https://deb.myguard.nl/) maintainers.
 
 # License
 
