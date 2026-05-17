@@ -252,23 +252,62 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
 
-    if (!zlcf->enable
-        || (r->headers_out.status < NGX_HTTP_OK         /* < 200 */
-            || r->headers_out.status == NGX_HTTP_NO_CONTENT  /* 204: no body */
-            || r->headers_out.status == 205              /* 205: no body */
-            || (r->headers_out.status > 299
-                && r->headers_out.status != NGX_HTTP_FORBIDDEN
-                && r->headers_out.status != NGX_HTTP_NOT_FOUND))
-       || (r->headers_out.content_encoding
-           && r->headers_out.content_encoding->value.len)
-       || (r->headers_out.content_length_n != -1
-           && r->headers_out.content_length_n < zlcf->min_length)
-       || (zlcf->max_length != NGX_CONF_UNSET
-           && r->headers_out.content_length_n != -1
-           && r->headers_out.content_length_n > zlcf->max_length)
-       || ngx_http_test_content_type(r, &zlcf->types) == NULL
-       || r->header_only)
+    /*
+     * Eligibility gate. This is the original single 9-term disjunction
+     * split into one early return per reason: behaviour is identical
+     * (|| short-circuits and every term led to the same next-filter
+     * return), but each rejection cause is now individually visible and
+     * greppable. Order is preserved so short-circuit semantics — e.g.
+     * not dereferencing content_encoding before the cheaper checks — are
+     * unchanged.
+     */
+
+    /* zstd disabled for this location */
+    if (!zlcf->enable) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* status not eligible: < 200, bodyless 204/205, or any > 299
+     * except 403/404 (which carry compressible error bodies) */
+    if (r->headers_out.status < NGX_HTTP_OK
+        || r->headers_out.status == NGX_HTTP_NO_CONTENT
+        || r->headers_out.status == 205
+        || (r->headers_out.status > 299
+            && r->headers_out.status != NGX_HTTP_FORBIDDEN
+            && r->headers_out.status != NGX_HTTP_NOT_FOUND))
     {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* already encoded (e.g. upstream gzip/br) — do not double-compress */
+    if (r->headers_out.content_encoding
+        && r->headers_out.content_encoding->value.len)
+    {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* known body smaller than zstd_min_length — not worth a frame */
+    if (r->headers_out.content_length_n != -1
+        && r->headers_out.content_length_n < zlcf->min_length)
+    {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* known body larger than zstd_max_length cap */
+    if (zlcf->max_length != NGX_CONF_UNSET
+        && r->headers_out.content_length_n != -1
+        && r->headers_out.content_length_n > zlcf->max_length)
+    {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* content type not in zstd_types */
+    if (ngx_http_test_content_type(r, &zlcf->types) == NULL) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* header-only response: no body to compress */
+    if (r->header_only) {
         return ngx_http_next_header_filter(r);
     }
 
