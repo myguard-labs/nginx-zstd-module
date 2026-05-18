@@ -573,10 +573,24 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     pos_in  = ctx->buffer_in.pos;
     pos_out = ctx->buffer_out.pos;
 
-    /* Determine the compression directive based on action state */
+    /*
+     * Determine the compression directive.
+     *
+     * END always wins (terminal frame). Otherwise a pending flush
+     * (ctx->flush) must map to ZSTD_e_flush even while the action state
+     * machine is still COMPRESS: that machine only transitions
+     * COMPRESS->FLUSH *after* a call that returned rc > 0 (zstd already
+     * had output to drain). Under `proxy_buffering off` the upstream
+     * forces a flush around a chunk that zstd consumes/buffers
+     * internally with rc == 0; if the directive stayed ZSTD_e_continue
+     * there, libzstd is never told to flush and holds those bytes
+     * indefinitely. Mapping ctx->flush -> ZSTD_e_flush forces libzstd
+     * to disgorge whatever it has buffered, exactly as the stock nginx
+     * gzip/brotli body filters issue a sync flush on a pending flush.
+     */
     if (ctx->action == NGX_HTTP_ZSTD_FILTER_END) {
         directive = ZSTD_e_end;
-    } else if (ctx->action == NGX_HTTP_ZSTD_FILTER_FLUSH) {
+    } else if (ctx->action == NGX_HTTP_ZSTD_FILTER_FLUSH || ctx->flush) {
         directive = ZSTD_e_flush;
     } else {
         directive = ZSTD_e_continue;
@@ -687,9 +701,51 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
                    (size_t) ngx_buf_size(ctx->out_buf), rc == 0, last,
                    ctx->last, ctx->flush, (ngx_uint_t) ctx->action);
 
-    if (ngx_buf_size(ctx->out_buf) == 0 && !last && !(rc == 0 && ctx->flush)) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "zstd emit: suppressed empty non-terminal buffer");
+    /*
+     * Empty, non-terminal output buffer handling.
+     *
+     * Two distinct empty-buffer cases reach here:
+     *
+     *  1. A content-less *completed flush*: ctx->flush is set and the
+     *     ZSTD_e_flush call returned rc == 0 with zero bytes produced.
+     *     Per the libzstd contract rc == 0 from a flush means the
+     *     encoder is fully drained — there is genuinely nothing to
+     *     send. The OLD code's `!(rc == 0 && ctx->flush)` exception
+     *     forwarded a zero-size buffer here, which nginx's
+     *     ngx_http_write_filter rejects ("zero size buf in writer")
+     *     and aborts the request — bug B, under `proxy_buffering off`
+     *     where the upstream forces such flushes.
+     *
+     *     The flush is COMPLETE, so satisfy and clear it here: drop the
+     *     NGX_HTTP_GZIP_BUFFERED bit and ctx->flush, emit nothing, and
+     *     return NGX_AGAIN. Clearing ctx->flush is what makes the body
+     *     filter's inner loop terminate: ngx_http_zstd_filter_add_data()
+     *     keeps the loop alive while ctx->flush is set (expecting this
+     *     function to consume it); a naive "suppress the empty buffer
+     *     but leave ctx->flush set" change spins the worker at 100% CPU
+     *     (a NGX_AGAIN livelock — observed). Clearing it lets the next
+     *     add_data() fall through to NGX_DECLINED (input drained) and
+     *     break the loop cleanly.
+     *
+     *  2. Any other empty, non-terminal buffer (no pending flush):
+     *     nothing to send and nothing to satisfy — just suppress and
+     *     return NGX_AGAIN as before.
+     *
+     * The genuine terminal empty buffer (last) is never suppressed; it
+     * falls through to be emitted with last_buf set below.
+     */
+    if (ngx_buf_size(ctx->out_buf) == 0 && !last) {
+        if (rc == 0 && ctx->flush) {
+            r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
+            ctx->flush = 0;
+            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "zstd emit: content-less flush completed, "
+                           "cleared (no empty buffer forwarded)");
+        } else {
+            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "zstd emit: suppressed empty non-terminal "
+                           "buffer");
+        }
         return NGX_AGAIN;
     }
 

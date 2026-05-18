@@ -484,6 +484,85 @@ jobs:
           python3 tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 18085
           echo "✓ Terminal-frame regression test passed"
 
+      - name: Run proxy_buffering-off truncation regression (bug B)
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # Reproduces the production trigger: zstd over an unbuffered
+          # (proxy_buffering off) chunked, no-Content-Length upstream.
+          # Decodes and byte-compares the full body across the
+          # ZSTD_CStreamInSize buffer-boundary size matrix. Fails on a
+          # module that forwards a zero-size buffer ("zero size buf in
+          # writer" -> aborted/truncated response).
+          python3 tools/test_proxy_unbuffered_truncation.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18086 --backend-port 18087
+          echo "✓ proxy_buffering-off truncation regression passed"
+
+      - name: Run broad compression correctness matrix
+        timeout-minutes: 12
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # ~504 cells: {proxy-buffered, proxy-unbuffered, static}
+          # x {incompressible, highly-compressible, css}
+          # x {1, CStreamInSize +/-1, 200000, 1MiB}
+          # x {zstd, gzip+zstd, gzip-only, identity} x repeat.
+          # Every cell decodes per Content-Encoding and byte-compares
+          # to origin, or asserts correct fallback. Catches the whole
+          # truncation / zero-size-buf / livelock bug class across the
+          # circumstances it has historically recurred in (a step-level
+          # timeout makes a CPU-spin livelock a hard FAIL, not a hang).
+          python3 tools/test_compression_matrix.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18096 --backend-port 18097
+          echo "✓ compression correctness matrix passed"
+
+      - name: Run per-request CCtx isolation regression
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # 774b4a5 class: a shared/not-reset ZSTD_CCtx silently bleeds
+          # one request's compressor state into another (well-formed
+          # but wrong body). Fire many distinct concurrent requests
+          # through one worker over reused keepalive connections; each
+          # response must decode byte-exact to its OWN origin.
+          python3 tools/test_concurrent_cctx_isolation.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18098 --backend-port 18099 \
+            --concurrency 16 --rounds 6
+          echo "✓ per-request CCtx isolation regression passed"
+
+      - name: Run reload-under-load correctness regression
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # 2c538e0 CDict-cycle class: SIGHUP reload while requests are
+          # in flight (zstd_dict_file set). Every response — old-cycle,
+          # straddling, new-cycle — must still decode byte-exact; master
+          # must survive; error log must stay clean. Complements
+          # tools/test_reload_leak.sh (which checks leaks, not response
+          # correctness during reload).
+          python3 tools/test_reload_under_load.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18100 --backend-port 18101 \
+            --reloads 6 --workers 4 --duration 18
+          echo "✓ reload-under-load correctness regression passed"
+
+      - name: Run zstd_long (LDM) directive regression
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # 8edb7bb zstd_long class: the directive had ZERO coverage.
+          # A 16 MiB body whose duplicate region repeats beyond the
+          # level-6 default window must (a) decode byte-exact and
+          # (b) compress ~2:1 smaller with zstd_long on than off —
+          # proving ZSTD_c_enableLongDistanceMatching actually reached
+          # libzstd and engaged, and the directive neither corrupts nor
+          # truncates the stream (the bug-B failure mode).
+          python3 tools/test_zstd_long_ldm.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18102 --backend-port 18103
+          echo "✓ zstd_long (LDM) directive regression passed"
+
       - name: Test summary
         if: success()
         run: echo "✓ All Perl + Python end-to-end tests passed"
@@ -535,6 +614,21 @@ jobs:
           python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18091 --fixture-lines 1900
           python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18092 --concurrent-requests 2
           python3 tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 18093
+          python3 tools/test_proxy_unbuffered_truncation.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18094 --backend-port 18095
+          # Matrix under ASAN/UBSAN at repeat=1 (252 cells) — the
+          # truncation/zero-size-buf/livelock class has UB+lifetime
+          # history, so exercise the full circumstance matrix with
+          # sanitizers, not just the happy path.
+          python3 tools/test_compression_matrix.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18096 \
+            --backend-port 18097 --repeat 1
+          # CCtx isolation under ASAN/UBSAN: a shared/not-reset context
+          # is a lifetime bug — exactly what ASAN is for. Lighter
+          # concurrency/rounds since the sanitized binary is slower.
+          python3 tools/test_concurrent_cctx_isolation.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18098 \
+            --backend-port 18099 --concurrency 8 --rounds 3
           echo "✓ All smoke tests clean under ASAN+UBSAN"
 
       - name: zstd_dict_file reload leak check (CDict lifecycle)

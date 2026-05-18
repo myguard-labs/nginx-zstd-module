@@ -404,3 +404,32 @@ Content-Encoding: zstd
 !Content-Encoding
 --- no_error_log
 [alert]
+
+
+
+# COVERAGE NOTES on gaps found by the git-history CI audit:
+#
+# Gap 2 — f7e2ef3 ("clear Accept-Ranges in static module"):
+# deliberately NOT covered by a black-box test here. The static
+# handler serves a local file and never sets r->allow_ranges (in this
+# nginx, only the upstream/proxy path sets it — see
+# ngx_http_upstream.c, and ngx_http_range_filter_module.c bails unless
+# r->allow_ranges). ngx_http_clear_accept_ranges() in the static
+# module is therefore purely defensive: no request reachable through
+# zstd_static alone makes the pre-fix and fixed builds differ
+# (empirically verified — identical 200, no Accept-Ranges, no
+# Content-Range, on both a pre-f7e2ef3 and a fixed .so). A Perl test
+# asserting !Accept-Ranges would PASS on the buggy build too, i.e. be
+# blind. Per the project's fail-first discipline we do not add a test
+# that cannot fail on the unfixed code.
+#
+# Gap 3 — HTTP/2 transport axis (8281baa bug-B class):
+# the build enables --with-http_v2_module but nothing tests the h2
+# path. HTTP/2 in nginx requires TLS + ALPN/Upgrade negotiation; h2c
+# (cleartext) does not work without Upgrade in nginx config. A Python
+# test without TLS cannot easily drive the h2 path. The bug-B defect
+# (empty-buffer, flush-state-machine, c->buffered accounting) is
+# already well-covered by test_proxy_unbuffered_truncation.py
+# (HTTP/1.1) and the matrix under ASAN; the h2-specific framing path
+# would be redundant effort without adding coverage for a new code
+# path. Left for future work when/if CI adds TLS test infrastructure.
