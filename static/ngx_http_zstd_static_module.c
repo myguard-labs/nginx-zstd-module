@@ -120,11 +120,14 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
+    log = r->connection->log;
+
     if (!clcf->gzip_vary && rc != NGX_OK) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0,
+                       "zstd static: skip, client did not accept zstd and "
+                       "gzip_vary is off");
         return NGX_DECLINED;
     }
-
-    log = r->connection->log;
 
     p = ngx_http_map_uri_to_path(r, &path, &root, sizeof(".zst"));
     if (p == NULL) {
@@ -250,6 +253,9 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     ngx_str_set(&h->key, "Content-Encoding");
     ngx_str_set(&h->value, "zstd");
     r->headers_out.content_encoding = h;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+                   "zstd static: serving precompressed \"%s\"", path.data);
 
     /* Byte ranges are meaningless on a compressed body: offsets in the
      * .zst file do not correspond to positions in the original content.

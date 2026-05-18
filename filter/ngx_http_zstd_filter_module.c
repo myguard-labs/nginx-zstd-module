@@ -304,6 +304,9 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
             && r->headers_out.status != NGX_HTTP_FORBIDDEN
             && r->headers_out.status != NGX_HTTP_NOT_FOUND))
     {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, status %ui not eligible",
+                       r->headers_out.status);
         return ngx_http_next_header_filter(r);
     }
 
@@ -311,6 +314,9 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     if (r->headers_out.content_encoding
         && r->headers_out.content_encoding->value.len)
     {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, already encoded as \"%V\"",
+                       &r->headers_out.content_encoding->value);
         return ngx_http_next_header_filter(r);
     }
 
@@ -318,6 +324,9 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     if (r->headers_out.content_length_n != -1
         && r->headers_out.content_length_n < zlcf->min_length)
     {
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, body %O < zstd_min_length %z",
+                       r->headers_out.content_length_n, zlcf->min_length);
         return ngx_http_next_header_filter(r);
     }
 
@@ -326,16 +335,25 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         && r->headers_out.content_length_n != -1
         && r->headers_out.content_length_n > zlcf->max_length)
     {
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, body %O > zstd_max_length %O",
+                       r->headers_out.content_length_n,
+                       (off_t) zlcf->max_length);
         return ngx_http_next_header_filter(r);
     }
 
     /* content type not in zstd_types */
     if (ngx_http_test_content_type(r, &zlcf->types) == NULL) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, content type \"%V\" not in zstd_types",
+                       &r->headers_out.content_type);
         return ngx_http_next_header_filter(r);
     }
 
     /* header-only response: no body to compress */
     if (r->header_only) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, header-only response");
         return ngx_http_next_header_filter(r);
     }
 
@@ -359,6 +377,8 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     r->gzip_vary = 1;
 
     if (ngx_http_zstd_ok(r) != NGX_OK) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, client did not accept zstd encoding");
         return ngx_http_next_header_filter(r);
     }
 
@@ -387,6 +407,10 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     ngx_http_clear_content_length(r);
     ngx_http_clear_accept_ranges(r);
     ngx_http_weak_etag(r);
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "zstd: compressing response (content-length %O)",
+                   r->headers_out.content_length_n);
 
     return ngx_http_next_header_filter(r);
 }
@@ -857,6 +881,9 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->out_buf = cl->buf;
         ngx_free_chain(r->pool, cl);
 
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd get_buf: reused free buffer %p", ctx->out_buf);
+
     } else if (ctx->bufs < zlcf->bufs.num) {
         ctx->out_buf = ngx_create_temp_buf(r->pool, zlcf->bufs.size);
         if (ctx->out_buf == NULL) {
@@ -867,8 +894,14 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->out_buf->recycled = 1;
         ctx->bufs++;
 
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd get_buf: allocated buffer %p (%i in use)",
+                       ctx->out_buf, ctx->bufs);
+
     } else {
         ctx->nomem = 1;
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd get_buf: no free buffer, nomem set");
         return NGX_DECLINED;
     }
 
@@ -1070,6 +1103,12 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
                            ZSTD_getErrorName(rc));
         }
     }
+
+    ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "zstd cctx ready: level:%i long:%i window_log:%i "
+                   "dict:%p",
+                   zlcf->level, zlcf->long_mode, zlcf->window_log,
+                   zlcf->dict);
 
     return NGX_OK;
 }
