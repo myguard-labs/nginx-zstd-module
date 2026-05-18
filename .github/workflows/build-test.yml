@@ -516,6 +516,37 @@ jobs:
             --port 18096 --backend-port 18097
           echo "✓ compression correctness matrix passed"
 
+      - name: Run per-request CCtx isolation regression
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # 774b4a5 class: a shared/not-reset ZSTD_CCtx silently bleeds
+          # one request's compressor state into another (well-formed
+          # but wrong body). Fire many distinct concurrent requests
+          # through one worker over reused keepalive connections; each
+          # response must decode byte-exact to its OWN origin.
+          python3 tools/test_concurrent_cctx_isolation.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18098 --backend-port 18099 \
+            --concurrency 16 --rounds 6
+          echo "✓ per-request CCtx isolation regression passed"
+
+      - name: Run reload-under-load correctness regression
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # 2c538e0 CDict-cycle class: SIGHUP reload while requests are
+          # in flight (zstd_dict_file set). Every response — old-cycle,
+          # straddling, new-cycle — must still decode byte-exact; master
+          # must survive; error log must stay clean. Complements
+          # tools/test_reload_leak.sh (which checks leaks, not response
+          # correctness during reload).
+          python3 tools/test_reload_under_load.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18100 --backend-port 18101 \
+            --reloads 6 --workers 4 --duration 18
+          echo "✓ reload-under-load correctness regression passed"
+
       - name: Test summary
         if: success()
         run: echo "✓ All Perl + Python end-to-end tests passed"
@@ -576,6 +607,12 @@ jobs:
           python3 tools/test_compression_matrix.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18096 \
             --backend-port 18097 --repeat 1
+          # CCtx isolation under ASAN/UBSAN: a shared/not-reset context
+          # is a lifetime bug — exactly what ASAN is for. Lighter
+          # concurrency/rounds since the sanitized binary is slower.
+          python3 tools/test_concurrent_cctx_isolation.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18098 \
+            --backend-port 18099 --concurrency 8 --rounds 3
           echo "✓ All smoke tests clean under ASAN+UBSAN"
 
       - name: zstd_dict_file reload leak check (CDict lifecycle)
