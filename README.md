@@ -2,6 +2,7 @@
 [![CodeQL](https://github.com/eilandert/zstd-nginx-module/actions/workflows/codeql.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/codeql.yml)
 [![Security Scanners](https://github.com/eilandert/zstd-nginx-module/actions/workflows/security-scanners.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/security-scanners.yml)
 [![Fuzzing](https://github.com/eilandert/zstd-nginx-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/fuzzing.yml)
+[![Valgrind Memcheck](https://github.com/eilandert/zstd-nginx-module/actions/workflows/valgrind.yml/badge.svg)](https://github.com/eilandert/zstd-nginx-module/actions/workflows/valgrind.yml)
 
 📖 **Background reading:** 
 - [zstd nginx module: what it does, bugs fixed](https://deb.myguard.nl/2026/05/zstd-nginx-module-what-it-does-bugs-fixed/)
