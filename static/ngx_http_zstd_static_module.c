@@ -326,6 +326,7 @@ ngx_http_zstd_static_init(ngx_conf_t *cf)
 {
     ngx_http_handler_pt        *h;
     ngx_http_core_main_conf_t  *cmcf;
+    ngx_http_core_loc_conf_t   *clcf;
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
@@ -335,6 +336,16 @@ ngx_http_zstd_static_init(ngx_conf_t *cf)
     }
 
     *h = ngx_http_zstd_static_handler;
+
+    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+    if (clcf != NULL && !clcf->gzip_vary) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "zstd_static is enabled but \"gzip_vary\" is off; "
+                           "add \"gzip_vary on\" to emit "
+                           "\"Vary: Accept-Encoding\" so proxies and "
+                           "CDNs cache compressed and uncompressed "
+                           "responses separately");
+    }
 
     return NGX_OK;
 }
