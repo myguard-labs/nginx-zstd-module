@@ -316,6 +316,118 @@ jobs:
           path: ${{ matrix.dir }}/objs/${{ matrix.flavor }}
           retention-days: 1
 
+  # ── Build against libzstd 1.4.x — exercises the documented fallback
+  #    paths (#ifdef ZSTD_c_targetCBlockSize and the ZSTD_VERSION_NUMBER
+  #    boundary in zstd_comp_level validation) that the main 1.5.x build
+  #    never touches. ZSTD_compressStream2 was added in 1.4.0, so that
+  #    is the genuine module floor; we build it from source against the
+  #    pinned nginx and run the truncation smoke test to prove the
+  #    fallback paths still compile and produce correct compression. ─────
+  build-old-libzstd:
+    name: Build (libzstd 1.4.x — fallback paths)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      # 1.4.5 is < 1.5.6 (so ZSTD_c_targetCBlockSize is absent and the
+      # #ifdef guard's fallback compiles) and >= 1.4.0 (the module's
+      # hard floor — ZSTD_compressStream2 is present). 1.4.0 itself
+      # bumps the version macro to 10400 so ZSTD_minCLevel() is
+      # available — the negative-level path of zstd_comp_level()
+      # therefore takes the supported branch.
+      OLD_ZSTD_VERSION: "1.4.5"
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config \
+            libpcre2-dev zlib1g-dev wget cmake python3 \
+            python3-requests zstd
+
+      - name: Cache libzstd 1.4.x source tarball
+        id: zstd-tarball
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: zstd-${{ env.OLD_ZSTD_VERSION }}.tar.gz
+          key: zstd-src-${{ env.OLD_ZSTD_VERSION }}
+
+      - name: Download libzstd 1.4.x
+        if: steps.zstd-tarball.outputs.cache-hit != 'true'
+        run: |
+          wget -q -O "zstd-${OLD_ZSTD_VERSION}.tar.gz" \
+            "https://github.com/facebook/zstd/releases/download/v${OLD_ZSTD_VERSION}/zstd-${OLD_ZSTD_VERSION}.tar.gz"
+
+      - name: Build libzstd 1.4.x to a private prefix
+        run: |
+          tar -xzf "zstd-${OLD_ZSTD_VERSION}.tar.gz"
+          cd "zstd-${OLD_ZSTD_VERSION}"
+          # Build only the library; tests/binaries not needed.
+          make -j"$(nproc)" -C lib PREFIX="$HOME/zstd14" \
+            install-pc install-includes install-shared
+          ls "$HOME/zstd14/lib/libzstd.so"* || \
+            (echo "libzstd not installed" && exit 1)
+          echo "ZSTD_INC=$HOME/zstd14/include" >> "$GITHUB_ENV"
+          echo "ZSTD_LIB=$HOME/zstd14/lib"     >> "$GITHUB_ENV"
+          # The header's ZSTD_VERSION_NUMBER is what gates the fallbacks:
+          grep -E 'ZSTD_VERSION_(MAJOR|MINOR|RELEASE)[[:space:]]' \
+               "$HOME/zstd14/include/zstd.h" | head -3
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball-old
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx
+        if: steps.nginx-tarball-old.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Configure & build nginx with module against libzstd 1.4.x
+        run: |
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          # ZSTD_INC/ZSTD_LIB tell the module's filter/config to pick up
+          # the private libzstd 1.4.x build, not the system one. No
+          # -DZSTD_STATIC_LINKING_ONLY here on purpose: the fallback
+          # paths must compile under the plain dynamic-link build too.
+          ZSTD_INC="$ZSTD_INC" ZSTD_LIB="$ZSTD_LIB" \
+            ./configure \
+              --with-compat \
+              --with-debug \
+              --with-cc-opt="-Wall -Wextra -Wno-unused-parameter -Werror $(pkg-config --cflags zlib libpcre2-8)" \
+              --with-ld-opt="$(pkg-config --libs zlib libpcre2-8)" \
+              --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+          # Verify the binary links against the *old* libzstd we built,
+          # not the system one — otherwise the test is meaningless.
+          ldd objs/nginx | grep libzstd | tee /tmp/libzstd.linkage
+          if ! grep -q "$ZSTD_LIB" /tmp/libzstd.linkage; then
+            echo "FAIL: nginx not linked against private libzstd 1.4.x"
+            exit 1
+          fi
+          echo "✓ nginx built against libzstd 1.4.x at $ZSTD_LIB"
+          # Make the freshly built libzstd visible at runtime for the
+          # smoke test below (rpath is not set since the build went
+          # through the dynamic auto-discovery path).
+          echo "LD_LIBRARY_PATH=$ZSTD_LIB" >> "$GITHUB_ENV"
+          echo "TEST_NGINX_BINARY=$PWD/objs/nginx" >> "$GITHUB_ENV"
+
+      - name: Smoke test (decode-and-compare) against libzstd 1.4.x
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # Re-use the existing decode-and-byte-compare smoke test so
+          # the fallback paths are not just compiled but actually
+          # exercised at run time — compression must produce a
+          # byte-exact body when decompressed.
+          python3 tools/test_encoding.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18200
+          echo "✓ libzstd 1.4.x fallback paths produce correct output"
+
   # ── ASAN + UBSAN build — catches the lifetime/UB bugs in this module's
   #    history (per-request ctx, terminal-frame). Uses valgrind.suppress'd
   #    knowledge; ASAN is faster than valgrind for CI. ───────────────────────

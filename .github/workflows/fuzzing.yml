@@ -1,11 +1,12 @@
 name: Fuzzing
 
 # Coverage-guided fuzzing of the Accept-Encoding parser
-# (ngx_http_zstd_accept_encoding). Kept OUT of ci.yml on purpose so it never
-# slows PR feedback: a long nightly run for discovery, plus a short bounded
-# run only when the parser or its shim actually changes.
+# (ngx_http_zstd_accept_encoding + ngx_http_zstd_eval_qvalue). Kept OUT of
+# build-test.yml on purpose so it never slows PR feedback: a long nightly
+# run for discovery, plus a short bounded run only when the parser or its
+# shim actually changes.
 #
-# Action pins (see ci.yml header for rationale):
+# Action pins (see build-test.yml header for rationale):
 # actions/checkout@v4        -> 34e114876b0b11c390a56381ad16ebd13914f8d5
 # actions/upload-artifact@v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
 
