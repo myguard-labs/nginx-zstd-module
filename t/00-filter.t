@@ -25,7 +25,7 @@ add_block_preprocessor(sub {
 no_long_string();
 log_level 'debug';
 repeat_each(3);
-plan tests => repeat_each() * (blocks() * 3) + 153;
+plan tests => repeat_each() * (blocks() * 3) + 147;
 run_tests();
 
 
@@ -1168,3 +1168,50 @@ my $unit = "ABCDEFGHIJ0123456789zstd-multibuffer-regression-payload-";
 my $body = $unit x 5000;
 require Digest::MD5;
 length($body) . ":" . Digest::MD5::md5_hex($body)
+
+
+
+=== TEST 45: zstd_max_cctx_memory rejects parameters that exceed the budget
+# Per-request CCtx memory hardening: a budget of 1 KB with level 19 is
+# wildly insufficient (level 19 needs ~80–90 MB), so nginx must refuse
+# to start. The same test also exercises the no-STATIC_LINKING_ONLY
+# build path: that build cannot honour the directive and rejects it
+# unconditionally with a different but equally clear message. Either
+# way, must_die.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_comp_level 19;
+        zstd_max_cctx_memory 1k;
+        zstd_types text/plain;
+        return 200 "x";
+    }
+--- request
+GET /filter
+--- must_die
+
+
+
+=== TEST 46: Accept-Encoding "notzstd, zstd" still negotiates zstd
+# Regression for the multi-occurrence parser fix. The first "zstd"
+# substring lives inside the unrelated token "notzstd", which the
+# delimiter check correctly rejects; the parser must then walk on to
+# the next list element, find the standalone "zstd" token, and accept
+# the encoding. Pre-fix this returned identity because only the first
+# occurrence was examined.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        return 200 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: notzstd, zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]

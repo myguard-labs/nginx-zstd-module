@@ -31,6 +31,7 @@ typedef struct {
     ssize_t                      target_cblock_size;  /* Issue #38: ZSTD_c_targetCBlockSize */
     ngx_int_t                    window_log;          /* ZSTD_c_windowLog: bounds per-request memory */
     ngx_flag_t                   long_mode;           /* ZSTD_c_enableLongDistanceMatching */
+    ssize_t                      max_cctx_memory;     /* config-load assert: per-request CCtx memory budget */
 
     ngx_array_t                 *bypass;              /* ngx_http_complex_value_t: per-request bypass */
 
@@ -220,6 +221,13 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       ngx_conf_set_flag_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, long_mode),
+      NULL },
+
+    { ngx_string("zstd_max_cctx_memory"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_zstd_loc_conf_t, max_cctx_memory),
       NULL },
 
     { ngx_string("zstd_bypass"),
@@ -579,7 +587,9 @@ failed:
 static ngx_int_t
 ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
-    size_t            rc, pos_in, pos_out;
+    size_t            zrc, pos_in, pos_out;  /* zrc: ZSTD_compressStream2
+                                              * bytes-remaining hint, not an
+                                              * NGX_* code */
     ngx_uint_t        last;
     ZSTD_EndDirective directive;
     ngx_chain_t      *cl;
@@ -627,12 +637,13 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_ERROR;
     }
 
-    rc = ZSTD_compressStream2(cctx, &ctx->buffer_out, &ctx->buffer_in, directive);
+    zrc = ZSTD_compressStream2(cctx, &ctx->buffer_out, &ctx->buffer_in,
+                               directive);
 
-    if (ZSTD_isError(rc)) {
+    if (ZSTD_isError(zrc)) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                       "zstd: ZSTD_compressStream2() failed: %s",
-                      ZSTD_getErrorName(rc));
+                      ZSTD_getErrorName(zrc));
         return NGX_ERROR;
     }
 
@@ -649,7 +660,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->redo = 0;
 
     /* PR #49: State machine logic for action transitions */
-    if (rc > 0) {
+    if (zrc > 0) {
         /*
          * rc > 0: zstd has buffered data. For COMPRESS, transition to FLUSH
          * to drain libzstd's internal buffers. For FLUSH/END, keep the action.
@@ -706,7 +717,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
      * request loops forever with NGX_HTTP_GZIP_BUFFERED set and hangs until
      * timeout.
      */
-    last = rc == 0 && ctx->last && directive == ZSTD_e_end;
+    last = zrc == 0 && ctx->last && directive == ZSTD_e_end;
 
     /*
      * Structured emit-decision trace. Permanent: compiled out of
@@ -722,7 +733,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ngx_log_debug6(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "zstd emit?: outsz:%uz rc0:%d last:%d ctx_last:%d "
                    "ctx_flush:%d action:%d",
-                   (size_t) ngx_buf_size(ctx->out_buf), rc == 0, last,
+                   (size_t) ngx_buf_size(ctx->out_buf), zrc == 0, last,
                    ctx->last, ctx->flush, (ngx_uint_t) ctx->action);
 
     /*
@@ -759,7 +770,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
      * falls through to be emitted with last_buf set below.
      */
     if (ngx_buf_size(ctx->out_buf) == 0 && !last) {
-        if (rc == 0 && ctx->flush) {
+        if (zrc == 0 && ctx->flush) {
             r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
             ctx->flush = 0;
             ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -780,7 +791,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     b = ctx->out_buf;
 
-    if (rc == 0 && (ctx->flush || last)) {
+    if (zrc == 0 && (ctx->flush || last)) {
         r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
 
         b->flush = ctx->flush && !ctx->last;
@@ -1171,6 +1182,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->target_cblock_size = NGX_CONF_UNSET;
     conf->window_log = NGX_CONF_UNSET;
     conf->long_mode = NGX_CONF_UNSET;
+    conf->max_cctx_memory = NGX_CONF_UNSET;
     conf->bypass = NGX_CONF_UNSET_PTR;
 
     return conf;
@@ -1191,7 +1203,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_file_info_t             info;
     ngx_http_zstd_main_conf_t  *zmcf;
 
-    rc = NGX_OK;
+    rc = NGX_CONF_OK;
     buf = NULL;
     fd = NGX_INVALID_FILE;
 
@@ -1202,6 +1214,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->target_cblock_size, prev->target_cblock_size, 0);
     ngx_conf_merge_value(conf->window_log, prev->window_log, 0);
     ngx_conf_merge_value(conf->long_mode, prev->long_mode, 0);
+    ngx_conf_merge_value(conf->max_cctx_memory, prev->max_cctx_memory, 0);
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
@@ -1304,8 +1317,8 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 goto close;
 
             } else if ((size_t) n != size) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                                   ngx_read_fd_n "\"%V incomplete\"",
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   ngx_read_fd_n " \"%V\" incomplete read",
                                    &zmcf->dict_file);
 
                 rc = NGX_CONF_ERROR;
@@ -1355,7 +1368,131 @@ close:
         rc = NGX_CONF_ERROR;
     }
 
-    if (rc == NGX_OK && conf->enable) {
+    /*
+     * Per-request CCtx memory budget (config-load assertion).
+     *
+     * zstd's streaming compressor working set is dominated by the
+     * compression-level *strategy* tables (chain/hash/search), not by
+     * the window alone — see the README. Lowering windowLog therefore
+     * does NOT meaningfully bound memory for high levels (level 22 at
+     * windowLog 20 still allocates ~640 MB). The honest, precise lever
+     * is to validate the configured parameters against the operator's
+     * budget at config load using libzstd's own estimator, and refuse
+     * to start if they exceed it. The directive does not silently tune
+     * anything — a too-tight budget is a hard error so operators see
+     * the misconfiguration up front instead of discovering it as a
+     * worker-RSS surprise under concurrency.
+     *
+     * The estimator API lives in libzstd's experimental section
+     * (ZSTDLIB_STATIC_API), so the check is compiled in only when the
+     * module is built with -DZSTD_STATIC_LINKING_ONLY against
+     * libzstd >= 1.4.0 (the project's production and CI builds enable
+     * this). Without it, the directive is unsupported and rejected with
+     * an actionable error rather than silently no-op'd.
+     */
+    if (rc == NGX_CONF_OK && conf->enable
+        && conf->max_cctx_memory != NGX_CONF_UNSET
+        && conf->max_cctx_memory > 0)
+    {
+#if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
+        ZSTD_CCtx_params  *cp;
+        size_t             est;
+        size_t             srv;
+
+        cp = ZSTD_createCCtxParams();
+        if (cp == NULL) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_createCCtxParams() failed");
+            return NGX_CONF_ERROR;
+        }
+
+        srv = ZSTD_CCtxParams_init(cp, (int) conf->level);
+        if (ZSTD_isError(srv)) {
+            ZSTD_freeCCtxParams(cp);
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_CCtxParams_init(level=%i) failed: %s",
+                               conf->level, ZSTD_getErrorName(srv));
+            return NGX_CONF_ERROR;
+        }
+
+        if (conf->window_log > 0) {
+            srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_windowLog,
+                                               (int) conf->window_log);
+            if (ZSTD_isError(srv)) {
+                ZSTD_freeCCtxParams(cp);
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "ZSTD_CCtxParams_setParameter("
+                                   "windowLog=%i) failed: %s",
+                                   conf->window_log,
+                                   ZSTD_getErrorName(srv));
+                return NGX_CONF_ERROR;
+            }
+        }
+
+        if (conf->long_mode) {
+            srv = ZSTD_CCtxParams_setParameter(
+                      cp, ZSTD_c_enableLongDistanceMatching, 1);
+            if (ZSTD_isError(srv)) {
+                ZSTD_freeCCtxParams(cp);
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "ZSTD_CCtxParams_setParameter("
+                                   "enableLongDistanceMatching) failed: %s",
+                                   ZSTD_getErrorName(srv));
+                return NGX_CONF_ERROR;
+            }
+        }
+
+#ifdef ZSTD_c_targetCBlockSize
+        if (conf->target_cblock_size > 0) {
+            srv = ZSTD_CCtxParams_setParameter(
+                      cp, ZSTD_c_targetCBlockSize,
+                      (int) conf->target_cblock_size);
+            if (ZSTD_isError(srv)) {
+                ZSTD_freeCCtxParams(cp);
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "ZSTD_CCtxParams_setParameter("
+                                   "targetCBlockSize=%z) failed: %s",
+                                   conf->target_cblock_size,
+                                   ZSTD_getErrorName(srv));
+                return NGX_CONF_ERROR;
+            }
+        }
+#endif
+
+        est = ZSTD_estimateCStreamSize_usingCCtxParams(cp);
+        ZSTD_freeCCtxParams(cp);
+
+        if (ZSTD_isError(est)) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_estimateCStreamSize_usingCCtxParams() "
+                               "failed: %s", ZSTD_getErrorName(est));
+            return NGX_CONF_ERROR;
+        }
+
+        if (est > (size_t) conf->max_cctx_memory) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "the configured zstd parameters need ~%uz "
+                               "bytes of per-request compressor memory, "
+                               "which exceeds \"zstd_max_cctx_memory\" %z; "
+                               "lower \"zstd_comp_level\" (currently %i), "
+                               "lower \"zstd_window_log\", disable "
+                               "\"zstd_long\", or raise the budget",
+                               est, conf->max_cctx_memory, conf->level);
+            return NGX_CONF_ERROR;
+        }
+#else
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"zstd_max_cctx_memory\" requires the module "
+                           "to be built with -DZSTD_STATIC_LINKING_ONLY "
+                           "against libzstd >= 1.4.0 (memory-estimation "
+                           "API); rebuild accordingly, or use "
+                           "\"zstd_window_log\" for a coarse window-based "
+                           "bound");
+        return NGX_CONF_ERROR;
+#endif
+    }
+
+    if (rc == NGX_CONF_OK && conf->enable) {
         ngx_http_core_loc_conf_t  *clcf;
 
         clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
@@ -1603,10 +1740,46 @@ static char *
 ngx_http_zstd_check_num_int_max(ngx_conf_t *cf, void *post, void *data)
 {
     ngx_int_t  *np = data;
+    char       *rc;
 
     (void) post;
 
-    return ngx_http_zstd_int_max_bound(cf, *np, "zstd_window_log");
+    rc = ngx_http_zstd_int_max_bound(cf, *np, "zstd_window_log");
+    if (rc != NGX_CONF_OK) {
+        return rc;
+    }
+
+    /*
+     * 0 means "unset" (keep zstd's level-derived default). Any other
+     * value is passed straight to ZSTD_c_windowLog, which only accepts
+     * [ZSTD_WINDOWLOG_MIN, ZSTD_WINDOWLOG_MAX]. Those macros live behind
+     * ZSTD_STATIC_LINKING_ONLY (experimental section of zstd.h) and are
+     * not visible on the module's normal dynamic-link build, so the
+     * stable, long-documented constants are inlined here: MIN is 10 and
+     * MAX is 30 on 32-bit / 31 on 64-bit size_t. libzstd would otherwise
+     * reject an out-of-range value per-request (a 500 on every response
+     * for this location); catching it at config load turns that into a
+     * clear startup error instead.
+     */
+#define NGX_HTTP_ZSTD_WINDOWLOG_MIN  10
+#define NGX_HTTP_ZSTD_WINDOWLOG_MAX  (sizeof(size_t) == 4 ? 30 : 31)
+
+    if (*np != 0
+        && (*np < NGX_HTTP_ZSTD_WINDOWLOG_MIN
+            || *np > (ngx_int_t) NGX_HTTP_ZSTD_WINDOWLOG_MAX))
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"zstd_window_log\" must be 0 (default) or "
+                           "between %d and %d",
+                           NGX_HTTP_ZSTD_WINDOWLOG_MIN,
+                           (int) NGX_HTTP_ZSTD_WINDOWLOG_MAX);
+        return NGX_CONF_ERROR;
+    }
+
+#undef NGX_HTTP_ZSTD_WINDOWLOG_MIN
+#undef NGX_HTTP_ZSTD_WINDOWLOG_MAX
+
+    return NGX_CONF_OK;
 }
 
 

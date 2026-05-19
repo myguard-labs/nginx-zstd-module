@@ -8,6 +8,13 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#include <zstd.h>     /* ZSTD_MAGICNUMBER, ZSTD_MAGIC_SKIPPABLE_* — stable since 0.8.0 */
+#include <stdint.h>   /* uint32_t for the magic-number compare */
+
+#if !(NGX_WIN32)
+#include <unistd.h>   /* pread(2) for the magic-number probe */
+#endif
+
 #include "../ngx_http_zstd_common.h"
 
 
@@ -216,6 +223,73 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 
         return NGX_HTTP_NOT_FOUND;
     }
+
+#if (NGX_HAVE_PREAD)
+    /*
+     * Magic-number sanity check on the .zst file.
+     *
+     * Without this, a truncated, half-downloaded, mistakenly-renamed
+     * (e.g. `cp foo.txt foo.zst`), or otherwise non-zstd file would be
+     * served with `Content-Encoding: zstd` and the client would get an
+     * undecodable body — a confusing outage class that nginx's built-in
+     * gzip_static also doesn't defend against. The probe is cheap (one
+     * pread(2) of 4 bytes at offset 0; pread is offset-explicit so it
+     * never moves the open_file_cache's shared fd position — using
+     * plain read(2) would do exactly that and corrupt subsequent
+     * requests serving the same cached fd). On mismatch we decline, so
+     * nginx falls back to serving the uncompressed original (or
+     * returns 404 if it is absent), and the operator sees a clear
+     * error log line.
+     *
+     * Both a regular zstd frame (ZSTD_MAGICNUMBER) and a skippable
+     * frame (ZSTD_MAGIC_SKIPPABLE_START..+0xF) are accepted, since
+     * either is a valid leading frame in a zstd stream.
+     *
+     * Gated by NGX_HAVE_PREAD: on platforms where nginx's configure
+     * could not find pread(2) we silently skip the probe rather than
+     * fall back to a read+lseek pair that would mutate the shared fd
+     * offset. Every modern POSIX target has it; this guard is
+     * essentially a build-time tripwire.
+     */
+    if (of.size < 4) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "zstd static: \"%s\" too small to be a zstd frame "
+                      "(%O bytes)", path.data, of.size);
+        return NGX_DECLINED;
+    }
+
+    {
+        u_char    magic[4];
+        ssize_t   n;
+        uint32_t  mw;
+
+        n = pread(of.fd, magic, sizeof(magic), 0);
+        if (n != (ssize_t) sizeof(magic)) {
+            ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
+                          "zstd static: pread(\"%s\", 4 bytes) "
+                          "returned %z", path.data, n);
+            return NGX_DECLINED;
+        }
+
+        mw = ((uint32_t) magic[0])
+           | ((uint32_t) magic[1] << 8)
+           | ((uint32_t) magic[2] << 16)
+           | ((uint32_t) magic[3] << 24);
+
+        if (mw != ZSTD_MAGICNUMBER
+            && (mw & ZSTD_MAGIC_SKIPPABLE_MASK)
+               != ZSTD_MAGIC_SKIPPABLE_START)
+        {
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "zstd static: \"%s\" is not a zstd frame "
+                          "(leading bytes 0x%02xd%02xd%02xd%02xd)",
+                          path.data,
+                          (ngx_uint_t) magic[0], (ngx_uint_t) magic[1],
+                          (ngx_uint_t) magic[2], (ngx_uint_t) magic[3]);
+            return NGX_DECLINED;
+        }
+    }
+#endif /* NGX_HAVE_PREAD */
 
 #endif
 

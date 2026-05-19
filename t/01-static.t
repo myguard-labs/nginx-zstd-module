@@ -138,7 +138,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 6: zstd_static always (without accept-encoding header)
+=== TEST 7: zstd_static always (without accept-encoding header)
 --- config
     location /test {
         zstd_static always;
@@ -155,7 +155,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 7: zstd_static always (without zstd component in accept-encoding header)
+=== TEST 8: zstd_static always (without zstd component in accept-encoding header)
 --- config
     location /test {
         zstd_static always;
@@ -174,7 +174,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 8: zstd_static always (file does not exist)
+=== TEST 9: zstd_static always (file does not exist)
 --- config
     location /test2 {
         zstd_static always;
@@ -188,7 +188,7 @@ Accept-Encoding: gzip, br
 
 
 
-=== TEST 9: zstd_static on (file does not exist)
+=== TEST 10: zstd_static on (file does not exist)
 --- config
     location /test2 {
         zstd_static on;
@@ -202,7 +202,7 @@ Accept-Encoding: gzip, br
 
 
 
-=== TEST 10: zstd_static off (file does not exist)
+=== TEST 11: zstd_static off (file does not exist)
 --- config
     location /test2 {
         zstd_static off;
@@ -216,7 +216,7 @@ Accept-Encoding: gzip, br
 
 
 
-=== TEST 11: zstd_static on with quality value q=0 (reject)
+=== TEST 12: zstd_static on with quality value q=0 (reject)
 --- config
     location /test {
         zstd_static on;
@@ -235,7 +235,7 @@ ETag: "5be17d33-e95a"
 
 
 
-=== TEST 12: zstd_static on with quality value q=0.5 (accept lower)
+=== TEST 13: zstd_static on with quality value q=0.5 (accept lower)
 --- config
     location /test {
         zstd_static on;
@@ -254,7 +254,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 13: zstd_static always with q=0 (still serve zst)
+=== TEST 14: zstd_static always with q=0 (still serve zst)
 --- config
     location /test {
         zstd_static always;
@@ -273,7 +273,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 14: zstd_static on with gzip_vary and gzip support
+=== TEST 15: zstd_static on with gzip_vary and gzip support
 --- config
     location /test {
         zstd_static on;
@@ -293,7 +293,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 15: zstd_static on with gzip_vary but no zstd support
+=== TEST 16: zstd_static on with gzip_vary but no zstd support
 --- config
     location /test {
         zstd_static on;
@@ -313,7 +313,7 @@ ETag: "5be17d33-e95a"
 
 
 
-=== TEST 16: zstd_static on - HEAD request
+=== TEST 17: zstd_static on - HEAD request
 --- config
     location /test {
         zstd_static on;
@@ -332,7 +332,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 17: zstd_static on - POST request (not GET/HEAD)
+=== TEST 18: zstd_static on - POST request (not GET/HEAD)
 --- config
     location /test {
         zstd_static on;
@@ -348,7 +348,7 @@ Accept-Encoding: zstd
 
 
 
-=== TEST 18: zstd_dict_file loads and serves correctly (filter path)
+=== TEST 19: zstd_dict_file loads and serves correctly (filter path)
 # Regression for the untested zstd_dict_file feature, which had three
 # distinct historical bug fixes with NO test: 0fb40d9 (CDict leak on
 # cleanup), 50f27a8 (version-specific init error handling), f735a5d
@@ -387,7 +387,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 19: zstd_static handles a long URI without buffer overflow
+=== TEST 20: zstd_static handles a long URI without buffer overflow
 # Regression for 9789448 "buffer overflow when appending .zst extension".
 # A long request path stresses the .zst path-build reservation made via
 # ngx_http_map_uri_to_path(sizeof(".zst")). Missing file -> clean 404,
@@ -433,3 +433,32 @@ Content-Encoding: zstd
 # (HTTP/1.1) and the matrix under ASAN; the h2-specific framing path
 # would be redundant effort without adding coverage for a new code
 # path. Left for future work when/if CI adds TLS test infrastructure.
+
+
+
+=== TEST 21: zstd_static rejects a file whose contents are not a zstd frame
+# Defence-in-depth: a .zst whose first 4 bytes are not the zstd magic
+# (truncated download, mistakenly renamed text, `cp foo.txt foo.zst`)
+# must NOT be served with Content-Encoding: zstd — the client would
+# receive an undecodable body. The handler pread()s the leading 4
+# bytes, checks them against ZSTD_MAGICNUMBER / ZSTD_MAGIC_SKIPPABLE_*,
+# and declines on mismatch. The fixture below contains plain ASCII
+# ("HELO ...") with no zstd magic; no uncompressed fallback file is
+# placed alongside it, so the request falls through to a clean 404.
+--- config
+    location /bogus_zst {
+        zstd_static on;
+        root html;
+    }
+--- user_files
+>>> bogus.zst
+HELO this is not a zstd frame
+--- request
+GET /bogus_zst/bogus
+--- more_headers
+Accept-Encoding: zstd
+--- error_code: 404
+--- response_headers
+!Content-Encoding
+--- error_log
+is not a zstd frame
