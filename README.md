@@ -31,6 +31,7 @@ This is a hardened fork: every build is exercised against **nginx mainline and [
     * [zstd_target_cblock_size](#zstd_target_cblock_size)
     * [zstd_window_log](#zstd_window_log)
     * [zstd_long](#zstd_long)
+    * [zstd_max_cctx_memory](#zstd_max_cctx_memory)
     * [zstd_bypass](#zstd_bypass)
     * [zstd_dict_file](#zstd_dict_file)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
@@ -180,7 +181,7 @@ load_module modules/ngx_http_zstd_static_module.so;
 |---|---|---|---|
 | **nginx** | 1.9.11 (first `--add-dynamic-module` release) | latest mainline / stable | **1.31.0 mainline** |
 | **Angie** | 1.x | latest | **1.11.5** |
-| **libzstd** | **1.4.0** | **≥ 1.5.6** | 1.5.x |
+| **libzstd** | **1.4.0** | **≥ 1.5.6** | 1.5.x (full suite) + **1.4.x** fallback-paths build |
 | **OS** | Linux/BSD/RHEL-family | — | Ubuntu (GitHub runners) |
 
 Notes on the libzstd floor — these are enforced in code, not assumed:
@@ -191,8 +192,17 @@ Notes on the libzstd floor — these are enforced in code, not assumed:
   (guarded by `#if ZSTD_VERSION_NUMBER >= 10400`).
 * **< 1.5.6**: `zstd_target_cblock_size` has no effect — the directive
   is accepted but silently ignored (`#ifdef ZSTD_c_targetCBlockSize`).
-  Everything else works.
+  Everything else works. This fallback path is exercised in CI by a
+  dedicated "Build (libzstd 1.4.x — fallback paths)" job that links the
+  module against a privately built libzstd 1.4.x and runs the
+  decode-and-compare smoke test.
 * **≥ 1.5.6**: every directive is fully functional.
+* **`zstd_max_cctx_memory`** additionally requires the module to be
+  built with `-DZSTD_STATIC_LINKING_ONLY` so libzstd's experimental
+  memory-estimator API is available. The project's production and CI
+  builds enable that flag; without it, the directive is rejected at
+  config load with a clear, actionable error rather than silently
+  no-op'd.
 
 "CI-verified" means every push builds and runs the full test suite
 against that exact version (see [Testing & CI](#testing--ci)). Other
@@ -203,7 +213,7 @@ continuously exercised.
 
 ## ngx_http_zstd_filter_module
 
-This filter module compresses responses on the fly using zstd. It runs after the upstream or file handler generates the response, and before nginx sends it to the client. Compression is applied only when the client signals support via `Accept-Encoding: zstd`. All 2xx responses are eligible for compression, as well as 403 and 404 (which often carry compressible error bodies).
+This filter module compresses responses on the fly using zstd. It runs after the upstream or file handler generates the response, and before nginx sends it to the client. Compression is applied only when the client signals support via `Accept-Encoding: zstd`. 2xx responses are eligible for compression — except the bodyless `204 No Content` and `205 Reset Content` — as well as `403` and `404` (which often carry compressible error bodies). All other non-2xx statuses are passed through uncompressed.
 
 > **Required:** Enable `gzip_vary on;` alongside this module. When compression is applied, the module sets `r->gzip_vary = 1`, which causes nginx to emit a `Vary: Accept-Encoding` response header — but only when `gzip_vary` is enabled. Without it, proxies and CDNs may cache and serve compressed responses to clients that do not support zstd.
 
@@ -497,6 +507,63 @@ location /api/bulk-export {
 
 ---
 
+### zstd_max_cctx_memory
+
+**Syntax:** `zstd_max_cctx_memory size;`
+**Default:** `—` (disabled, no budget enforced)
+**Context:** `http, server, location`
+**Requires:** module built with `-DZSTD_STATIC_LINKING_ONLY` against libzstd ≥ 1.4.0 (the project's production and CI builds do; see [Compatibility](#compatibility)).
+
+Asserts at **config load** that the combined zstd parameters configured
+for the location (`zstd_comp_level`, `zstd_window_log`, `zstd_long`,
+`zstd_target_cblock_size`) do not need more than `size` bytes of
+per-request compressor working memory. If they would, nginx refuses to
+start with a clear, actionable error pointing at the smallest set of
+parameters to lower.
+
+The budget is checked against libzstd's own
+`ZSTD_estimateCStreamSize_usingCCtxParams()`, so the number is
+authoritative — it accounts for the level's *strategy tables*
+(chain/hash/search), the window, and LDM, not just the window. This
+matters because **lowering `zstd_window_log` alone does not bound
+memory for high levels**: level 22 at windowLog 20 still allocates
+~640 MB, because the table size is driven by the level/strategy, not
+the window.
+
+```nginx
+http {
+    zstd                  on;
+    zstd_comp_level       19;       # would otherwise eat ~90 MB / request
+    zstd_max_cctx_memory  256m;     # accepted: level 19 fits in 256 MB
+}
+
+server {
+    location /risky/ {
+        zstd_comp_level       22;
+        zstd_max_cctx_memory  64m;  # REFUSED at config load:
+        # "the configured zstd parameters need ~833 MB of per-request
+        # compressor memory, which exceeds zstd_max_cctx_memory 64m;
+        # lower zstd_comp_level (currently 22), lower zstd_window_log,
+        # disable zstd_long, or raise the budget"
+    }
+}
+```
+
+**Why a config-load assert and not a runtime cap.** The directive does
+**not** silently tune anything. A too-tight budget is a hard error so
+operators see the misconfiguration up front, instead of discovering it
+as a worker-RSS surprise under concurrency. Without
+`-DZSTD_STATIC_LINKING_ONLY` the estimator API is unavailable; in that
+case the directive is rejected at config load with the same kind of
+clear message, never silently no-op'd.
+
+> **Note:** This bounds **per-request** memory at one CCtx. The total
+> worker memory ceiling at the request limit is roughly
+> `worker_connections × zstd_max_cctx_memory` in the worst case
+> (every connection actively compressing).
+
+---
+
 ### zstd_bypass
 
 **Syntax:** `zstd_bypass string ...;`
@@ -540,9 +607,46 @@ server {
 > addressed — or addressable — here; configure `ssl_protocols`
 > appropriately instead.)
 
-> **Note:** length-padding "anti-BREACH" schemes are intentionally
-> **not** provided: small pads are defeated statistically and large
-> ones waste bandwidth, giving false confidence.
+> **Why this module does not pad responses (the "anti-BREACH length
+> padding" question).** A frequently requested "fix" is to add random
+> padding to the compressed body so its length no longer reveals the
+> compression ratio. This module deliberately does **not** do that, and
+> will not, for concrete reasons:
+>
+> 1. **Random padding does not remove the signal — it adds noise the
+>    attacker averages out.** BREACH is a guess-and-measure oracle: the
+>    attacker replays the same request thousands of times, changing one
+>    guessed byte at a time. A correct guess compresses ~1 byte smaller.
+>    Random padding of variance σ adds zero-mean noise to each
+>    measurement; averaging N samples shrinks the noise by √N while the
+>    1-byte signal stays put. The attacker simply requests more times.
+>    Published BREACH follow-up work (e.g. *Rupture*) automates exactly
+>    this statistical recovery against padded/noised responses. Padding
+>    raises the request count, not the difficulty class — it buys the
+>    *appearance* of a fix while the secret still leaks.
+> 2. **Padding that *would* defeat it is not "padding" anymore.** The
+>    only length transform that actually closes the oracle is forcing
+>    every response to a fixed size (or coarse power-of-two buckets)
+>    *independent of content* — which throws away most of the
+>    compression you enabled zstd for, on every response, to defend the
+>    small subset that mixes a secret with reflected input. That is a
+>    strictly worse trade than `zstd_bypass` on those endpoints (full
+>    ratio everywhere else, identity exactly where it is unsafe).
+> 3. **It moves a security boundary into the wrong layer.** Whether a
+>    response safely mixes secrets and attacker input is an
+>    application-semantics decision (is this field a CSRF token? is that
+>    substring reflected query input?). A compression filter cannot see
+>    that distinction; a per-response byte transform here cannot make an
+>    application-layer information-flow problem safe, and shipping one
+>    would invite operators to *believe* it had.
+>
+> So the module gives you the one lever that is honest and effective —
+> `zstd_bypass`, to serve identity on the specific at-risk endpoints —
+> and points you at the real fixes (CSRF token masking, separating
+> secrets from reflected input, origin/referer checks). A built-in
+> padding knob would trade real bandwidth for false confidence, so it is
+> intentionally absent. See [`SECURITY.md`](SECURITY.md) for the
+> in-scope / out-of-scope statement.
 
 ---
 
@@ -603,6 +707,8 @@ When set to `on`, the module sets `r->gzip_vary = 1`, which causes nginx to add 
 
 > **Warning (`always` mode):** When `zstd_static always` is set, `.zst` files are served to every client regardless of whether they advertise `Accept-Encoding: zstd`. No `Vary` header is emitted and no `Content-Encoding` negotiation occurs. Any client that does not support zstd will receive a compressed body it cannot decode. Only use `always` on locations where every client is guaranteed to support zstd — for example, internal service-to-service calls where you control both ends.
 
+> **Magic-number validation.** Before serving a `.zst`, the module reads the first 4 bytes of the file (one `pread(2)` at offset 0) and verifies they are the zstd frame magic (`ZSTD_MAGICNUMBER` `0xFD2FB528`) or a skippable-frame magic (`ZSTD_MAGIC_SKIPPABLE_*`). On mismatch — a truncated download, mistaken rename (`cp foo.txt foo.zst`), or any other non-zstd content — the handler logs `zstd static: "..." is not a zstd frame (leading bytes 0x...)` and **declines**; nginx then falls back to serving the uncompressed original, or returns 404 if no original is present. Without this, the client would receive a body labelled `Content-Encoding: zstd` that it cannot decode. The check is Linux/BSD-only (uses `pread(2)`) and is skipped under `NGX_WIN32`.
+
 **Example:**
 
 ```nginx
@@ -662,20 +768,42 @@ log_format zstd '$request in=$zstd_bytes_in out=$zstd_bytes_out '
 
 # Testing & CI
 
-Every push and pull request runs four workflows (badges at the top):
+Five workflows guard every change (badges at the top); their cadence
+differs so PR feedback stays fast:
 
-| Workflow | What it does |
-|---|---|
-| **Build & Test** | Compiles the module against **nginx 1.31.0 mainline** and **Angie 1.11.5** with strict `-Werror` flags, then runs the full test suite: 37 `Test::Nginx::Socket` filter tests, 20 static-module tests, and end-to-end Python smoke tests (truncation, `Vary`, boundary sizes, repeated/concurrent requests, terminal-frame, `$zstd_ratio`). A parallel job rebuilds with **ASAN+UBSAN** and re-runs the smoke tests plus a `zstd_dict_file` config-reload leak check. |
-| **CodeQL** | GitHub's `security-extended` C/C++ analysis against a real module build. |
-| **Security Scanners** | flawfinder, clang-tidy (`cert-*`, `bugprone-*`), and semgrep, with results uploaded as SARIF to the Security tab. |
-| **Fuzzing** | A libFuzzer harness for `ngx_http_zstd_accept_encoding()` — the RFC 7231 `Accept-Encoding`/q-value parser. The fuzz target is sliced from the shipped header at build time, so there is no copy drift. Runs nightly and on PRs that touch the parser. See [`fuzz/README.md`](fuzz/README.md). |
+| Workflow | Cadence | What it does |
+|---|---|---|
+| **Build & Test** | every push & PR | Compiles the module against **nginx 1.31.0 mainline** and **Angie 1.11.5** with strict `-Werror` flags, then runs the full test suite: 46 `Test::Nginx::Socket` filter tests, 21 static-module tests, and end-to-end Python smoke tests (truncation, `Vary`, boundary sizes, repeated/concurrent requests, terminal-frame, the proxy-unbuffered and compression-matrix regressions, per-request CCtx isolation, reload-under-load, `zstd_long`/LDM, `$zstd_ratio`). A separate matrix entry rebuilds against **libzstd 1.4.x** (from source) to exercise the `< 1.5.6` and `≥ 1.4.0` fallback paths, and a parallel job rebuilds with **ASAN+UBSAN** and re-runs the smoke tests plus a `zstd_dict_file` config-reload leak check. A 10-minute mixed-load soak under ASAN+UBSAN runs on the weekly schedule. |
+| **CodeQL** | every push & PR + weekly | GitHub's `security-extended` C/C++ analysis against a real module build. |
+| **Security Scanners** | every push & PR + weekly | flawfinder, clang-tidy (`cert-*`, `bugprone-*`), and semgrep, with results uploaded as SARIF to the Security tab. |
+| **Fuzzing** | nightly + PRs touching the parser | A libFuzzer harness for the `ngx_http_zstd_accept_encoding()` / `ngx_http_zstd_eval_qvalue()` RFC 7231 `Accept-Encoding`/q-value parser. The fuzz target is sliced from the shipped header at build time, so there is no copy drift. See [`fuzz/README.md`](fuzz/README.md). |
+| **Valgrind Memcheck** | monthly + manual dispatch | A full Memcheck soak with `--track-origins=yes`, catching uninitialised-value reads and leaks that ASAN cannot. Monthly because a valgrind soak is ~20–50× slower than native. |
 
 The test suite includes a dedicated regression test for every known
-historical bug class (infinite-loop/CPU-spin DoS, `$zstd_ratio` integer
-overflow, filter ordering vs `sub_filter`, negative compression levels,
-`zstd_types` parsing, `max_length` enforcement, the `zstd_dict_file`
-feature, long-URI `.zst` path handling, and the `ZSTD_CDict` reload leak).
+historical bug class:
+
+* infinite-loop / CPU-spin DoS on zero-length and sub-stream-size bodies;
+* the `proxy_buffering off` chunked-stream truncation ("bug B" —
+  zero-size buffer forwarded to the writer), plus a ~504-cell
+  compression-correctness matrix that decodes and byte-compares every
+  transport × payload × encoding combination;
+* per-request `ZSTD_CCtx` isolation (one request's compressor state
+  bleeding into another) and reload-under-load response correctness;
+* `$zstd_ratio` integer overflow on large bodies;
+* filter ordering vs `sub_filter`; negative compression levels;
+  `zstd_types` parsing; `zstd_max_length` enforcement (known and
+  chunked length); `zstd_window_log`; `zstd_long`/LDM; `zstd_bypass`;
+  the pledged-source-size path;
+* `zstd_max_cctx_memory` rejects parameters that exceed the budget
+  (config-load assertion);
+* `zstd_static` declines `.zst` files whose magic number is not a real
+  zstd frame (defence-in-depth against truncated / mis-renamed files);
+* the multi-occurrence `Accept-Encoding` parser path (a header like
+  `notzstd, zstd` must still negotiate zstd — covered by Perl tests
+  *and* by continuous libFuzzer with ASAN/UBSAN over a NUL-free
+  exact-size buffer);
+* the `zstd_dict_file` feature, long-URI `.zst` path handling, and the
+  `ZSTD_CDict` config-reload leak.
 
 Run the suites locally:
 
