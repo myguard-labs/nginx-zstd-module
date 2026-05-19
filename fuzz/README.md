@@ -1,7 +1,9 @@
 # Fuzzing
 
-Coverage-guided fuzzing of `ngx_http_zstd_accept_encoding()` — the RFC 7231
-Accept-Encoding / q-value parser in [`../ngx_http_zstd_common.h`](../ngx_http_zstd_common.h).
+Coverage-guided fuzzing of the RFC 7231 Accept-Encoding / q-value parser
+in [`../ngx_http_zstd_common.h`](../ngx_http_zstd_common.h): the entry
+point `ngx_http_zstd_accept_encoding()` and the `ngx_http_zstd_eval_qvalue()`
+helper it calls. Both are sliced into the fuzz target together.
 
 ## Why this target
 
@@ -14,8 +16,10 @@ module's historical bug profile (truncation, terminal-frame, lifetime).
 ## No copy drift
 
 There is **no hand-maintained copy** of the parser. `extract_parser.sh`
-slices the verbatim function body out of the shipped header into
-`generated_parser.inc` at build time, and fails loudly if it can't find it.
+slices the verbatim bodies of both parser functions
+(`ngx_http_zstd_eval_qvalue` then `ngx_http_zstd_accept_encoding`, in
+definition order) out of the shipped header into `generated_parser.inc`
+at build time, and fails loudly if it cannot find either.
 `ngx_shim.h` supplies only the tiny nginx surface the function needs
 (`ngx_str_t`, `ngx_tolower`, `ngx_strncasecmp`, `ngx_strcasestrn`), copied
 faithfully from upstream `src/core/ngx_string.{h,c}` with citations.
@@ -36,8 +40,8 @@ A crash drops a `crash-*` reproducer. Replay it with:
 
 ## CI
 
-[`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml), kept separate
-from `ci.yml` so it never slows PR feedback:
+[`.github/workflows/fuzzing.yml`](../.github/workflows/fuzzing.yml), kept
+separate from the build/test pipeline so it never slows PR feedback:
 
 - **Nightly** — 15-min discovery run, merges + uploads the grown corpus
 - **PR** — 2-min bounded regression run, *only* when the parser, `fuzz/`, or

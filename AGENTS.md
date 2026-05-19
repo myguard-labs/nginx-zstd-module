@@ -154,10 +154,11 @@ bash tools/test_reload_leak.sh /path/to/asan-built/nginx   # real under ASAN
 
 ## Fuzzing (`fuzz/`)
 
-Target: `ngx_http_zstd_accept_encoding()`. The parser is **sliced from
+Target: `ngx_http_zstd_accept_encoding()` and the
+`ngx_http_zstd_eval_qvalue()` helper it calls. Both are **sliced from
 the shipped header at build time** by `fuzz/extract_parser.sh` into
-`generated_parser.inc` (gitignored) — there is intentionally **no
-hand-maintained copy**. `fuzz/ngx_shim.h` reproduces the few nginx
+`generated_parser.inc` (gitignored), in definition order — there is
+intentionally **no hand-maintained copy**. `fuzz/ngx_shim.h` reproduces the few nginx
 primitives the parser needs, copied faithfully from upstream
 `src/core/ngx_string.{c,h}` with citations.
 
