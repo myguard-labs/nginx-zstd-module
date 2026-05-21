@@ -112,11 +112,18 @@ NGX_LD_OPT="$ngx_zstd_opt_L $NGX_LD_OPT"
 # build the ngx_http_zstd_static_module
 HTTP_ZSTD_SRCS="$ngx_addon_dir/ngx_http_zstd_static_module.c"
 
+# Shared inline header included by this .c file. Declare it as a build
+# dependency so an incremental build rebuilds the object whenever the
+# header changes; without this, edits to ngx_http_zstd_common.h leave
+# stale .o files behind.
+HTTP_ZSTD_DEPS="$ngx_addon_dir/../ngx_http_zstd_common.h"
+
 ngx_addon_name=ngx_http_zstd_static_module
 ngx_module_type=HTTP
 ngx_module_name=ngx_http_zstd_static_module
 ngx_module_incs="$ngx_zstd_opt_I"
 ngx_module_srcs=$HTTP_ZSTD_SRCS
+ngx_module_deps=$HTTP_ZSTD_DEPS
 ngx_module_order="ngx_http_brotli_static_module \
                   $ngx_module_name"
 
