@@ -394,8 +394,31 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_zstd_static_conf_t *prev = parent;
     ngx_http_zstd_static_conf_t *conf = child;
 
+    ngx_http_core_loc_conf_t    *clcf;
+
     ngx_conf_merge_uint_value(conf->enable, prev->enable,
                               NGX_HTTP_ZSTD_STATIC_OFF);
+
+    /*
+     * Warn at config load only when zstd_static is actually enabled
+     * for THIS location and the same location has gzip_vary off. The
+     * previous version emitted this warning unconditionally from the
+     * postconfiguration handler whenever the top-level location lacked
+     * gzip_vary, even on configs that load the module but never use
+     * the directive — a misleading log line. Mirror the filter
+     * module's per-location merge-time check.
+     */
+    if (conf->enable != NGX_HTTP_ZSTD_STATIC_OFF) {
+        clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+        if (clcf != NULL && !clcf->gzip_vary) {
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                               "zstd_static is enabled but "
+                               "\"gzip_vary\" is off; add \"gzip_vary "
+                               "on\" to emit \"Vary: Accept-Encoding\" "
+                               "so proxies and CDNs cache compressed "
+                               "and uncompressed responses separately");
+        }
+    }
 
     return NGX_CONF_OK;
 }
@@ -406,7 +429,6 @@ ngx_http_zstd_static_init(ngx_conf_t *cf)
 {
     ngx_http_handler_pt        *h;
     ngx_http_core_main_conf_t  *cmcf;
-    ngx_http_core_loc_conf_t   *clcf;
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
@@ -416,16 +438,6 @@ ngx_http_zstd_static_init(ngx_conf_t *cf)
     }
 
     *h = ngx_http_zstd_static_handler;
-
-    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-    if (clcf != NULL && !clcf->gzip_vary) {
-        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
-                           "zstd_static is enabled but \"gzip_vary\" is off; "
-                           "add \"gzip_vary on\" to emit "
-                           "\"Vary: Accept-Encoding\" so proxies and "
-                           "CDNs cache compressed and uncompressed "
-                           "responses separately");
-    }
 
     return NGX_OK;
 }
