@@ -836,11 +836,24 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->in_buf = ctx->in->buf;
     ctx->in = ctx->in->next;
 
-    if (ctx->in_buf->flush) {
-        ctx->flush = 1;
-
-    } else if (ctx->in_buf->last_buf) {
+    /*
+     * Test last_buf FIRST, then flush — matching the order used by the
+     * nginx gzip and brotli body filters
+     * (ngx_http_gzip_filter_module.c / brotli filter). An upstream
+     * terminal chain link can legitimately carry BOTH last_buf=1 and
+     * flush=1 (e.g. proxy_buffering off + the upstream finalising its
+     * stream): with the reverse order ctx->flush wins, ctx->last is
+     * never set, the END-action transition below never fires, and the
+     * stream is sent without its terminal zstd frame — the connection
+     * hangs or the decoder sees a truncated frame. End-of-stream
+     * implies a flush at the writer layer, so prioritising last_buf
+     * loses nothing.
+     */
+    if (ctx->in_buf->last_buf) {
         ctx->last = 1;
+
+    } else if (ctx->in_buf->flush) {
+        ctx->flush = 1;
     }
 
     ctx->buffer_in.src = ctx->in_buf->pos;
