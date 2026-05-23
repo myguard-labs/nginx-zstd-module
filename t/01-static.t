@@ -445,7 +445,7 @@ Content-Encoding: zstd
 # ("HELO ...") with no zstd magic; no uncompressed fallback file is
 # placed alongside it, so the request falls through to a clean 404.
 --- config
-    location / {
+    location /bogus {
         zstd_static on;
         root html;
     }
@@ -502,7 +502,7 @@ Content-Encoding: zstd
 # benign ENOENT on the fallback path is expected and not asserted
 # against.
 --- config
-    location / {
+    location /empty {
         zstd_static on;
         root html;
     }
@@ -520,19 +520,19 @@ Accept-Encoding: zstd
 
 === TEST 24: zstd_static declines a directory-style request
 # A request whose URI ends in "/" maps to a path with a trailing
-# slash; appending ".zst" produces "/path/.zst", which is either a
-# directory or a non-existent file. The handler must decline (either
-# via the open_cached_file ENOENT branch or via the is_dir branch on
-# disks where such a path resolves to a directory) so the request
-# falls through to the normal directory-index machinery rather than
-# being answered with Content-Encoding: zstd.
+# slash; appending ".zst" would produce ".../.zst", which is either
+# a directory or a non-existent file. The handler must short-circuit
+# at the URI-suffix check (uri.data[uri.len - 1] == '/') and decline
+# without touching the filesystem, so the request falls through to
+# the normal directory-index machinery rather than being answered
+# with Content-Encoding: zstd.
 --- config
-    location / {
+    location /dir/ {
         zstd_static on;
         root ../../t/suite;
     }
 --- request
-GET /
+GET /dir/
 --- more_headers
 Accept-Encoding: zstd
 --- response_headers
