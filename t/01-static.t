@@ -539,7 +539,7 @@ Accept-Encoding: zstd
 GET /dir/
 --- more_headers
 Accept-Encoding: zstd
---- error_code: 403
+--- error_code: 404
 --- response_headers
 !Content-Encoding
 
