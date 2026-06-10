@@ -12,11 +12,11 @@ name: Build & Test
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # Latest mainline nginx. This is the default build + the artifact the
-  # full test/ASAN suite runs against. The build matrix additionally
-  # compiles the module against Angie (the actively-developed nginx fork
-  # this module also ships packages for).
-  NGINX_VERSION: "1.31.0"
+  # nginx version is NOT pinned. The `resolve` job scrapes nginx.org for the
+  # current mainline release at run time and feeds it to every job via
+  # `needs.resolve.outputs.nginx_version` (and the build matrix JSON). This
+  # makes the weekly cron actually test the module against new releases as
+  # they ship, instead of failing once nginx.org drops an old tarball.
 
 on:
   push:
@@ -39,6 +39,38 @@ permissions:
   contents: read
 
 jobs:
+
+  # ── Resolve the current mainline nginx version once per run ───────────────
+  #    Scrapes nginx.org and exposes both a bare version string and a ready
+  #    build-matrix JSON (nginx@<latest> + the pinned Angie fork). Every other
+  #    job consumes needs.resolve.outputs.* so the whole run agrees on one
+  #    version. nginx.org only keeps the newest mainline tarball around, so
+  #    resolving at run time is what keeps CI from 404ing after a release.
+  resolve:
+    name: Resolve nginx version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      nginx_version: ${{ steps.v.outputs.nginx_version }}
+      matrix: ${{ steps.v.outputs.matrix }}
+    steps:
+      - name: Resolve latest mainline nginx
+        id: v
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          if [ -z "$ver" ]; then
+            echo "::error::could not resolve mainline nginx version from nginx.org"
+            exit 1
+          fi
+          echo "Resolved nginx mainline: $ver"
+          echo "nginx_version=$ver" >> "$GITHUB_OUTPUT"
+          # Build matrix: nginx@<latest> + the pinned Angie fork. Keep the
+          # Angie entry in sync with the build-old-libzstd / valgrind notes.
+          printf 'matrix={"include":[{"flavor":"nginx","version":"%s","url":"https://nginx.org/download/nginx-%s.tar.gz","dir":"nginx-%s"},{"flavor":"angie","version":"1.11.5","url":"https://download.angie.software/files/angie-1.11.5.tar.gz","dir":"angie-1.11.5"}]}\n' \
+            "$ver" "$ver" "$ver" >> "$GITHUB_OUTPUT"
 
   # ── Lint & static analysis — no nginx build, fully independent ────────────
   validation:
@@ -180,18 +212,11 @@ jobs:
     name: Build (${{ matrix.flavor }} ${{ matrix.version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: resolve
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - flavor: nginx
-            version: "1.31.0"
-            url: "https://nginx.org/download/nginx-1.31.0.tar.gz"
-            dir: "nginx-1.31.0"
-          - flavor: angie
-            version: "1.11.5"
-            url: "https://download.angie.software/files/angie-1.11.5.tar.gz"
-            dir: "angie-1.11.5"
+      # nginx@<latest mainline> + pinned Angie, assembled by the resolve job.
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
     steps:
       - name: Checkout module
@@ -327,8 +352,12 @@ jobs:
     name: Build (libzstd 1.4.x — fallback paths)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    needs: resolve
 
     env:
+      # Resolved mainline nginx (used by the cache keys + download/build steps
+      # below, both as ${{ env.NGINX_VERSION }} and the shell $NGINX_VERSION).
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
       # 1.4.5 is < 1.5.6 (so ZSTD_c_targetCBlockSize is absent and the
       # #ifdef guard's fallback compiles) and >= 1.4.0 (the module's
       # hard floor — ZSTD_compressStream2 is present). 1.4.0 itself
@@ -435,6 +464,12 @@ jobs:
     name: Build ASAN+UBSAN
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: resolve
+
+    env:
+      # Resolved mainline nginx — feeds the cache keys, download and the
+      # uploaded artifact path below.
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
 
     steps:
       - name: Checkout module
@@ -480,13 +515,16 @@ jobs:
 
   # ── Full test suite — runs against the mainline binary ────────────────────
   tests:
-    # The job-level name: is evaluated before the env context is available,
-    # so it cannot use ${{ env.NGINX_VERSION }} (GitHub rejects the whole
-    # workflow file). Keep this literal in sync with NGINX_VERSION above.
-    name: Tests (nginx 1.31.0 mainline)
+    # The job-level name: cannot use the `env` context, but the `needs`
+    # context IS available there — so the resolved version shows in the job
+    # title without a hardcoded literal.
+    name: Tests (nginx ${{ needs.resolve.outputs.nginx_version }} mainline)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: build
+    needs: [resolve, build]
+    env:
+      # Resolved mainline nginx — names the build artifact to download.
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
 
     steps:
       - name: Checkout module

@@ -1,13 +1,25 @@
 #!/bin/bash
 # Build and test zstd-nginx-module against nginx
 # Usage: ./tools/ci-build.sh [nginx-version]
-# Default: 1.31.0 (latest)
+# Default: latest mainline, resolved from nginx.org (not pinned).
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULE_DIR="$(dirname "$SCRIPT_DIR")"
-NGINX_VERSION="${1:-1.31.0}"
+if [ -n "${1:-}" ]; then
+    NGINX_VERSION="$1"
+else
+    # Resolve the current mainline release; nginx.org only keeps the newest
+    # mainline tarball, so a hardcoded version eventually 404s.
+    NGINX_VERSION="$(curl -fsSL https://nginx.org/en/download.html \
+        | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+        | sort -V | tail -1)"
+    if [ -z "$NGINX_VERSION" ]; then
+        echo "ERROR: could not resolve mainline nginx version from nginx.org" >&2
+        exit 1
+    fi
+fi
 BUILD_DIR="/tmp/nginx-build-$$"
 ZSTD_MODULE_DIR="$MODULE_DIR"
 

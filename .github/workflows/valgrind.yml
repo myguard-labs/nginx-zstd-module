@@ -11,7 +11,8 @@ name: Valgrind Memcheck
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  NGINX_VERSION: "1.31.0"
+  # nginx version is resolved at run time in the build job (not pinned), so
+  # the monthly soak runs against current mainline.
 
 on:
   schedule:
@@ -35,13 +36,26 @@ jobs:
   #    Reuses the same build strategy as build-test.yml: -g3 -O0 with
   #    frame pointers for accurate valgrind origin tracking.
   build:
-    name: Build (nginx 1.31.0)
+    name: Build (nginx mainline)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
       - name: Checkout module
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          if [ -z "$ver" ]; then
+            echo "::error::could not resolve mainline nginx version from nginx.org"
+            exit 1
+          fi
+          echo "Resolved nginx mainline: $ver"
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
 
       - name: Cache apt packages
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

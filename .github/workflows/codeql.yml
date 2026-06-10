@@ -4,8 +4,8 @@ name: CodeQL
 # evolves independently of the build/test pipeline and shows as its own
 # PR check). Third-party actions pinned to commit SHAs — see build-test.yml header.
 
-env:
-  NGINX_VERSION: "1.31.0"
+# nginx version is resolved at run time (see "Resolve latest mainline nginx"
+# step) rather than pinned, so this analysis tracks current mainline.
 
 on:
   push:
@@ -36,6 +36,19 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          if [ -z "$ver" ]; then
+            echo "::error::could not resolve mainline nginx version from nginx.org"
+            exit 1
+          fi
+          echo "Resolved nginx mainline: $ver"
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
 
       - name: Install build dependencies
         run: |

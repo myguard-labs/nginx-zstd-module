@@ -34,11 +34,22 @@ Workflow-level hardening:
 
 | Role | Version | Where |
 |---|---|---|
-| nginx mainline (default + artifact + tests) | **1.31.0** | `env.NGINX_VERSION`, `build` matrix, `build-asan` |
-| Angie (nginx fork, also packaged) | **1.11.5** | `build` matrix |
+| nginx mainline (default + artifact + tests) | **latest, resolved at run time** | `resolve` job → `needs.resolve.outputs.nginx_version` |
+| Angie (nginx fork, also packaged) | **1.11.5** (pinned) | `resolve` job matrix JSON |
 
-`1.31.0` is the current nginx mainline release. The `build` job uses a
-`strategy.matrix` (include entries with `flavor`/`version`/`url`/`dir`) so the
+nginx is **not pinned**. A `resolve` job scrapes `nginx.org/en/download.html`
+for the current mainline release and exposes it as
+`needs.resolve.outputs.nginx_version` plus a ready build-matrix JSON; every
+other job (`build`, `build-old-libzstd`, `build-asan`, `tests`) consumes those
+so the whole run agrees on one version. This keeps the weekly cron testing the
+module against new releases as they ship, and avoids 404s once nginx.org drops
+an old mainline tarball. `codeql.yml` and `valgrind.yml` resolve the same way
+via a per-job "Resolve latest mainline nginx" step. `tools/ci-build.sh` with no
+argument resolves the latest too (pass an explicit version to override).
+
+The `build` job uses a dynamic
+`strategy.matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}` (entries with
+`flavor`/`version`/`url`/`dir`) so the
 module is compiled against both nginx mainline and Angie — the actively
 developed fork this module also ships packages for (see
 `tools/test_package_artifact.py`). The shared test binary is the nginx
@@ -123,7 +134,7 @@ context handling, terminal-frame emission).
 Build against nginx locally before pushing:
 
 ```bash
-bash tools/ci-build.sh            # default nginx 1.31.0
+bash tools/ci-build.sh            # default: latest mainline (resolved from nginx.org)
 bash tools/ci-build.sh 1.29.8     # specific nginx version
 ```
 
