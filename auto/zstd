@@ -9,7 +9,15 @@
 # and appends the link flags to NGX_LD_OPT for static nginx builds.
 
 ngx_feature_incs="#include <zstd.h>"
-ngx_feature_test="(void) ZSTD_createCCtx();"
+# ZSTD_compressStream2() (and ZSTD_CCtx_reset(), used unconditionally by the
+# module) establish a hard libzstd 1.4.0 floor. Enforce it at the feature
+# probe so an older library fails configure with the not-found error below
+# rather than failing the compile deep in the module sources.
+ngx_feature_test="
+#if ZSTD_VERSION_NUMBER < 10400
+#error libzstd 1.4.0 or newer is required
+#endif
+(void) ZSTD_compressStream2;"
 ngx_feature_libs=
 ngx_feature_run=no
 
@@ -119,10 +127,11 @@ fi
 
 NGX_LD_OPT="$ngx_zstd_opt_L $NGX_LD_OPT"
 
-# Advisory: check zstd version and warn if below recommended minimum.
-# The module compiles against older zstd (< 1.4.0) using fallback code
-# paths, but ZSTD_CCtx_reset() (1.5.0+) is used when available for
-# better performance. Versions below 1.4.0 are missing ZSTD_minCLevel().
+# Advisory: report the detected zstd version when a directive's full
+# functionality needs a newer library than the 1.4.0 floor enforced above.
+# The module always uses ZSTD_CCtx_reset() + ZSTD_compressStream2() (both
+# 1.4.0); there is no ZSTD_initCStream_usingCDict() fallback path. The only
+# version-gated directive is zstd_target_cblock_size (libzstd >= 1.5.6).
 #
 # Extract ZSTD_VERSION_NUMBER directly from the header via the
 # preprocessor: feed "#include <zstd.h>" + the macro name through the
@@ -133,20 +142,12 @@ ZSTD_VERSION_NUMBER" | \
     grep -v "^#" | grep -v "^$" | tail -1 | tr -d ' ')
 
 if [ -n "$ngx_zstd_ver" ]; then
-    if [ "$ngx_zstd_ver" -lt 10400 ] 2>/dev/null; then
+    if [ "$ngx_zstd_ver" -lt 10506 ] 2>/dev/null; then
         cat << END
-        Warning: zstd version $ngx_zstd_ver detected (< 1.4.0 / 10400).
-        ZSTD_minCLevel() is not available; negative compression levels
-        are not supported and will be rejected at config load time.
-        Consider upgrading zstd to 1.4.0 or later for negative-level
-        support.
-END
-    elif [ "$ngx_zstd_ver" -lt 10500 ] 2>/dev/null; then
-        cat << END
-        Note: zstd version $ngx_zstd_ver detected (< 1.5.0 / 10500).
-        ZSTD_CCtx_reset() is not available; the module will fall back to
-        the deprecated ZSTD_initCStream_usingCDict() API. Consider
-        upgrading zstd to 1.5.0 or later for the best performance.
+        Note: zstd version $ngx_zstd_ver detected (< 1.5.6 / 10506).
+        "zstd_target_cblock_size" requires libzstd >= 1.5.6 and will have
+        no effect at runtime on this build. Every other directive is
+        fully functional. Upgrade libzstd to 1.5.6+ for that directive.
 END
     fi
 fi
