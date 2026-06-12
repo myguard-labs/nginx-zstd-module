@@ -1584,3 +1584,95 @@ Accept-Encoding: zstd
 Content-Encoding: identity
 --- no_error_log
 [error]
+
+
+
+=== TEST 61: RFC 9110 wildcard "*" makes zstd acceptable
+# Per RFC 9110 §12.5.3 "*" matches any coding not explicitly listed, so a
+# client sending only "*" accepts zstd. (The pre-RFC2 parser ignored "*".)
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: *
+--- response_headers
+!Content-Length
+Transfer-Encoding: chunked
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 62: explicit zstd;q=0 overrides a permissive wildcard
+# An explicit "zstd" token decides the result even against "*;q=1".
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=0, *;q=1
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 63: malformed qvalue with trailing junk (q=1x) is not acceptable
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=1x
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 64: qvalue with a fourth decimal digit (q=0.0001) is malformed
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=0.0001
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
