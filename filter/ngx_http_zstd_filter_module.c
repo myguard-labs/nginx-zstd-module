@@ -1374,6 +1374,15 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 if (cln == NULL) {
                     ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                        "ngx_pool_cleanup_add() failed");
+                    /*
+                     * The CDict is allocated outside the config pool and is
+                     * only reclaimed by the cleanup handler we failed to
+                     * register. Free it here (and drop the dangling pointer)
+                     * so a failed reload does not leak the external libzstd
+                     * allocation while the master keeps running.
+                     */
+                    ZSTD_freeCDict(conf->dict);
+                    conf->dict = NULL;
                     rc = NGX_CONF_ERROR;
                     goto close;
                 }
