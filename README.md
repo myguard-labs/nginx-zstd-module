@@ -220,7 +220,16 @@ This filter module compresses responses on the fly using zstd. It runs after the
 
 > **ETag behaviour:** When a response is compressed, nginx automatically weakens the `ETag` value (converting `"abc"` to `W/"abc"` if it was strong). This is correct per HTTP semantics — a compressed representation is a different entity variant — but it means strong ETag validation (`If-Match`) will not match across compressed and uncompressed responses. CDN edge nodes that cache both variants will see different ETags for each.
 
-> **Coexisting with `gzip` and `brotli`:** It is safe to enable `zstd`, the [`brotli`](https://github.com/google/ngx_brotli) filter, and the built-in [`gzip`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html) filter on the same location with overlapping `*_types`. A response is only ever compressed once: nginx body filters run in a fixed chain, and the first encoder whose `Accept-Encoding` test passes wins, setting `Content-Encoding` so the later encoders skip the already-encoded body. This module is ordered to run **before** `brotli` and `gzip`, so a client that advertises `Accept-Encoding: br, gzip, zstd` receives `zstd`. Clients that do not advertise `zstd` fall through to `brotli`, then `gzip`. Always pair this with `gzip_vary on;` so each encoded variant is cached separately by proxies and CDNs.
+> **Coexisting with `gzip` and `brotli`:** It is safe to enable `zstd`, the [`brotli`](https://github.com/google/ngx_brotli) filter, and the built-in [`gzip`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html) filter on the same location with overlapping `*_types`. A response is only ever compressed once: nginx body filters run in a fixed chain, and the first encoder whose `Accept-Encoding` test passes wins, setting `Content-Encoding` so the later encoders skip the already-encoded body. Relative to the built-in `gzip`, `zstd` is always ordered to run **before** it (both in static and dynamic builds), so a client advertising `Accept-Encoding: gzip, zstd` receives `zstd`; clients that do not advertise `zstd` fall through to `gzip`. Always pair this with `gzip_vary on;` so each encoded variant is cached separately by proxies and CDNs.
+>
+> **`zstd` vs `brotli` ordering (dynamic builds):** the fixed `before brotli` guarantee holds for **static** builds, where `filter/config` explicitly places `zstd` ahead of `ngx_http_brotli_filter_module` in the module array. For **dynamic** modules, `ngx_brotli` and this module share the same filter anchor and neither constrains itself relative to the other, so the body-filter chain is built in **reverse `load_module` order** — whichever is loaded **last** runs first and wins. To make `zstd` win a `br, zstd` negotiation, load it last:
+>
+> ```nginx
+> load_module modules/ngx_http_brotli_filter_module.so;
+> load_module modules/ngx_http_zstd_filter_module.so;   # loaded last → runs first → wins
+> ```
+>
+> Swap the two lines to prefer `brotli`. If you require a fixed winner regardless of operator load order, prefer a static build (or pick one of the two filters per location).
 
 ---
 
