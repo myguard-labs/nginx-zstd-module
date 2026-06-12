@@ -1835,6 +1835,32 @@ ngx_http_zstd_check_size_int_max(ngx_conf_t *cf, void *post, void *data)
                            "libzstd >= 1.5.6); the directive will have "
                            "no effect at runtime");
     }
+#else
+    /*
+     * On a library that supports the parameter, validate the configured
+     * value against libzstd's own accepted range now, at config load. Once
+     * C1 made the runtime apply path live, an out-of-range value would
+     * otherwise pass nginx -t and then fail ZSTD_CCtx_setParameter() for
+     * every request in the location (a 500 storm). 0 stays "unset". See C3.
+     */
+    if (*sp > 0) {
+        ZSTD_bounds  b = ZSTD_cParam_getBounds(ZSTD_c_targetCBlockSize);
+
+        if (ZSTD_isError(b.error)) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_cParam_getBounds(targetCBlockSize) "
+                               "failed: %s", ZSTD_getErrorName(b.error));
+            return NGX_CONF_ERROR;
+        }
+
+        if ((ngx_int_t) *sp < b.lowerBound || (ngx_int_t) *sp > b.upperBound) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "\"zstd_target_cblock_size\" must be 0 "
+                               "(default) or between %d and %d",
+                               b.lowerBound, b.upperBound);
+            return NGX_CONF_ERROR;
+        }
+    }
 #endif
 
     return NGX_CONF_OK;
@@ -1855,34 +1881,32 @@ ngx_http_zstd_check_num_int_max(ngx_conf_t *cf, void *post, void *data)
     }
 
     /*
-     * 0 means "unset" (keep zstd's level-derived default). Any other
-     * value is passed straight to ZSTD_c_windowLog, which only accepts
-     * [ZSTD_WINDOWLOG_MIN, ZSTD_WINDOWLOG_MAX]. Those macros live behind
-     * ZSTD_STATIC_LINKING_ONLY (experimental section of zstd.h) and are
-     * not visible on the module's normal dynamic-link build, so the
-     * stable, long-documented constants are inlined here: MIN is 10 and
-     * MAX is 30 on 32-bit / 31 on 64-bit size_t. libzstd would otherwise
-     * reject an out-of-range value per-request (a 500 on every response
-     * for this location); catching it at config load turns that into a
-     * clear startup error instead.
+     * 0 means "unset" (keep zstd's level-derived default). Any other value
+     * is passed straight to ZSTD_c_windowLog. Ask the linked library for the
+     * actual accepted range with ZSTD_cParam_getBounds() — a stable-API call
+     * (no ZSTD_STATIC_LINKING_ONLY needed) — instead of inlining hard-coded
+     * constants that can drift from the library. libzstd would otherwise
+     * reject an out-of-range value per-request (a 500 on every response for
+     * this location); catching it at config load turns that into a clear
+     * startup error instead. See C3.
      */
-#define NGX_HTTP_ZSTD_WINDOWLOG_MIN  10
-#define NGX_HTTP_ZSTD_WINDOWLOG_MAX  (sizeof(size_t) == 4 ? 30 : 31)
+    if (*np != 0) {
+        ZSTD_bounds  b = ZSTD_cParam_getBounds(ZSTD_c_windowLog);
 
-    if (*np != 0
-        && (*np < NGX_HTTP_ZSTD_WINDOWLOG_MIN
-            || *np > (ngx_int_t) NGX_HTTP_ZSTD_WINDOWLOG_MAX))
-    {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "\"zstd_window_log\" must be 0 (default) or "
-                           "between %d and %d",
-                           NGX_HTTP_ZSTD_WINDOWLOG_MIN,
-                           (int) NGX_HTTP_ZSTD_WINDOWLOG_MAX);
-        return NGX_CONF_ERROR;
+        if (ZSTD_isError(b.error)) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_cParam_getBounds(windowLog) failed: %s",
+                               ZSTD_getErrorName(b.error));
+            return NGX_CONF_ERROR;
+        }
+
+        if (*np < b.lowerBound || *np > b.upperBound) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "\"zstd_window_log\" must be 0 (default) or "
+                               "between %d and %d", b.lowerBound, b.upperBound);
+            return NGX_CONF_ERROR;
+        }
     }
-
-#undef NGX_HTTP_ZSTD_WINDOWLOG_MIN
-#undef NGX_HTTP_ZSTD_WINDOWLOG_MAX
 
     return NGX_CONF_OK;
 }
