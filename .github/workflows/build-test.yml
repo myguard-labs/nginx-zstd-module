@@ -154,58 +154,27 @@ jobs:
           shellcheck --severity=error "$GITHUB_WORKSPACE"/tools/*.sh
           echo "✓ shellcheck complete (no error-severity findings)"
 
-      - name: Discover nginx include paths
+      - name: Configure a real nginx source tree (for scan-build headers)
         run: |
-          if [ -f /usr/include/nginx/ngx_config.h ]; then
-            NGINX_INCLUDES="/usr/include/nginx"
-          else
-            CONFIG_H=$(dpkg -L nginx-dev 2>/dev/null | grep 'ngx_config.h' | head -1)
-            if [ -n "$CONFIG_H" ]; then
-              CONFIG_DIR=$(dirname "$CONFIG_H")
-              NGINX_INCLUDES="$CONFIG_DIR"
-              if [[ "$CONFIG_DIR" =~ /src/src/core$ ]]; then
-                NGINX_SRC="${CONFIG_DIR%/src/src/core}/src"
-              fi
-            fi
-          fi
-          [ -z "$NGINX_INCLUDES" ] && NGINX_INCLUDES="/usr/include/nginx"
-          echo "NGINX_INCLUDES=${NGINX_INCLUDES}" >> "$GITHUB_ENV"
-          [ -n "$NGINX_SRC" ] && echo "NGINX_SRC=${NGINX_SRC}" >> "$GITHUB_ENV"
-
-      - name: Cache nginx-dev generated headers
-        id: nginx-dev-objs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/nginx-lint-objs
-          key: nginx-dev-objs-${{ runner.os }}-${{ hashFiles('/var/lib/dpkg/info/nginx-dev.list') }}
-
-      - name: Generate nginx build headers (for lint tools)
-        if: steps.nginx-dev-objs.outputs.cache-hit != 'true'
-        run: |
-          # Must succeed: the lint/scan steps below need the generated
-          # objs/ngx_auto_config.h. The previous "|| true" let configure fail
-          # silently (the system nginx source tree is read-only and gcc was
-          # not installed), so scan-build then ran against incomplete headers
-          # and still "passed" — exactly the CI2 audit complaint. Copy the
-          # nginx-dev source to a writable dir, configure with gcc, and keep
-          # only the generated objs/ headers.
+          # scan-build needs the COMPLETE nginx headers — including the
+          # generated objs/ngx_auto_config.h. The nginx-dev package ships
+          # headers but NOT the build system (no auto/configure), so it can
+          # never produce ngx_auto_config.h; the old approach silently failed
+          # and scan-build "passed" on incomplete headers (the CI2 complaint).
+          # Download + configure a real nginx source instead.
           set -euo pipefail
-          srcroot=$(dpkg -L nginx-dev | grep -E '/src/auto/configure$' | head -1 | sed 's#/auto/configure$##')
-          [ -z "$srcroot" ] && srcroot=/usr/share/nginx/src
-          rm -rf "$HOME/nginx-lint-src" "$HOME/nginx-lint-objs"
-          cp -r "$srcroot" "$HOME/nginx-lint-src"
-          cd "$HOME/nginx-lint-src"
-          CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE"
-          cp -r objs "$HOME/nginx-lint-objs"
-
-      - name: Export nginx objs path
-        run: echo "NGINX_OBJS=$HOME/nginx-lint-objs" >> "$GITHUB_ENV"
-
-      - name: Verify generated nginx headers exist
-        run: |
-          # Guard the scanners against running on incomplete/generated headers.
-          test -f "$HOME/nginx-lint-objs/ngx_auto_config.h"
-          echo "✓ ngx_auto_config.h present"
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          echo "Using nginx $ver to generate lint headers"
+          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz"
+          tar -xzf "nginx-${ver}.tar.gz"
+          cd "nginx-${ver}"
+          CC=gcc ./configure --with-compat \
+            --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null
+          test -f objs/ngx_auto_config.h
+          echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
+          echo "✓ ngx_auto_config.h generated"
 
       - name: cppcheck (static analysis)
         run: |
@@ -225,14 +194,15 @@ jobs:
 
       - name: clang static analyzer
         run: |
-          INCLUDE_FLAGS="-I${NGINX_INCLUDES} -I/usr/include"
-          [ -n "${NGINX_SRC}" ]  && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_SRC}"
-          [ -n "${NGINX_OBJS}" ] && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_OBJS}"
-          INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_INCLUDES}/objs -I${NGINX_INCLUDES}/.."
+          N="$NGINX_SRC_TREE"
+          INCLUDE_FLAGS="-I$N/src/core -I$N/src/event -I$N/src/event/modules \
+            -I$N/src/event/quic -I$N/src/os/unix -I$N/objs -I$N/src/http \
+            -I$N/src/http/modules -I$N/src/http/v2 -I/usr/include"
           # Scan BOTH module sources (the static module was previously
-          # unscanned), and let --status-bugs actually fail the job: the old
-          # "|| echo" swallowed its non-zero exit so a finding never gated.
-          # See audit CI1/CI2.
+          # unscanned), against the COMPLETE configured nginx headers, and let
+          # --status-bugs actually fail the job: the old "|| echo" swallowed its
+          # non-zero exit so a finding (or a compile failure on missing headers)
+          # never gated. See audit CI1/CI2.
           # INCLUDE_FLAGS is a list of -I flags that MUST word-split into
           # separate gcc arguments; quoting it would pass one bogus arg.
           # shellcheck disable=SC2086
@@ -241,6 +211,7 @@ jobs:
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
             2>&1 | tee clang-scan.log
+          rm -f ngx_http_zstd_filter_module.o ngx_http_zstd_static_module.o
 
       - name: Upload lint reports
         if: always()
