@@ -818,6 +818,8 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 static ngx_int_t
 ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
+    ngx_chain_t  *cl;
+
     if (ctx->buffer_in.pos < ctx->buffer_in.size
         || ctx->flush
         || ctx->last
@@ -833,8 +835,19 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_DECLINED;
     }
 
-    ctx->in_buf = ctx->in->buf;
-    ctx->in = ctx->in->next;
+    /*
+     * ngx_chain_add_copy() above allocated a fresh chain link per incoming
+     * link. Once we have taken its buffer, return the consumed link to the
+     * pool's free list with ngx_free_chain(); otherwise the copied links
+     * accumulate in the request pool for the whole request, so a long-lived
+     * chunked/SSE response grows worker memory linearly with chunk count
+     * even though the output buffers are recycled. The buffer itself stays
+     * valid — only the link wrapper is freed.
+     */
+    cl = ctx->in;
+    ctx->in_buf = cl->buf;
+    ctx->in = cl->next;
+    ngx_free_chain(r->pool, cl);
 
     /*
      * Test last_buf FIRST, then flush — matching the order used by the
