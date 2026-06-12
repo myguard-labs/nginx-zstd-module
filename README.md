@@ -33,6 +33,7 @@ This is a hardened fork: every build is exercised against **nginx mainline and [
     * [zstd_long](#zstd_long)
     * [zstd_max_cctx_memory](#zstd_max_cctx_memory)
     * [zstd_bypass](#zstd_bypass)
+    * [zstd_bypass_vary](#zstd_bypass_vary)
     * [zstd_dict_file](#zstd_dict_file)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
     * [zstd_static](#zstd_static)
@@ -657,6 +658,45 @@ server {
 > padding knob would trade real bandwidth for false confidence, so it is
 > intentionally absent. See [`SECURITY.md`](SECURITY.md) for the
 > in-scope / out-of-scope statement.
+
+> **Cache safety with request-driven bypass.** When a `zstd_bypass`
+> predicate depends on a **request header or cookie** (e.g.
+> `zstd_bypass $http_x_no_compression`), the compressed-vs-identity
+> decision now varies on that header. A shared cache (proxy / CDN) that
+> does not key on it can store the identity response and serve it to a
+> normal client, or store the compressed response and serve it to a
+> bypass client. Either declare that variance with
+> [`zstd_bypass_vary`](#zstd_bypass_vary) **or** mark such responses
+> `Cache-Control: private` / `no-store`. Bypass predicates that depend
+> only on `$request_uri`/`$uri` (already part of the cache key) do not
+> need this.
+
+---
+
+### zstd_bypass_vary
+
+**Syntax:** `zstd_bypass_vary field-name;`
+**Default:** `—`
+**Context:** `http, server, location`
+
+Appends `field-name` to the response `Vary` header on every response from
+the location (both the compressed and the bypassed-identity variant), so a
+shared cache keys on the request header that drives a header/cookie-based
+[`zstd_bypass`](#zstd_bypass). Use it whenever a bypass predicate reads a
+request header or cookie:
+
+```nginx
+server {
+    zstd on;
+    zstd_bypass      $http_x_no_compression;  # client opt-out header
+    zstd_bypass_vary X-No-Compression;        # so caches key on it
+}
+```
+
+The module emits this as an additional `Vary` header line; caches union all
+`Vary` fields, so it coexists with the `Vary: Accept-Encoding` produced by
+`gzip_vary on;`. It does not itself decide anything — it only makes the
+existing bypass behaviour cacheable without poisoning.
 
 ---
 

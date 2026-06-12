@@ -34,6 +34,7 @@ typedef struct {
     ssize_t                      max_cctx_memory;     /* config-load assert: per-request CCtx memory budget */
 
     ngx_array_t                 *bypass;              /* ngx_http_complex_value_t: per-request bypass */
+    ngx_str_t                    bypass_vary;         /* extra Vary field for header/cookie-driven bypass; see S1 */
 
     ngx_hash_t                   types;
 
@@ -245,6 +246,13 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       offsetof(ngx_http_zstd_loc_conf_t, bypass),
       NULL },
 
+    { ngx_string("zstd_bypass_vary"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_zstd_loc_conf_t, bypass_vary),
+      NULL },
+
     { ngx_string("zstd_dict_file"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_str_slot,
@@ -379,6 +387,31 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd: skip, header-only response");
         return ngx_http_next_header_filter(r);
+    }
+
+    /*
+     * Cache-correctness for request-header / cookie-driven bypass. When the
+     * decision to compress varies on a request header (e.g.
+     * "zstd_bypass $http_x_no_compression"), a shared cache must key on that
+     * header or it will serve a stored identity response to a normal client
+     * (or a compressed one to a bypass client). The module cannot infer which
+     * header drove the predicate, so the operator names it via
+     * zstd_bypass_vary; we append it to Vary on BOTH the bypassed identity
+     * response and the compressed one (this runs before the bypass return
+     * below). A second Vary header line is fine — caches union all Vary
+     * fields. See S1.
+     */
+    if (zlcf->bypass_vary.len) {
+        ngx_table_elt_t  *v;
+
+        v = ngx_list_push(&r->headers_out.headers);
+        if (v == NULL) {
+            return NGX_ERROR;
+        }
+
+        v->hash = 1;
+        ngx_str_set(&v->key, "Vary");
+        v->value = zlcf->bypass_vary;
     }
 
     /*
@@ -1288,6 +1321,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->long_mode, prev->long_mode, 0);
     ngx_conf_merge_value(conf->max_cctx_memory, prev->max_cctx_memory, 0);
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
+    ngx_conf_merge_str_value(conf->bypass_vary, prev->bypass_vary, "");
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                              &prev->types_keys, &prev->types,
