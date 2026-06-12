@@ -73,6 +73,14 @@ typedef struct {
     size_t                       bytes_in;
     size_t                       bytes_out;
 
+    /*
+     * Original response body length captured in the header filter BEFORE
+     * ngx_http_clear_content_length() wipes r->headers_out.content_length_n.
+     * -1 when unknown (chunked/streaming). Used to pledge the source size to
+     * libzstd in init_cctx for a more compact frame header; see P1.
+     */
+    off_t                        pledged_size;
+
     unsigned                     last:1;
     unsigned                     redo:1;
     unsigned                     flush:1;
@@ -411,6 +419,14 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     r->headers_out.content_encoding = h;
 
     r->main_filter_need_in_memory = 1;
+
+    /*
+     * Capture the known body length before clearing it. ngx_http_clear_
+     * content_length() sets content_length_n to -1, so the init_cctx pledge
+     * (which runs after the first body data) would otherwise always see -1
+     * and never call ZSTD_CCtx_setPledgedSrcSize(). -1 here means unknown.
+     */
+    ctx->pledged_size = r->headers_out.content_length_n;
 
     ngx_http_clear_content_length(r);
     ngx_http_clear_accept_ranges(r);
@@ -1123,21 +1139,22 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
      * context model from 774b4a5 is a deliberate correctness guarantee
      * and is preserved.
      *
-     * content_length_n is the body length at this (post-other-filters)
-     * point, which is exactly what is fed to the compressor for a
-     * non-chunked response. The pledge is only an optimisation hint, so
-     * a failure to set it is logged and ignored rather than failing the
-     * request; a genuine size mismatch would still be caught by
-     * ZSTD_compressStream2() and handled on the existing failed: path.
+     * ctx->pledged_size is the body length captured in the header filter
+     * before ngx_http_clear_content_length() wiped it (the header filter
+     * runs the eligibility gate and clear; the live content_length_n is -1
+     * by now). For a non-chunked response that is exactly what is fed to the
+     * compressor. The pledge is only an optimisation hint, so a failure to
+     * set it is logged and ignored rather than failing the request; a genuine
+     * size mismatch would still be caught by ZSTD_compressStream2() and
+     * handled on the existing failed: path.
      */
-    if (r->headers_out.content_length_n != -1) {
+    if (ctx->pledged_size >= 0) {
         rc = ZSTD_CCtx_setPledgedSrcSize(
-                 cctx, (unsigned long long) r->headers_out.content_length_n);
+                 cctx, (unsigned long long) ctx->pledged_size);
         if (ZSTD_isError(rc)) {
             ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                            "zstd: ZSTD_CCtx_setPledgedSrcSize(%O) ignored: %s",
-                           r->headers_out.content_length_n,
-                           ZSTD_getErrorName(rc));
+                           ctx->pledged_size, ZSTD_getErrorName(rc));
         }
     }
 
