@@ -95,7 +95,10 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
                 }
 
                 if (*p == '0') {
-                    int  scale = 100;
+                    /* ngx_int_t (not int) so the digit*scale product widens
+                     * before the add — avoids a theoretical int overflow
+                     * CodeQL flags (the operands are tiny in practice). */
+                    ngx_int_t  scale = 100;
 
                     p++;
                     q = 0;
