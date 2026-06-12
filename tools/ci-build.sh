@@ -50,15 +50,43 @@ echo "Phase 1: Downloading nginx $NGINX_VERSION"
 echo "=========================================================================="
 echo ""
 
-if [ ! -f nginx-$NGINX_VERSION.tar.gz ]; then
-    wget -q http://nginx.org/download/nginx-$NGINX_VERSION.tar.gz
-    echo "✓ Downloaded nginx-$NGINX_VERSION.tar.gz"
+tarball="nginx-${NGINX_VERSION}.tar.gz"
+
+# Always fetch over HTTPS and verify the detached PGP signature against the
+# nginx release-signing keys before unpacking. A plain HTTP download lets a
+# network attacker swap the source that we then configure and compile.
+if [ ! -f "$tarball" ]; then
+    wget -q "https://nginx.org/download/${tarball}"
+    echo "✓ Downloaded ${tarball}"
 else
-    echo "✓ Using cached nginx-$NGINX_VERSION.tar.gz"
+    echo "✓ Using cached ${tarball}"
 fi
 
-tar xzf nginx-$NGINX_VERSION.tar.gz
-cd nginx-$NGINX_VERSION
+# Detached signature.
+wget -q "https://nginx.org/download/${tarball}.asc" -O "${tarball}.asc"
+
+# nginx release-signing public keys (served over HTTPS by nginx.org). Import
+# whichever exist so verification keeps working as the active signer rotates.
+gnupghome="$(mktemp -d)"
+export GNUPGHOME="$gnupghome"
+chmod 700 "$gnupghome"
+for key in nginx_signing mdounin maxim sb thresh pluknet; do
+    wget -q "https://nginx.org/keys/${key}.key" -O - 2>/dev/null \
+        | gpg --quiet --import 2>/dev/null || true
+done
+
+if gpg --quiet --verify "${tarball}.asc" "$tarball"; then
+    echo "✓ PGP signature verified for ${tarball}"
+else
+    echo "✗ PGP signature verification FAILED for ${tarball}" >&2
+    rm -rf "$gnupghome"
+    exit 1
+fi
+rm -rf "$gnupghome"
+unset GNUPGHOME
+
+tar xzf "$tarball"
+cd "nginx-${NGINX_VERSION}"
 
 echo ""
 echo "=========================================================================="
