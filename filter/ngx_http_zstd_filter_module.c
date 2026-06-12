@@ -311,11 +311,19 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         return ngx_http_next_header_filter(r);
     }
 
-    /* status not eligible: < 200, bodyless 204/205, or any > 299
-     * except 403/404 (which carry compressible error bodies) */
+    /* status not eligible: < 200, bodyless 204/205, 206 Partial Content,
+     * or any > 299 except 403/404 (which carry compressible error bodies).
+     *
+     * 206 is excluded (matching nginx's gzip filter): an upstream 206 has a
+     * Content-Range computed against its selected representation. Applying a
+     * new content coding here would invalidate that Content-Range (RFC 9110
+     * §14.1.2 requires ranges for an encoded representation to be computed
+     * against the encoded byte sequence), and the filter only clears
+     * Accept-Ranges, not Content-Range. See RFC4. */
     if (r->headers_out.status < NGX_HTTP_OK
         || r->headers_out.status == NGX_HTTP_NO_CONTENT
         || r->headers_out.status == 205
+        || r->headers_out.status == NGX_HTTP_PARTIAL_CONTENT
         || (r->headers_out.status > 299
             && r->headers_out.status != NGX_HTTP_FORBIDDEN
             && r->headers_out.status != NGX_HTTP_NOT_FOUND))
