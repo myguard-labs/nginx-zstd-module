@@ -35,6 +35,125 @@
  * ngx_http_zstd_accept_encoding(). */
 #include "generated_parser.inc"
 
+
+/*
+ * Independent reference oracle (CI5).
+ *
+ * The trap above only proves the production parser returns one of two
+ * sentinels — it cannot catch a *wrong* answer (every wrong answer is still a
+ * valid sentinel), so an RFC2-class semantic regression would pass unnoticed.
+ *
+ * This is a second, independently written decision procedure. It is
+ * deliberately conservative: it returns -1 ("unsure") for any input outside a
+ * small, unambiguous grammar (unexpected bytes, more than one parameter, a
+ * non-"q" parameter, quoted strings). For the inputs it *is* confident about
+ * it returns 1 (accept) / 0 (decline), and the harness asserts the production
+ * parser agrees. Two implementations rarely share the same subtle bug, so a
+ * divergence on a confident case is a real semantic defect — without false
+ * traps on genuinely ambiguous edges.
+ *
+ * Returns 1 accept, 0 decline, -1 unsure.
+ */
+static int
+ref_accepts(const uint8_t *d, size_t n)
+{
+    size_t  i = 0;
+    int     zstd_q = -1;     /* explicit zstd weight in milli, -1 absent */
+    int     star_q = -1;     /* "*" weight, -1 absent */
+
+    while (i < n) {
+        size_t  ts, te;
+        int     is_zstd, is_star, q;
+
+        /* OWS / empty elements */
+        while (i < n && (d[i] == ' ' || d[i] == '\t' || d[i] == ',')) i++;
+        if (i >= n) break;
+
+        /* token name: letters/digits or a lone '*' */
+        ts = i;
+        while (i < n && ((d[i] >= 'A' && d[i] <= 'Z')
+                         || (d[i] >= 'a' && d[i] <= 'z')
+                         || (d[i] >= '0' && d[i] <= '9')
+                         || d[i] == '*' || d[i] == '-' || d[i] == '_')) {
+            i++;
+        }
+        te = i;
+        if (te == ts) {
+            return -1;          /* unexpected leading byte: give up */
+        }
+
+        is_star = (te - ts == 1 && d[ts] == '*');
+        is_zstd = (te - ts == 4
+                   && (d[ts] | 0x20) == 'z' && (d[ts+1] | 0x20) == 's'
+                   && (d[ts+2] | 0x20) == 't' && (d[ts+3] | 0x20) == 'd');
+
+        while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+
+        q = 1000;   /* no weight → q=1 */
+
+        if (i < n && d[i] == ';') {
+            i++;
+            while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+            /* only a single "q=" weight is understood */
+            if (i >= n || (d[i] != 'q' && d[i] != 'Q')) return -1;
+            i++;
+            while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+            if (i >= n || d[i] != '=') return -1;
+            i++;
+            while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+
+            if (i >= n) return -1;                 /* "q=" with no value */
+
+            if (d[i] == '0') {
+                int scale = 100;
+                i++;
+                q = 0;
+                if (i < n && d[i] == '.') {
+                    i++;
+                    while (i < n && d[i] >= '0' && d[i] <= '9' && scale > 0) {
+                        q += (d[i] - '0') * scale;
+                        scale /= 10;
+                        i++;
+                    }
+                }
+            } else if (d[i] == '1') {
+                int k = 0;
+                i++;
+                q = 1000;
+                if (i < n && d[i] == '.') {
+                    i++;
+                    while (i < n && d[i] == '0' && k < 3) { i++; k++; }
+                }
+            } else {
+                return -1;
+            }
+
+            /* after the qvalue only OWS / ',' / end (a second ';' param is
+             * outside what the reference handles confidently). */
+            if (i < n && d[i] != ' ' && d[i] != '\t' && d[i] != ',') {
+                return -1;
+            }
+        }
+
+        if (is_zstd) {
+            zstd_q = q;
+        } else if (is_star) {
+            star_q = q;
+        }
+
+        while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+        if (i < n) {
+            if (d[i] != ',') return -1;            /* trailing junk */
+            i++;
+        }
+    }
+
+    if (zstd_q >= 0) return zstd_q > 0 ? 1 : 0;
+    if (star_q >= 0) return star_q > 0 ? 1 : 0;
+    return 0;
+}
+
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -65,6 +184,18 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
      * means control flow fell through a path it should not have. */
     if (rc != NGX_OK && rc != NGX_DECLINED) {
         __builtin_trap();
+    }
+
+    /*
+     * Semantic differential (CI5): when the independent reference is
+     * confident, the production parser must agree. -1 = reference unsure
+     * (ambiguous edge) → no assertion.
+     */
+    {
+        int ref = ref_accepts(data, size);
+        if (ref >= 0 && (ref == 1) != (rc == NGX_OK)) {
+            __builtin_trap();
+        }
     }
 
     free(buf);

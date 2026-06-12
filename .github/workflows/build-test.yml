@@ -52,25 +52,34 @@ jobs:
     timeout-minutes: 5
     outputs:
       nginx_version: ${{ steps.v.outputs.nginx_version }}
+      nginx_stable: ${{ steps.v.outputs.nginx_stable }}
       matrix: ${{ steps.v.outputs.matrix }}
     steps:
-      - name: Resolve latest mainline nginx
+      - name: Resolve latest mainline + stable nginx
         id: v
         run: |
           set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
+          vers=$(curl -fsSL https://nginx.org/en/download.html \
             | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
+            | sort -V)
+          ver=$(echo "$vers" | tail -1)
           if [ -z "$ver" ]; then
             echo "::error::could not resolve mainline nginx version from nginx.org"
             exit 1
           fi
-          echo "Resolved nginx mainline: $ver"
+          # nginx convention: odd minor = mainline, even minor = stable.
+          # Stable = highest version with an even minor < mainline.
+          stable=$(echo "$vers" | awk -F. '($2 % 2)==0' | sort -V | tail -1)
+          [ -z "$stable" ] && stable="$ver"
+          echo "Resolved nginx mainline: $ver  stable: $stable"
           echo "nginx_version=$ver" >> "$GITHUB_OUTPUT"
-          # Build matrix: nginx@<latest> + the pinned Angie fork. Keep the
-          # Angie entry in sync with the build-old-libzstd / valgrind notes.
-          printf 'matrix={"include":[{"flavor":"nginx","version":"%s","url":"https://nginx.org/download/nginx-%s.tar.gz","dir":"nginx-%s"},{"flavor":"angie","version":"1.11.5","url":"https://download.angie.software/files/angie-1.11.5.tar.gz","dir":"angie-1.11.5"}]}\n' \
-            "$ver" "$ver" "$ver" >> "$GITHUB_OUTPUT"
+          echo "nginx_stable=$stable" >> "$GITHUB_OUTPUT"
+          # Build matrix: nginx mainline + nginx stable + the pinned Angie
+          # fork. Keep the Angie entry in sync with the build-old-libzstd /
+          # valgrind notes. The functional suite runs against all three via
+          # the tests + tests-compat jobs (audit CI6).
+          printf 'matrix={"include":[{"flavor":"nginx","version":"%s","url":"https://nginx.org/download/nginx-%s.tar.gz","dir":"nginx-%s"},{"flavor":"nginx","version":"%s","url":"https://nginx.org/download/nginx-%s.tar.gz","dir":"nginx-%s"},{"flavor":"angie","version":"1.11.5","url":"https://download.angie.software/files/angie-1.11.5.tar.gz","dir":"angie-1.11.5"}]}\n' \
+            "$ver" "$ver" "$ver" "$stable" "$stable" "$stable" >> "$GITHUB_OUTPUT"
 
   # ── Lint & static analysis — no nginx build, fully independent ────────────
   validation:
@@ -133,8 +142,11 @@ jobs:
 
       - name: Shell script linting (shellcheck)
         run: |
-          shellcheck "$GITHUB_WORKSPACE"/tools/*.sh || true
-          echo "✓ shellcheck complete"
+          # Gate on error-severity findings (real bugs); style/info noise does
+          # not fail CI. Drop the previous blanket "|| true" so a genuine
+          # shellcheck error now fails the job. See audit CI1.
+          shellcheck --severity=error "$GITHUB_WORKSPACE"/tools/*.sh
+          echo "✓ shellcheck complete (no error-severity findings)"
 
       - name: Discover nginx include paths
         run: |
@@ -164,20 +176,37 @@ jobs:
       - name: Generate nginx build headers (for lint tools)
         if: steps.nginx-dev-objs.outputs.cache-hit != 'true'
         run: |
+          # Must succeed: the lint/scan steps below need the generated
+          # objs/ngx_auto_config.h. The previous "|| true" let configure fail
+          # silently, so scan-build then ran against incomplete headers and
+          # still "passed". Fail loudly instead. See audit CI2.
           cd /usr/share/nginx/src
-          CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null 2>&1 || true
+          CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE"
 
       - name: Export nginx objs path
         run: echo "NGINX_OBJS=/usr/share/nginx/src/objs" >> "$GITHUB_ENV"
 
+      - name: Verify generated nginx headers exist
+        run: |
+          # Guard the scanners against running on incomplete/generated headers.
+          test -f /usr/share/nginx/src/objs/ngx_auto_config.h
+          echo "✓ ngx_auto_config.h present"
+
       - name: cppcheck (static analysis)
         run: |
-          cppcheck --enable=all --error-exitcode=1 --suppress=missingIncludeSystem \
+          # Gate on real bug categories (warning/performance/portability), not
+          # the full --enable=all style/unusedFunction noise. error-exitcode=1
+          # fails the job on any such finding; a checked-in suppressions file is
+          # the baseline for accepted exceptions. The blanket continue-on-error
+          # that previously neutered this is removed. See audit CI1.
+          cppcheck --enable=warning,performance,portability \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --suppressions-list="$GITHUB_WORKSPACE/tools/cppcheck-suppressions.txt" \
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
             2>&1 | tee cppcheck.log
-          echo "✓ cppcheck complete"
-        continue-on-error: true
+          echo "✓ cppcheck complete (no gated findings)"
 
       - name: clang static analyzer
         run: |
@@ -185,13 +214,18 @@ jobs:
           [ -n "${NGINX_SRC}" ]  && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_SRC}"
           [ -n "${NGINX_OBJS}" ] && INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_OBJS}"
           INCLUDE_FLAGS="$INCLUDE_FLAGS -I${NGINX_INCLUDES}/objs -I${NGINX_INCLUDES}/.."
+          # Scan BOTH module sources (the static module was previously
+          # unscanned), and let --status-bugs actually fail the job: the old
+          # "|| echo" swallowed its non-zero exit so a finding never gated.
+          # See audit CI1/CI2.
           # INCLUDE_FLAGS is a list of -I flags that MUST word-split into
           # separate gcc arguments; quoting it would pass one bogus arg.
           # shellcheck disable=SC2086
           scan-build --status-bugs \
             gcc -c $INCLUDE_FLAGS \
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            2>&1 | tee clang-scan.log || echo "ℹ clang-scan: Analysis complete"
+            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
+            2>&1 | tee clang-scan.log
 
       - name: Upload lint reports
         if: always()
@@ -727,6 +761,81 @@ jobs:
             ${{ github.workspace }}/t/static-tests.log
           retention-days: 7
 
+  # ── Cross-version functional coverage (audit CI6) ────────────────────────
+  #    The heavy `tests` job runs the full matrix only against nginx mainline.
+  #    This job runs the Perl suites + the core decode-and-compare smoke test
+  #    against the OTHER built artifacts — nginx stable and Angie — so a
+  #    regression that only manifests on the stable API or on Angie is caught,
+  #    instead of being merely built and never exercised.
+  tests-compat:
+    name: Tests (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [resolve, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: "nginx stable"
+            artifact: server-binary-nginx-${{ needs.resolve.outputs.nginx_stable }}
+          - label: "angie 1.11.5"
+            artifact: server-binary-angie-1.11.5
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libperl-dev cpanminus libzstd1 python3 python3-requests zstd
+
+      - name: Download server binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: server-bin
+
+      - name: Set up server binary
+        run: |
+          bin=$(find server-bin -type f | head -1)
+          chmod +x "$bin"
+          echo "TEST_NGINX_BINARY=$bin" >> "$GITHUB_ENV"
+          echo "✓ server binary ready: $("$bin" -v 2>&1)"
+
+      - name: Cache Perl modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
+
+      - name: Install Test::Nginx::Socket
+        run: |
+          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+
+      - name: Run filter + static Perl suites
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-compat"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          cd "$GITHUB_WORKSPACE"
+          perl t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee t/filter-compat.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "❌ Filter tests FAILED"; exit 1; }
+          # Static suite hardcodes the fixture mtime in its expected ETag.
+          touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          perl t/01-static.t 2>&1 | sed 's/^Error:/Err:/' | tee t/static-compat.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "❌ Static tests FAILED"; exit 1; }
+          echo "✓ ${{ matrix.label }}: Perl suites passed"
+
+      - name: Run decode-and-compare smoke test
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18120
+          echo "✓ ${{ matrix.label }}: smoke test passed"
+
   # ── Smoke tests under ASAN+UBSAN — fails on any memory/UB error ───────────
   tests-asan:
     name: Tests ASAN+UBSAN
@@ -741,7 +850,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-requests zstd libzstd1
+          sudo apt-get install -y python3 python3-requests zstd libzstd1 \
+            libperl-dev cpanminus
 
       - name: Download ASAN nginx binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -753,6 +863,41 @@ jobs:
         run: |
           chmod +x nginx-bin/nginx
           echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/nginx-bin/nginx" >> "$GITHUB_ENV"
+
+      - name: Cache Perl modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
+
+      - name: Install Test::Nginx::Socket
+        run: |
+          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+
+      - name: Run Perl suites under ASAN+UBSAN
+        # detect_leaks=0: nginx does not free every allocation at exit by
+        # design, and Test::Nginx starts/stops it many times — leak reports
+        # there are benign noise. The point of running the Perl suites under
+        # ASan is to put the static-file / magic-probe / conditional / HEAD
+        # paths (covered only by these suites, audit CI7) through the
+        # heap-overflow / use-after-free / UB detectors.
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:strict_string_checks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-asan"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          cd "$GITHUB_WORKSPACE"
+          perl t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee t/filter-asan.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "❌ Filter tests FAILED under ASan"; exit 1; }
+          touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          perl t/01-static.t 2>&1 | sed 's/^Error:/Err:/' | tee t/static-asan.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "❌ Static tests FAILED under ASan"; exit 1; }
+          echo "✓ Perl suites clean under ASAN+UBSAN"
 
       - name: Run smoke tests under ASAN+UBSAN
         env:

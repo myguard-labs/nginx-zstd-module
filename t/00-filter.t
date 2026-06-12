@@ -1356,30 +1356,32 @@ Content-Encoding: zstd
 
 
 
-=== TEST 52: zstd_min_length still applies on a chunked upstream (no Content-Length)
-# TEST 6/7 cover min_length on the known-Content-Length path. The
-# unknown-length / chunked path takes a different branch in the body
-# filter (the pre-bypass length check is skipped and the decision is
-# deferred). This locks the behaviour that, on a chunked response
-# whose body is smaller than min_length, no compression is applied.
+=== TEST 52: unknown-length (chunked) body is eligible regardless of size
+# TEST 6/7 cover min_length on the known-Content-Length path. A response with
+# no Content-Length takes the other branch: there is no length to test, so the
+# min_length gate is skipped and the body is ALWAYS eligible — even when it is
+# smaller than zstd_min_length (documented behaviour). The previous version of
+# this test used "return 200" upstream, which sets a Content-Length and so
+# never exercised this path at all (it was rejected by the known-length gate).
+# Use a raw chunked HTTP/1.1 backend so the response reaching the filter
+# genuinely has no Content-Length.
 --- config
-    chunked_transfer_encoding on;
     location /filter {
         zstd on;
         zstd_min_length 4096;
         zstd_types text/plain;
-        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
-        proxy_buffering off;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_pass http://127.0.0.1:$TEST_NGINX_RAND_PORT_1/;
     }
-    location /test {
-        return 200 "tiny";
-    }
---- request
-GET /filter
---- more_headers
-Accept-Encoding: zstd
+--- raw_request eval
+"GET /filter HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept-Encoding: zstd\r\n\r\n"
+--- tcp_listen: $TEST_NGINX_RAND_PORT_1
+--- tcp_reply eval
+"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\ntiny\r\n0\r\n\r\n"
 --- response_headers
-!Content-Encoding
+!Content-Length
+Content-Encoding: zstd
 --- no_error_log
 [error]
 
@@ -1674,5 +1676,80 @@ Accept-Encoding: zstd;q=0.0001
 --- response_headers
 Content-Length: 59738
 !Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 65: 206 Partial Content is not compressed (Content-Range preserved)
+# RFC4: an upstream 206 carries a Content-Range computed against its selected
+# representation; the filter must not apply a new content coding to it.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_pass http://127.0.0.1:$TEST_NGINX_RAND_PORT_1/;
+    }
+--- raw_request eval
+"GET /filter HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept-Encoding: zstd\r\n\r\n"
+--- tcp_listen: $TEST_NGINX_RAND_PORT_1
+--- tcp_reply eval
+"HTTP/1.1 206 Partial Content\r\nContent-Type: text/plain\r\nContent-Range: bytes 0-9/100\r\nContent-Length: 10\r\nConnection: close\r\n\r\nAAAAAAAAAA"
+--- response_headers
+!Content-Encoding
+Content-Range: bytes 0-9/100
+--- error_code: 206
+--- no_error_log
+[error]
+
+
+
+=== TEST 66: zstd_bypass_vary appends the named field to Vary
+# S1: header-driven bypass must be advertised to shared caches via Vary.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        zstd_bypass      $http_x_no_compression;
+        zstd_bypass_vary X-No-Compression;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Vary: X-No-Compression
+--- no_error_log
+[error]
+
+
+
+=== TEST 67: zstd_target_cblock_size is accepted and still produces a valid stream
+# C1: on libzstd >= 1.5.6 the directive applies; on older it is a warned no-op.
+# Either way the config must load and the response must be a valid zstd stream.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        zstd_target_cblock_size 4096;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
 --- no_error_log
 [error]
