@@ -24,13 +24,14 @@ fi
 
 # Extract each function from its return-type line through the matching
 # closing brace at column 0 (nginx style: definitions close with a bare
-# `}` in col 1). Both target functions share the `static ngx_int_t`
-# return-type line, so match on the following definition line. Capture
-# them in source order (eval_qvalue precedes accept_encoding) so the
-# generated .inc compiles without a forward declaration.
+# `}` in col 1). The functions have two distinct return-type lines
+# (`static u_char *` for the skip_quoted helper, `static ngx_int_t` for the
+# two parsers), so match on the following definition line. Capture them in
+# source order (skip_quoted, then eval_qvalue, then accept_encoding) so the
+# generated .inc compiles without forward declarations.
 awk '
-    /^static ngx_int_t$/ { pending = 1; buf = $0 ORS; next }
-    pending && /^ngx_http_zstd_(eval_qvalue|accept_encoding)\(/ {
+    /^static (ngx_int_t|u_char \*)$/ { pending = 1; buf = $0 ORS; next }
+    pending && /^ngx_http_zstd_(skip_quoted|eval_qvalue|accept_encoding)\(/ {
         capture = 1; pending = 0; print buf; print; next
     }
     pending { pending = 0; buf = "" }
@@ -40,7 +41,8 @@ awk '
     }
 ' "$HEADER" > "$OUT"
 
-if ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" \
+if ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" \
+   || ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" \
    || ! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" \
    || [ "$(tail -n1 "$OUT")" != "}" ]; then
     echo "✗ failed to extract the Accept-Encoding parser from $HEADER" >&2
@@ -50,5 +52,5 @@ if ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" \
 fi
 
 LINES=$(wc -l < "$OUT")
-echo "✓ extracted ngx_http_zstd_eval_qvalue() + ngx_http_zstd_accept_encoding()" \
-     "— $LINES lines -> $OUT"
+echo "✓ extracted ngx_http_zstd_skip_quoted() + ngx_http_zstd_eval_qvalue()" \
+     "+ ngx_http_zstd_accept_encoding() — $LINES lines -> $OUT"

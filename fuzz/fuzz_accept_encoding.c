@@ -91,47 +91,100 @@ ref_accepts(const uint8_t *d, size_t n)
 
         q = 1000;   /* no weight → q=1 */
 
-        if (i < n && d[i] == ';') {
-            i++;
-            while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
-            /* only a single "q=" weight is understood */
-            if (i >= n || (d[i] != 'q' && d[i] != 'Q')) return -1;
-            i++;
-            while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
-            if (i >= n || d[i] != '=') return -1;
-            i++;
-            while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+        /*
+         * Parameters: zero or more ';'-separated params. Understand a single
+         * "q" weight, and for a non-"q" param confidently skip a token value
+         * or a *simple* quoted-string value (no '\' escape, properly closed).
+         * That is exactly enough to keep the reference confident on the
+         * quoted-comma class — e.g. `gzip;x="a, zstd";q=1`, where the comma
+         * is inside gzip's parameter, not an element separator — which the
+         * old "q must be the first/only param" reference treated as unsure
+         * and so could not catch. Anything outside this shape (an escape, an
+         * unterminated quote, a repeated "q", trailing junk) returns -1
+         * (unsure) rather than risk a wrong-but-confident answer.
+         */
+        {
+            int  q_seen = 0;
 
-            if (i >= n) return -1;                 /* "q=" with no value */
+            while (i < n && d[i] == ';') {
+                size_t  ps, pe;
+                int     is_qp;
 
-            if (d[i] == '0') {
-                int scale = 100;
-                i++;
-                q = 0;
-                if (i < n && d[i] == '.') {
+                i++;    /* ';' */
+                while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+
+                ps = i;
+                while (i < n && d[i] != '=' && d[i] != ';' && d[i] != ','
+                       && d[i] != ' ' && d[i] != '\t' && d[i] != '"') {
                     i++;
-                    while (i < n && d[i] >= '0' && d[i] <= '9' && scale > 0) {
-                        q += (d[i] - '0') * scale;
-                        scale /= 10;
+                }
+                pe = i;
+                is_qp = (pe - ps == 1 && (d[ps] == 'q' || d[ps] == 'Q'));
+
+                while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+
+                if (i >= n || d[i] != '=') {
+                    if (is_qp) return -1;          /* bare "q" is malformed */
+                    continue;                       /* valueless non-q param */
+                }
+
+                i++;    /* '=' */
+                while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+
+                if (is_qp) {
+                    if (q_seen) return -1;          /* repeated "q" */
+                    q_seen = 1;
+
+                    if (i >= n) return -1;          /* "q=" with no value */
+
+                    if (d[i] == '0') {
+                        int scale = 100;
+                        i++;
+                        q = 0;
+                        if (i < n && d[i] == '.') {
+                            i++;
+                            while (i < n && d[i] >= '0' && d[i] <= '9'
+                                   && scale > 0) {
+                                q += (d[i] - '0') * scale;
+                                scale /= 10;
+                                i++;
+                            }
+                        }
+                    } else if (d[i] == '1') {
+                        int k = 0;
+                        i++;
+                        q = 1000;
+                        if (i < n && d[i] == '.') {
+                            i++;
+                            while (i < n && d[i] == '0' && k < 3) { i++; k++; }
+                        }
+                    } else {
+                        return -1;
+                    }
+
+                } else if (i < n && d[i] == '"') {
+                    i++;                            /* opening DQUOTE */
+                    while (i < n && d[i] != '"') {
+                        if (d[i] == '\\') return -1; /* escapes → unsure */
+                        i++;
+                    }
+                    if (i >= n) return -1;          /* unterminated quote */
+                    i++;                            /* closing DQUOTE */
+
+                } else {
+                    /* bare token value: a '"' here is not a well-formed
+                     * quoted-string opener (it would have to follow '='
+                     * immediately) — bail to unsure rather than guess. */
+                    while (i < n && d[i] != ';' && d[i] != ','
+                           && d[i] != ' ' && d[i] != '\t' && d[i] != '"') {
                         i++;
                     }
                 }
-            } else if (d[i] == '1') {
-                int k = 0;
-                i++;
-                q = 1000;
-                if (i < n && d[i] == '.') {
-                    i++;
-                    while (i < n && d[i] == '0' && k < 3) { i++; k++; }
-                }
-            } else {
-                return -1;
-            }
 
-            /* after the qvalue only OWS / ',' / end (a second ';' param is
-             * outside what the reference handles confidently). */
-            if (i < n && d[i] != ' ' && d[i] != '\t' && d[i] != ',') {
-                return -1;
+                /* after a value only OWS then ';' / ',' / end is valid; a
+                 * stray '"' (e.g. in a param name) lands here and is unsure */
+                while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+                if (i < n && d[i] != ';' && d[i] != ',') return -1;
             }
         }
 
@@ -141,7 +194,7 @@ ref_accepts(const uint8_t *d, size_t n)
             star_q = q;
         }
 
-        while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+        /* element consumed: only a ',' separator or end may remain */
         if (i < n) {
             if (d[i] != ',') return -1;            /* trailing junk */
             i++;

@@ -102,23 +102,38 @@ jobs:
 
       - name: clang-tidy (cert-*, bugprone-*, clang-analyzer-security.*)
         run: |
+          set -euo pipefail
           NGINX_OBJS=/usr/share/nginx/src/objs
           NGINX_INCLUDES=$(dpkg -L nginx-dev 2>/dev/null | grep 'ngx_config.h' | head -1 | xargs dirname || echo /usr/include/nginx)
           INCLUDES="-I$NGINX_INCLUDES -I$NGINX_OBJS -I/usr/include"
+          : > clang-tidy.log
+          status=0
           for f in \
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
             echo "--- clang-tidy: $(basename "$f") ---"
+            # Two passes. GATING pass: the security/cert checks (low false-
+            # positive, the actual point of audit CI1) run with
+            # --warnings-as-errors so a finding fails the job. ADVISORY pass:
+            # the noisier bugprone-*/clang-analyzer-unix.* checks are reported
+            # to the log/SARIF but do not gate (they flag nginx pool idioms);
+            # promote them to the gating set once a checked-in baseline exists.
             # INCLUDES and the pkg-config output are flag lists that MUST
             # word-split into individual clang-tidy compiler arguments.
             # shellcheck disable=SC2086,SC2046
             clang-tidy "$f" \
-              --checks='cert-*,clang-analyzer-security.*,clang-analyzer-unix.*,bugprone-*' \
-              --warnings-as-errors='' \
+              --checks='-*,cert-*,clang-analyzer-security.*' \
+              --warnings-as-errors='*' \
               -- -DZSTD_STATIC_LINKING_ONLY $INCLUDES $(pkg-config --cflags libzstd) \
-              2>&1 || true
-          done | tee clang-tidy.log
-          echo "✓ clang-tidy: Scan complete"
+              2>&1 | tee -a clang-tidy.log || status=1
+            # shellcheck disable=SC2086,SC2046
+            clang-tidy "$f" \
+              --checks='-*,clang-analyzer-unix.*,bugprone-*' \
+              -- -DZSTD_STATIC_LINKING_ONLY $INCLUDES $(pkg-config --cflags libzstd) \
+              2>&1 | tee -a clang-tidy.log || true
+          done
+          echo "✓ clang-tidy: scan complete (security/cert gated)"
+          exit "$status"
 
       - name: semgrep (C rule set — buffer overflows, unsafe fns, integer issues)
         run: |

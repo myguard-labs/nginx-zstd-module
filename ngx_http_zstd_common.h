@@ -39,10 +39,45 @@
 
 
 /*
+ * If `p` points at a DQUOTE, consume the whole quoted-string (RFC 9110
+ * §5.6.4: DQUOTE *( qdtext / quoted-pair ) DQUOTE) and return the position
+ * just past the closing DQUOTE; otherwise return `p` unchanged. A
+ * quoted-string may legitimately contain ';' or ',', so both delimiter
+ * scanners below route through this helper to avoid mistaking an embedded
+ * delimiter for a parameter or element boundary. Strictly bounded by `end`,
+ * never NUL-reliant. Always advances past at least the opening DQUOTE when it
+ * fires, so the caller's surrounding loop cannot stall.
+ */
+static u_char *
+ngx_http_zstd_skip_quoted(u_char *p, u_char *end)
+{
+    if (p >= end || *p != '"') {
+        return p;
+    }
+
+    p++;    /* opening DQUOTE */
+
+    while (p < end && *p != '"') {
+        if (*p == '\\' && p + 1 < end) {
+            p++;    /* skip the escaped octet of a quoted-pair */
+        }
+        p++;
+    }
+
+    if (p < end) {
+        p++;    /* closing DQUOTE */
+    }
+
+    return p;
+}
+
+
+/*
  * Evaluate the optional parameters of a coding token whose name has just
  * been consumed. `p` points at the ';' that introduces the parameters.
  * Returns the weight in milli-units (0..1000) — 1000 when no "q" parameter
- * is present — or -1 if any parameter is malformed. Strictly length-bounded
+ * is present — or -1 if any parameter is malformed (including a repeated
+ * "q", which RFC 9110 §12.4.2 permits at most once). Strictly length-bounded
  * by ae->len. Takes `p` by value: it does not advance the caller's cursor
  * (the caller re-scans to the next ',').
  */
@@ -51,6 +86,7 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
 {
     u_char     *end = ae->data + ae->len;
     ngx_int_t   q = 1000;   /* no q parameter → q=1 */
+    ngx_int_t   q_seen = 0; /* reject a second "q" parameter (RFC 9110) */
 
     while (p < end && *p == ';') {
 
@@ -90,6 +126,11 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
                 /*
                  * Strict qvalue grammar. Leading digit must be 0 or 1.
                  */
+                if (q_seen) {
+                    return -1;          /* repeated "q" parameter */
+                }
+                q_seen = 1;
+
                 if (p >= end) {
                     return -1;          /* "q=" with no value */
                 }
@@ -145,9 +186,18 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
                 }
 
             } else {
-                /* non-q parameter: skip its value to the next ';' or ','. */
+                /*
+                 * non-q parameter: skip its value to the next top-level ';'
+                 * (another parameter) or ',' (next element), stepping over a
+                 * quoted-string so an embedded delimiter is not mistaken for
+                 * the value's end.
+                 */
                 while (p < end && *p != ';' && *p != ',') {
-                    p++;
+                    if (*p == '"') {
+                        p = ngx_http_zstd_skip_quoted(p, end);
+                    } else {
+                        p++;
+                    }
                 }
             }
 
@@ -223,9 +273,19 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
         }
         /* q < 0 → malformed weight: leave this element non-matching. */
 
-        /* Skip the remainder of this element up to the next comma. */
+        /*
+         * Skip the remainder of this element up to the next top-level comma,
+         * stepping over any quoted-string so a ',' inside quotes is not
+         * mistaken for an element boundary (which would otherwise let a
+         * quoted comma fabricate a phantom coding token from the bytes that
+         * follow it, e.g. `gzip;x="a, zstd";q=1`).
+         */
         while (p < end && *p != ',') {
-            p++;
+            if (*p == '"') {
+                p = ngx_http_zstd_skip_quoted(p, end);
+            } else {
+                p++;
+            }
         }
     }
 

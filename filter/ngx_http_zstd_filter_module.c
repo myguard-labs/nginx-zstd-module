@@ -339,7 +339,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
      * Accept-Ranges, not Content-Range. See RFC4. */
     if (r->headers_out.status < NGX_HTTP_OK
         || r->headers_out.status == NGX_HTTP_NO_CONTENT
-        || r->headers_out.status == 205
+        || r->headers_out.status == 205   /* 205 Reset Content: no core macro */
         || r->headers_out.status == NGX_HTTP_PARTIAL_CONTENT
         || (r->headers_out.status > 299
             && r->headers_out.status != NGX_HTTP_FORBIDDEN
@@ -568,20 +568,21 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             }
 
             /*
-             * Length-independent input cap. The header filter already
-             * rejects responses whose advertised Content-Length exceeds
-             * zstd_max_length, but a chunked/streaming response carries no
-             * Content-Length, so that check is skipped and an abusive or
-             * runaway upstream could feed the compressor unbounded input
-             * (worker CPU/memory exhaustion). Enforce the same limit
-             * against the running input total here. Compression has
-             * already started and the client is receiving a
-             * Content-Encoding: zstd stream, so the only safe action is
-             * to fail the request — protecting the worker is preferred
-             * over completing one runaway response.
+             * Length-independent input cap. The header filter rejects
+             * responses whose advertised Content-Length exceeds
+             * zstd_max_length, but that gate only sees the *declared* length:
+             * a chunked/streaming response carries none, and a misbehaving
+             * known-length upstream can stream more bytes than it declared.
+             * Either way an abusive or runaway upstream could feed the
+             * compressor unbounded input (worker CPU/memory exhaustion).
+             * Enforce the limit against the running input total here,
+             * regardless of whether a Content-Length was advertised.
+             * Compression has already started and the client is receiving a
+             * Content-Encoding: zstd stream, so the only safe action is to
+             * fail the request — protecting the worker is preferred over
+             * completing one runaway response.
              */
             if (zlcf->max_length != NGX_CONF_UNSET
-                && r->headers_out.content_length_n == -1
                 && (off_t) ctx->bytes_in > (off_t) zlcf->max_length)
             {
                 ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
@@ -1357,6 +1358,22 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
     ngx_conf_merge_str_value(conf->bypass_vary, prev->bypass_vary, "");
 
+    /*
+     * zstd_bypass_vary only makes sense alongside a zstd_bypass predicate: it
+     * names the request header the bypass decision varies on so shared caches
+     * key correctly. Set on its own it just emits a Vary field no response
+     * actually varies on (harmless over-varying). Warn so the misconfig is
+     * visible rather than silently degrading cache hit rate.
+     */
+    if (conf->bypass_vary.len && conf->bypass == NULL) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "\"zstd_bypass_vary\" is set without a "
+                           "\"zstd_bypass\" predicate; it adds a \"Vary: %V\" "
+                           "field no response varies on. Add a "
+                           "\"zstd_bypass\" directive or remove "
+                           "\"zstd_bypass_vary\"", &conf->bypass_vary);
+    }
+
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                              &prev->types_keys, &prev->types,
                              ngx_http_html_default_types))
@@ -1481,7 +1498,42 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 goto close;
             }
 
+            /*
+             * Bake the location's effective compression parameters into the
+             * CDict. ZSTD_CCtx_refCDict() lets a CDict's compression
+             * parameters supersede the CCtx's, so a CDict built with the
+             * simple ZSTD_createCDict() (level only) would silently override
+             * the windowLog that init_cctx sets — making zstd_window_log a
+             * non-cap whenever a dictionary is loaded (former audit C2 / R1).
+             * Build the CDict with ZSTD_createCDict_advanced() seeding
+             * windowLog from zstd_window_log so the baked params and the CCtx
+             * params agree and the window cap (and the zstd_max_cctx_memory
+             * estimate, computed from the same windowLog below) hold even with
+             * a dictionary. The advanced builder lives in libzstd's static
+             * API; on a non-static build fall back to the level-only CDict
+             * (window cap not honored with a dict — documented in README).
+             *
+             * Long-distance matching is a separate CCtx frame parameter, not
+             * part of ZSTD_compressionParameters, so refCDict does not override
+             * it; zstd_long keeps applying via the CCtx in init_cctx.
+             */
+#if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
+            {
+                ZSTD_compressionParameters  cparams;
+
+                cparams = ZSTD_getCParams((int) conf->level, 0, size);
+
+                if (conf->window_log > 0) {
+                    cparams.windowLog = (unsigned) conf->window_log;
+                }
+
+                conf->dict = ZSTD_createCDict_advanced(buf, size,
+                                 ZSTD_dlm_byCopy, ZSTD_dct_auto, cparams,
+                                 ZSTD_defaultCMem);
+            }
+#else
             conf->dict = ZSTD_createCDict(buf, size, conf->level);
+#endif
             if (conf->dict == NULL) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                    "ZSTD_createCDict() failed");

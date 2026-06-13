@@ -1753,3 +1753,32 @@ Accept-Encoding: zstd
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 68: zstd_bypass identity arm still advertises Vary
+# S1: when the bypass predicate fires (X-No-Compression present), the response
+# must be served identity (no Content-Encoding: zstd) yet STILL carry
+# Vary: X-No-Compression so a shared cache keys the bypassed variant separately
+# from the compressed one. This is the cache-poisoning arm TEST 66 omitted.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        zstd_bypass      $http_x_no_compression;
+        zstd_bypass_vary X-No-Compression;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+X-No-Compression: 1
+--- response_headers
+Content-Encoding:
+Vary: X-No-Compression
+--- no_error_log
+[error]
