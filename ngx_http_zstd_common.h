@@ -239,11 +239,18 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
             break;
         }
 
-        /* The coding name runs until OWS, ';' (params) or ',' (next
-         * element). */
+        /* The coding name runs until OWS, ';' (params), ',' (next
+         * element), or a DQUOTE. A '"' can never be part of a valid coding
+         * token; stopping here keeps a quoted-string that opens in
+         * name position (e.g. `"a,zstd "`) from being split on a comma
+         * inside the quotes — the quote-aware element-skip below then
+         * swallows the whole quoted blob and the element declines. Without
+         * this stop, the bytes after an in-quote comma are mis-read as a
+         * fresh coding name and can fabricate a phantom "zstd" token. */
         tok = p;
         while (p < end
-               && *p != ' ' && *p != '\t' && *p != ';' && *p != ',')
+               && *p != ' ' && *p != '\t' && *p != ';' && *p != ','
+               && *p != '"')
         {
             p++;
         }

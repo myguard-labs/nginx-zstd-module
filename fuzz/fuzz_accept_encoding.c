@@ -69,6 +69,37 @@ ref_accepts(const uint8_t *d, size_t n)
         while (i < n && (d[i] == ' ' || d[i] == '\t' || d[i] == ',')) i++;
         if (i >= n) break;
 
+        /*
+         * A quoted-string can never be a valid coding name. The production
+         * parser declines such an element: its name scan stops at the '"'
+         * and the quote-aware element-skip swallows the whole quoted blob
+         * (plus any trailing params) up to the next top-level ','. Mirror
+         * that confidently so the differential GATES the name-position
+         * phantom-token class (`"a,zstd "` must NOT yield zstd). Step over
+         * any quoted-strings in this element; bail to "unsure" only on a
+         * '\' escape or an unterminated quote (production's skip_quoted
+         * handles those, but reproducing its exact leniency here risks a
+         * wrong-confident answer, so decline to assert instead). The
+         * element contributes no coding, so just advance past it.
+         */
+        if (d[i] == '"') {
+            while (i < n && d[i] != ',') {
+                if (d[i] == '"') {
+                    i++;                            /* opening DQUOTE */
+                    while (i < n && d[i] != '"') {
+                        if (d[i] == '\\') return -1;  /* escapes → unsure */
+                        i++;
+                    }
+                    if (i >= n) return -1;          /* unterminated quote */
+                    i++;                            /* closing DQUOTE */
+                } else {
+                    i++;
+                }
+            }
+            if (i < n) i++;                         /* consume the ',' */
+            continue;                               /* non-matching element */
+        }
+
         /* token name: letters/digits or a lone '*' */
         ts = i;
         while (i < n && ((d[i] >= 'A' && d[i] <= 'Z')

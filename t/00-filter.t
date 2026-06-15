@@ -1782,3 +1782,56 @@ Content-Encoding:
 Vary: X-No-Compression
 --- no_error_log
 [error]
+
+
+
+=== TEST 69: quoted-string in coding-name position does not fabricate zstd
+# A quoted-string can never be a valid coding. With the name scan not
+# stopping at '"', the comma inside `"a,zstd "` split the element and the
+# trailing `zstd ` was mis-read as a real coding (phantom-token accept). The
+# whole quoted blob is a single non-coding element and MUST decline. This is
+# the coding-NAME-position arm of the quoted-comma class; TEST in the fuzz
+# corpus (30_quoted_name_phantom) gates it under the differential oracle too.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: "a,zstd ";q=1
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 70: a real zstd element after a quoted-string element still negotiates
+# Guard against over-fixing TEST 69: `"a",zstd` is a quoted-string element
+# (declined) followed by a separate, valid `zstd` coding element — that zstd
+# token must still be honoured. Confirms the name-scan '"' stop ends the
+# quoted element rather than swallowing the following comma-separated token.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: "a",zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
