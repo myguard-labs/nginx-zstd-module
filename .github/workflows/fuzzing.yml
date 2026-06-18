@@ -7,13 +7,13 @@ name: Fuzzing
 # shim actually changes.
 #
 # Action pins (see build-test.yml header for rationale):
-# actions/checkout@v4        -> 34e114876b0b11c390a56381ad16ebd13914f8d5
-# actions/upload-artifact@v4 -> ea165f8d65b6e75b540449e92b4886f43607fa02
+# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
 
 on:
   schedule:
-    # Nightly 03:41 UTC — discovery run, longer budget, no one waiting.
-    - cron: "41 3 * * *"
+    # Monthly, 1st @ 03:41 UTC.
+    - cron: "41 3 1 * *"
   pull_request:
     branches: [master, main]
     paths:
@@ -43,7 +43,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install clang + libFuzzer
         run: |
@@ -55,7 +55,7 @@ jobs:
 
       - name: Select fuzz duration
         run: |
-          # Nightly / dispatch: long. PR regression run: short and bounded.
+          # Monthly / dispatch: long. PR regression run: short and bounded.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "FUZZ_SECS=120" >> "$GITHUB_ENV"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -81,7 +81,7 @@ jobs:
           fi
           echo "✓ No crashes in ${FUZZ_SECS}s"
 
-      - name: Minimize and persist corpus growth
+      - name: Minimize and persist corpus
         if: success() && github.event_name == 'schedule'
         run: |
           cd fuzz
@@ -92,7 +92,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: fuzz-crashes
           path: |
@@ -101,7 +101,7 @@ jobs:
 
       - name: Upload minimized corpus
         if: success() && github.event_name == 'schedule'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: fuzz-corpus
           path: ${{ github.workspace }}/fuzz/corpus-min

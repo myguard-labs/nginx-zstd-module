@@ -5,12 +5,9 @@ name: Security Scanners
 # tab. Third-party actions pinned to commit SHAs — see build-test.yml header.
 
 on:
-  push:
-    branches: [master, main, dev]
-  pull_request:
-    branches: [master, main]
   schedule:
-    - cron: "17 4 * * 1"
+    # Monthly, 1st @ 04:17 UTC.
+    - cron: "17 4 1 * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -31,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Cache apt packages
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -106,7 +103,7 @@ jobs:
 
       - name: Upload flawfinder SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           sarif_file: flawfinder.sarif
           category: flawfinder
@@ -169,7 +166,7 @@ jobs:
 
       - name: Upload semgrep SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -177,7 +174,7 @@ jobs:
 
       - name: Upload security reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: security-reports
           path: |

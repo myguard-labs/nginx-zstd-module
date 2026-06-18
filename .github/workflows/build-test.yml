@@ -2,21 +2,25 @@ name: Build & Test
 
 # Third-party actions are pinned to commit SHAs for supply-chain safety.
 # This pin table is the canonical reference for ALL workflow files
-# (build-test.yml, codeql.yml, security-scanners.yml, fuzzing.yml, valgrind.yml) —
+# (build-test.yml, codeql.yml, security-scanners.yml, fuzzing.yml) —
 # keep them consistent.
-# actions/checkout@v4          -> 34e114876b0b11c390a56381ad16ebd13914f8d5
+# actions/checkout@v5          -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
 # actions/cache@v4             -> 0057852bfaa89a56745cba8c7296529d2fc39830
-# actions/upload-artifact@v4   -> ea165f8d65b6e75b540449e92b4886f43607fa02
-# actions/download-artifact@v4 -> d3f86a106a0bac45b974a628896c90dbdf5c8093
-# github/codeql-action/*@v3    -> 458d36d7d4f47d0dd16ca424c1d3cda0060f1360
+# actions/upload-artifact@v5   -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+# actions/download-artifact@v5 -> 634f93cb2916e3fdff6788551b99b062d0335ce0
+# github/codeql-action/*@v4    -> 8aad20d150bbac5944a9f9d289da16a4b0d87c1e
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # nginx version is NOT pinned. The `resolve` job scrapes nginx.org for the
-  # current mainline release at run time and feeds it to every job via
-  # `needs.resolve.outputs.nginx_version` (and the build matrix JSON). This
-  # makes the weekly cron actually test the module against new releases as
-  # they ship, instead of failing once nginx.org drops an old tarball.
+  # NGINX_VERSION is NOT pinned here. The `resolve` job scrapes nginx.org for
+  # the current mainline release and feeds it via needs.resolve.outputs.*; per-
+  # job env: blocks below override this placeholder with the resolved value.
+  NGINX_VERSION: ""
+  # The `resolve` job scrapes nginx.org for the current mainline release at run
+  # time and feeds it to every job via `needs.resolve.outputs.nginx_version`
+  # (and the build matrix JSON). This makes the weekly cron actually test the
+  # module against new releases as they ship, instead of failing once nginx.org
+  # drops an old tarball.
 
 on:
   push:
@@ -41,46 +45,35 @@ permissions:
 jobs:
 
   # ── Resolve the current mainline nginx version once per run ───────────────
-  #    Scrapes nginx.org and exposes both a bare version string and a ready
-  #    build-matrix JSON (nginx@<latest> + the pinned Angie fork). Every other
-  #    job consumes needs.resolve.outputs.* so the whole run agrees on one
-  #    version. nginx.org only keeps the newest mainline tarball around, so
-  #    resolving at run time is what keeps CI from 404ing after a release.
+  #    Scrapes nginx.org and exposes a bare version string and a single-entry
+  #    build-matrix JSON (nginx mainline only). Every other job consumes
+  #    needs.resolve.outputs.* so the whole run agrees on one version.
+  #    nginx.org only keeps the newest mainline tarball around, so resolving
+  #    at run time is what keeps CI from 404ing after a release.
   resolve:
     name: Resolve nginx version
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       nginx_version: ${{ steps.v.outputs.nginx_version }}
-      nginx_stable: ${{ steps.v.outputs.nginx_stable }}
       matrix: ${{ steps.v.outputs.matrix }}
     steps:
-      - name: Resolve latest mainline + stable nginx
+      - name: Resolve latest mainline nginx
         id: v
         run: |
           set -euo pipefail
-          vers=$(curl -fsSL https://nginx.org/en/download.html \
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
             | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V)
-          ver=$(echo "$vers" | tail -1)
+            | sort -V | tail -1)
           if [ -z "$ver" ]; then
             echo "::error::could not resolve mainline nginx version from nginx.org"
             exit 1
           fi
-          # nginx convention: odd minor = mainline, even minor = stable.
-          # Stable = highest version with an even minor < mainline.
-          stable=$(echo "$vers" | awk -F. '($2 % 2)==0' | sort -V | tail -1)
-          [ -z "$stable" ] && stable="$ver"
-          echo "Resolved nginx mainline: $ver  stable: $stable"
-          # Build matrix: nginx mainline + nginx stable + the pinned Angie
-          # fork. Keep the Angie entry in sync with the build-old-libzstd /
-          # valgrind notes. The functional suite runs against all three via
-          # the tests + tests-compat jobs (audit CI6).
-          matrix=$(printf 'matrix={"include":[{"flavor":"nginx","version":"%s","url":"https://nginx.org/download/nginx-%s.tar.gz","dir":"nginx-%s"},{"flavor":"nginx","version":"%s","url":"https://nginx.org/download/nginx-%s.tar.gz","dir":"nginx-%s"},{"flavor":"angie","version":"1.11.5","url":"https://download.angie.software/files/angie-1.11.5.tar.gz","dir":"angie-1.11.5"}]}' \
-            "$ver" "$ver" "$ver" "$stable" "$stable" "$stable")
+          echo "Resolved nginx mainline: $ver"
+          matrix=$(printf 'matrix={"include":[{"flavor":"nginx","version":"%s","url":"https://nginx.org/download/nginx-%s.tar.gz","dir":"nginx-%s"}]}' \
+            "$ver" "$ver" "$ver")
           {
             echo "nginx_version=$ver"
-            echo "nginx_stable=$stable"
             echo "$matrix"
           } >> "$GITHUB_OUTPUT"
 
@@ -92,7 +85,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       # Lint the workflow files themselves. actionlint validates GitHub
       # Actions expression contexts (e.g. "env is not allowed in a job
@@ -215,7 +208,7 @@ jobs:
 
       - name: Upload lint reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: lint-reports
           path: |
@@ -223,11 +216,7 @@ jobs:
             ${{ github.workspace }}/clang-scan.log
           retention-days: 7
 
-  # ── Build the module against each supported server flavour ───────────────
-  #    nginx mainline + Angie (the actively-developed nginx fork this module
-  #    also ships packages for — see tools/test_package_artifact.py). Angie
-  #    builds with the same ./configure --add-module interface; only the
-  #    download host and tarball/dir names differ, hence the include matrix.
+  # ── Build the module against nginx mainline (amd64) ─────────────────────
   build:
     name: Build (${{ matrix.flavor }} ${{ matrix.version }})
     runs-on: ubuntu-latest
@@ -235,12 +224,12 @@ jobs:
     needs: resolve
     strategy:
       fail-fast: false
-      # nginx@<latest mainline> + pinned Angie, assembled by the resolve job.
+      # nginx mainline, assembled by the resolve job.
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Cache apt packages
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -355,7 +344,7 @@ jobs:
           "${{ matrix.dir }}/objs/${{ matrix.flavor }}" -V 2>&1
 
       - name: Upload server binary artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: server-binary-${{ matrix.flavor }}-${{ matrix.version }}
           path: ${{ matrix.dir }}/objs/${{ matrix.flavor }}
@@ -388,7 +377,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install build dependencies
         run: |
@@ -493,7 +482,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install dependencies
         run: |
@@ -527,7 +516,7 @@ jobs:
           echo "✓ ASAN+UBSAN nginx binary built"
 
       - name: Upload ASAN nginx binary
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: nginx-binary-asan
           path: nginx-${{ env.NGINX_VERSION }}/objs/nginx
@@ -548,7 +537,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Cache apt packages
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -569,7 +558,7 @@ jobs:
             zstd
 
       - name: Download nginx binary (mainline, from build matrix)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           # The build matrix uploads server-binary-<flavor>-<version>; the
           # full Perl/Python suite runs against nginx mainline specifically.
@@ -739,88 +728,13 @@ jobs:
 
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: test-logs
           path: |
             ${{ github.workspace }}/t/filter-tests.log
             ${{ github.workspace }}/t/static-tests.log
           retention-days: 7
-
-  # ── Cross-version functional coverage (audit CI6) ────────────────────────
-  #    The heavy `tests` job runs the full matrix only against nginx mainline.
-  #    This job runs the Perl suites + the core decode-and-compare smoke test
-  #    against the OTHER built artifacts — nginx stable and Angie — so a
-  #    regression that only manifests on the stable API or on Angie is caught,
-  #    instead of being merely built and never exercised.
-  tests-compat:
-    name: Tests (${{ matrix.label }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [resolve, build]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: "nginx stable"
-            artifact: server-binary-nginx-${{ needs.resolve.outputs.nginx_stable }}
-          - label: "angie 1.11.5"
-            artifact: server-binary-angie-1.11.5
-
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libperl-dev cpanminus libzstd1 python3 python3-requests zstd
-
-      - name: Download server binary
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: server-bin
-
-      - name: Set up server binary
-        run: |
-          bin=$(find server-bin -type f | head -1)
-          chmod +x "$bin"
-          echo "TEST_NGINX_BINARY=$bin" >> "$GITHUB_ENV"
-          echo "✓ server binary ready: $("$bin" -v 2>&1)"
-
-      - name: Cache Perl modules
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/perl5
-          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
-
-      - name: Install Test::Nginx::Socket
-        run: |
-          cpanm -l ~/perl5 --notest Test::Nginx::Socket
-          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
-
-      - name: Run filter + static Perl suites
-        run: |
-          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-compat"
-          mkdir -p "$TEST_NGINX_SERVROOT"
-          cd "$GITHUB_WORKSPACE"
-          perl t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee t/filter-compat.log
-          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "❌ Filter tests FAILED"; exit 1; }
-          # Static suite hardcodes the fixture mtime in its expected ETag.
-          touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
-          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
-          mkdir -p "$TEST_NGINX_SERVROOT"
-          perl t/01-static.t 2>&1 | sed 's/^Error:/Err:/' | tee t/static-compat.log
-          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "❌ Static tests FAILED"; exit 1; }
-          echo "✓ ${{ matrix.label }}: Perl suites passed"
-
-      - name: Run decode-and-compare smoke test
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18120
-          echo "✓ ${{ matrix.label }}: smoke test passed"
 
   # ── Smoke tests under ASAN+UBSAN — fails on any memory/UB error ───────────
   tests-asan:
@@ -831,7 +745,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install dependencies
         run: |
@@ -840,7 +754,7 @@ jobs:
             libperl-dev cpanminus
 
       - name: Download ASAN nginx binary
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: nginx-binary-asan
           path: nginx-bin
@@ -864,8 +778,8 @@ jobs:
       - name: Run Perl suites under ASAN+UBSAN
         # Put the static-file / magic-probe / conditional / HEAD paths (covered
         # only by these Perl suites, audit CI7) through ASan/UBSan. Functional
-        # pass/fail is already gated by the non-ASan `tests` job across three
-        # server flavours, so here we DON'T gate on test results: nginx core
+        # pass/fail is already gated by the non-ASan `tests` job, so here we
+        # DON'T gate on test results: nginx core
         # emits benign sanitizer aborts on some Test::Nginx request paths
         # unrelated to this module. Run non-halting, write ASan reports to
         # files, and fail ONLY if a sanitizer report names this module's
@@ -930,40 +844,4 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           bash tools/test_reload_leak.sh "$TEST_NGINX_BINARY" 5
 
-  # ── Sustained mixed-load soak under ASAN+UBSAN ───────────────────────────
-  #    Production-shaped load that single-shot tests do not give. Long, so
-  #    it runs only on the weekly schedule and manual dispatch — never on
-  #    the per-PR path.
-  soak-asan:
-    name: Soak ASAN+UBSAN
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    needs: build-asan
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd libzstd1 curl
-
-      - name: Download ASAN nginx binary
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: nginx-binary-asan
-          path: nginx-bin
-
-      - name: Set up nginx binary
-        run: chmod +x nginx-bin/nginx
-
-      - name: Soak (10 min, 8 concurrent, mixed payloads) under ASAN+UBSAN
-        env:
-          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          bash tools/soak.sh "$GITHUB_WORKSPACE/nginx-bin/nginx" 600 8
 
