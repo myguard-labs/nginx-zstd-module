@@ -1,0 +1,93 @@
+name: Valgrind Memcheck
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  schedule:
+    # Monthly, 1st @ 03:30 UTC.
+    - cron: "30 3 1 * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: valgrind-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  memcheck:
+    name: Memcheck soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          if [ -z "$ver" ]; then
+            echo "::error::could not resolve mainline nginx version from nginx.org"
+            exit 1
+          fi
+          echo "Resolved nginx mainline: $ver"
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Cache apt packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-valgrind-${{ runner.os }}-build-zstd-nginx
+          restore-keys: apt-valgrind-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libzstd-dev pkg-config \
+            valgrind wget zlib1g-dev zstd
+
+      - name: Cache nginx source tarball
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-valgrind-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        run: |
+          test -f "nginx-${NGINX_VERSION}.tar.gz" || \
+            wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
+              "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Build debug nginx with zstd module
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat \
+            --with-debug \
+            --with-threads \
+            --with-file-aio \
+            --with-http_ssl_module \
+            --with-http_v2_module \
+            --with-http_gzip_static_module \
+            --with-http_realip_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+
+      - name: Soak under Valgrind Memcheck
+        env:
+          USE_VALGRIND: "1"
+        run: |
+          bash tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" \
+            300 4
