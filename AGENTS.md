@@ -65,9 +65,9 @@ Filter module — context `http, server, location` unless noted:
 |---|---|
 | `zstd on\|off` | also valid in `if` (LIF) |
 | `zstd_comp_level` | int; supports negative levels (custom setter) |
-| `zstd_types` | mime list; default `text/html` |
+| `zstd_types` | mime list; default is common textual web formats (see README) |
 | `zstd_buffers` | num size |
-| `zstd_min_length` | size; default `20` |
+| `zstd_min_length` | size; default `1024` |
 | `zstd_max_length` | size; default unset. Enforced in the header filter on known `Content-Length` **and** in the body filter on chunked/no-length responses (aborts the request) |
 | `zstd_target_cblock_size` | size; needs libzstd ≥ 1.5.6 |
 | `zstd_window_log` | int exponent; caps `ZSTD_c_windowLog` → per-request memory ceiling |

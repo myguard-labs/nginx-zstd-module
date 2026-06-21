@@ -1835,3 +1835,105 @@ Accept-Encoding: "a",zstd
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 71: omitted directives use the web MIME defaults at the 1024-byte boundary
+# application/json is in the default type list. The response is exactly 1024
+# bytes, proving the default zstd_min_length boundary is inclusive.
+--- config
+    location /json {
+        zstd on;
+        default_type application/json;
+        return 200 $arg_body;
+    }
+--- request eval
+"GET /json?body=" . ("x" x 1024)
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+!Content-Length
+Transfer-Encoding: chunked
+Content-Encoding: zstd
+Content-Type: application/json
+--- no_error_log
+[error]
+
+
+
+=== TEST 72: omitted zstd_min_length skips a 1023-byte HTML response
+# text/html was already the module's default type, so this isolates the
+# changed 1024-byte minimum length gate from the expanded MIME-type list.
+--- config
+    location /html {
+        zstd on;
+        default_type text/html;
+        return 200 $arg_body;
+    }
+--- request eval
+"GET /html?body=" . ("x" x 1023)
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Length: 1023
+!Content-Encoding
+Content-Type: text/html
+--- no_error_log
+[error]
+
+
+
+=== TEST 73: omitted zstd_types includes text/csv
+--- config
+    location /csv {
+        zstd on;
+        default_type text/csv;
+        return 200 $arg_body;
+    }
+--- request eval
+"GET /csv?body=" . ("x" x 1024)
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Content-Type: text/csv
+--- no_error_log
+[error]
+
+
+
+=== TEST 74: omitted zstd_types includes application/x-ndjson
+--- config
+    location /ndjson {
+        zstd on;
+        default_type application/x-ndjson;
+        return 200 $arg_body;
+    }
+--- request eval
+"GET /ndjson?body=" . ("x" x 1024)
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Content-Type: application/x-ndjson
+--- no_error_log
+[error]
+
+
+
+=== TEST 75: omitted zstd_types includes application/json-seq
+--- config
+    location /json-seq {
+        zstd on;
+        default_type application/json-seq;
+        return 200 $arg_body;
+    }
+--- request eval
+"GET /json-seq?body=" . ("x" x 1024)
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Content-Type: application/json-seq
+--- no_error_log
+[error]

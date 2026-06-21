@@ -63,13 +63,8 @@ pull requests are welcome.
 ```nginx
 http {
     # Compress text responses for clients that support zstd.
-    # Only responses >= 1000 bytes are compressed (smaller ones see no benefit).
+    # Defaults: level 3, web-content MIME types, and a 1024-byte minimum.
     zstd             on;
-    zstd_comp_level  3;
-    zstd_min_length  1000;
-    zstd_types       text/plain text/css application/json
-                     application/javascript text/xml application/xml
-                     application/xml+rss text/javascript image/svg+xml;
 
     # Required: emit Vary: Accept-Encoding so proxies/CDNs cache correctly.
     gzip_vary        on;
@@ -111,12 +106,7 @@ relies on the module's built-in defaults for everything not shown.
 ```nginx
 http {
     # --- zstd: set and forget ---
-    zstd              on;
-    zstd_comp_level   3;     # sweet spot: strong ratio, cheap CPU
-    zstd_min_length   256;   # don't bother compressing tiny responses
-    zstd_types        text/plain text/css application/json
-                      application/javascript text/xml application/xml
-                      application/xml+rss text/javascript image/svg+xml;
+    zstd              on;    # level 3, 1 KiB minimum, common web types
 
     # Required so proxies/CDNs cache compressed and identity variants
     # separately. The module warns at startup if this is missing.
@@ -129,13 +119,15 @@ http {
 
 Why these values, and why nothing else is needed:
 
-* **`zstd_comp_level 3`** — for real web content this beats `gzip -6`
+* **`zstd_comp_level 3`** — the built-in default; for real web content this beats `gzip -6`
   on ratio at comparable or better speed (see [Benchmarks](#benchmarks)).
   Levels ≥ 9 cost CPU steeply for marginal gain; only raise it for
   infrequently-generated, cached responses.
-* **`zstd_min_length 256`** — below a few hundred bytes the zstd frame
-  overhead outweighs any saving. 256 is a safe floor; the built-in
-  default is 20 if you omit it.
+* **`zstd_min_length 1024`** — the built-in default; below about 1 KiB the
+  zstd frame overhead and CPU cost usually outweigh the saving.
+* **`zstd_types` is intentionally not set.** Its built-in list covers HTML,
+  plain text, CSS, JavaScript, JSON, XML/feed formats, SVG, and common
+  structured JSON variants (see [`zstd_types`](#zstd_types)).
 * **`zstd_buffers` is intentionally not set.** The default is now
   `2 × ZSTD_CStreamOutSize()` — libzstd's own recommended streaming
   output unit (~128 KB each). This lets every compress call flush a
@@ -316,17 +308,18 @@ http {
 ### zstd_min_length
 
 **Syntax:** `zstd_min_length length;`
-**Default:** `zstd_min_length 20;`
+**Default:** `zstd_min_length 1024;`
 **Context:** `http, server, location`
 
 Sets the minimum response size (in bytes) required for compression to apply. The size is taken from the `Content-Length` response header; responses without `Content-Length` are always eligible.
 
-> **Note:** The built-in default of `20` bytes is intentionally low (matching nginx's `gzip_min_length` default) but is rarely the right value in practice. Compressing responses smaller than ~200 bytes typically produces output that is *larger* than the input, wasting CPU with no benefit. A value of `1000` is a more practical starting point for most deployments.
+> **Note:** The built-in default is `1024` bytes. Smaller responses often lose
+> their savings to zstd frame overhead while still consuming compression CPU.
 
 **Example:**
 
 ```nginx
-zstd_min_length 1000;  # skip compression for responses smaller than 1KB
+zstd_min_length 1024;  # skip compression for responses smaller than 1 KiB
 ```
 
 ---
@@ -357,10 +350,23 @@ zstd_max_length 10m;  # don't compress responses larger than 10 MB
 ### zstd_types
 
 **Syntax:** `zstd_types mime-type ...;`
-**Default:** `zstd_types text/html;`
+**Default:**
+
+```nginx
+zstd_types text/html text/plain text/css text/csv application/json
+           application/x-ndjson application/json-seq application/javascript
+           text/xml application/xml
+           application/xml+rss text/javascript image/svg+xml
+           application/atom+xml application/ld+json
+           application/manifest+json application/problem+json
+           application/rss+xml application/vnd.api+json
+           application/xhtml+xml;
+```
 **Context:** `http, server, location`
 
-Compresses responses with the listed MIME types in addition to `text/html`. Use `*` to match all MIME types.
+When omitted, the default covers common textual web representations. If set
+explicitly, it follows nginx's usual type-directive behaviour: `text/html` is
+included along with the listed MIME types. Use `*` to match all MIME types.
 
 > **Note:** Only compressible content types (text, structured data, SVG, etc.) benefit from compression. Binary formats such as images (JPEG, PNG, WebP), audio, and video are already compressed and should be excluded.
 
@@ -370,13 +376,22 @@ Compresses responses with the listed MIME types in addition to `text/html`. Use 
 zstd_types
     text/plain
     text/css
+    text/csv
     text/xml
     text/javascript
     application/json
+    application/x-ndjson
+    application/json-seq
     application/javascript
     application/xml
     application/xml+rss
     application/atom+xml
+    application/ld+json
+    application/manifest+json
+    application/problem+json
+    application/rss+xml
+    application/vnd.api+json
+    application/xhtml+xml
     image/svg+xml;
 ```
 

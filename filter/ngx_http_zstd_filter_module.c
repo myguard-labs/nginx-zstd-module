@@ -107,6 +107,36 @@ static ngx_str_t  ngx_http_zstd_ratio = ngx_string("zstd_ratio");
 static ngx_str_t  ngx_http_zstd_bytes_in = ngx_string("zstd_bytes_in");
 static ngx_str_t  ngx_http_zstd_bytes_out = ngx_string("zstd_bytes_out");
 
+/*
+ * Sensible web-content defaults when zstd_types is omitted. Keep the
+ * directive parser's post value as ngx_http_html_default_types below: an
+ * explicitly configured zstd_types list retains nginx's long-standing
+ * "text/html plus the configured types" behaviour.
+ */
+static ngx_str_t  ngx_http_zstd_default_types[] = {
+    ngx_string("text/html"),
+    ngx_string("text/plain"),
+    ngx_string("text/css"),
+    ngx_string("text/csv"),
+    ngx_string("application/json"),
+    ngx_string("application/x-ndjson"),
+    ngx_string("application/json-seq"),
+    ngx_string("application/javascript"),
+    ngx_string("text/xml"),
+    ngx_string("application/xml"),
+    ngx_string("application/xml+rss"),
+    ngx_string("text/javascript"),
+    ngx_string("image/svg+xml"),
+    ngx_string("application/atom+xml"),
+    ngx_string("application/ld+json"),
+    ngx_string("application/manifest+json"),
+    ngx_string("application/problem+json"),
+    ngx_string("application/rss+xml"),
+    ngx_string("application/vnd.api+json"),
+    ngx_string("application/xhtml+xml"),
+    ngx_null_string
+};
+
 
 static ngx_int_t ngx_http_zstd_header_filter(ngx_http_request_t *r);
 static ngx_int_t ngx_http_zstd_body_filter(ngx_http_request_t *r,
@@ -1349,7 +1379,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
     ngx_conf_merge_value(conf->level, prev->level, 3);
-    ngx_conf_merge_value(conf->min_length, prev->min_length, 20);
+    ngx_conf_merge_value(conf->min_length, prev->min_length, 1024);
     ngx_conf_merge_value(conf->max_length, prev->max_length, NGX_CONF_UNSET);
     ngx_conf_merge_value(conf->target_cblock_size, prev->target_cblock_size, 0);
     ngx_conf_merge_value(conf->window_log, prev->window_log, 0);
@@ -1376,7 +1406,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                              &prev->types_keys, &prev->types,
-                             ngx_http_html_default_types))
+                             ngx_http_zstd_default_types))
     {
         return NGX_CONF_ERROR;
     }
