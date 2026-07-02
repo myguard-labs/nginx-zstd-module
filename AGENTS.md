@@ -282,6 +282,6 @@ Rules:
   user-visible directive/variable change. Keep `.github/CI_SETUP.md`
   truthful if you change CI structure.
 - `gh` may resolve the wrong repo here (multiple remotes — `origin` =
-  `eilandert/zstd-nginx-module`, `upstream` = `tokers/zstd-nginx-module`). Pass
-  `--repo eilandert/zstd-nginx-module` or rely on the configured
+  `myguard-labs/nginx-zstd-module`, `upstream` = `tokers/zstd-nginx-module`). Pass
+  `--repo myguard-labs/nginx-zstd-module` or rely on the configured
   default.
