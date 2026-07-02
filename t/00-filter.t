@@ -1937,3 +1937,41 @@ Content-Encoding: zstd
 Content-Type: application/json-seq
 --- no_error_log
 [error]
+
+
+
+=== TEST 76: omitted zstd_types includes application/wasm
+--- config
+    location /wasm {
+        zstd on;
+        default_type application/wasm;
+        return 200 $arg_body;
+    }
+--- request eval
+"GET /wasm?body=" . ("x" x 1024)
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Content-Type: application/wasm
+--- no_error_log
+[error]
+
+
+
+=== TEST 77: omitted zstd_types includes text/wgsl
+--- config
+    location /wgsl {
+        zstd on;
+        default_type text/wgsl;
+        return 200 $arg_body;
+    }
+--- request eval
+"GET /wgsl?body=" . ("x" x 1024)
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Content-Type: text/wgsl
+--- no_error_log
+[error]

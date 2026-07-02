@@ -360,7 +360,7 @@ zstd_types text/html text/plain text/css text/csv application/json
            application/atom+xml application/ld+json
            application/manifest+json application/problem+json
            application/rss+xml application/vnd.api+json
-           application/xhtml+xml;
+           application/xhtml+xml application/wasm text/wgsl;
 ```
 **Context:** `http, server, location`
 
@@ -392,6 +392,8 @@ zstd_types
     application/rss+xml
     application/vnd.api+json
     application/xhtml+xml
+    application/wasm
+    text/wgsl
     image/svg+xml;
 ```
 

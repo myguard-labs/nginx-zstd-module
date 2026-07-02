@@ -134,6 +134,8 @@ static ngx_str_t  ngx_http_zstd_default_types[] = {
     ngx_string("application/rss+xml"),
     ngx_string("application/vnd.api+json"),
     ngx_string("application/xhtml+xml"),
+    ngx_string("application/wasm"),
+    ngx_string("text/wgsl"),
     ngx_null_string
 };
 
