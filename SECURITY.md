@@ -10,7 +10,7 @@ taken seriously.
 **Do not open a public issue for security vulnerabilities.**
 
 Report privately via GitHub's
-[private vulnerability reporting](https://github.com/eilandert/zstd-nginx-module/security/advisories/new)
+[private vulnerability reporting](https://github.com/myguard-labs/nginx-zstd-module/security/advisories/new)
 ("Report a vulnerability" under the repository's Security tab). If that
 is unavailable, contact the maintainers at the address on the
 [deb.myguard.nl](https://deb.myguard.nl/) site.
