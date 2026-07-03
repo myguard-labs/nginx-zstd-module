@@ -38,7 +38,7 @@ permissions:
 jobs:
   fuzz:
     name: Accept-Encoding parser fuzz
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     # WIDE+LONG monthly discovery on self-hosted (free, no GitHub 6h cap) —
     # replaces the local nginx-module-stress cron. 1 target x 14400s = ~4h.
     timeout-minutes: 300

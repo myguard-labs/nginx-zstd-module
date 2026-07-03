@@ -20,7 +20,7 @@ permissions:
 jobs:
   memcheck:
     name: Memcheck soak
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     # Long monthly memcheck soak on self-hosted — no GitHub 6h cap.
     timeout-minutes: 240
     steps:

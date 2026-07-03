@@ -20,7 +20,7 @@ permissions:
 jobs:
   memcheck:
     name: Helgrind
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     # Long monthly helgrind soak on self-hosted — no GitHub 6h cap.
     timeout-minutes: 240
     steps:
