@@ -73,6 +73,13 @@ if [ "${USE_VALGRIND:-0}" = "1" ]; then
          --errors-for-leak-kinds=definite
          --suppressions="$SUPP" --log-file="$WORK/logs/valgrind.%p"
          "${RUN[@]}")
+elif [ "${USE_HELGRIND:-0}" = "1" ]; then
+    # Data-race / lock-order checking under helgrind (thread pool + any
+    # shared state). Reuses the same suppression file.
+    SUPP="$(cd "$(dirname "$0")/.." && pwd)/valgrind.suppress"
+    RUN=(valgrind --tool=helgrind --error-exitcode=99
+         --suppressions="$SUPP" --log-file="$WORK/logs/helgrind.%p"
+         "${RUN[@]}")
 fi
 
 "${RUN[@]}" &
@@ -83,7 +90,7 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 
-echo "soak: ${DURATION}s, concurrency ${CONC}$( [ "${USE_VALGRIND:-0}" = 1 ] && echo ' (valgrind)')"
+echo "soak: ${DURATION}s, concurrency ${CONC}$( [ "${USE_VALGRIND:-0}" = 1 ] && echo ' (valgrind)'; [ "${USE_HELGRIND:-0}" = 1 ] && echo ' (helgrind)')"
 END=$(( $(date +%s) + DURATION ))
 fail=0
 
@@ -121,11 +128,12 @@ problems=0
 if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
     echo "FAIL: ASAN/UBSAN report:"; cat "$WORK"/logs/asan*; problems=1
 fi
-if ls "$WORK"/logs/valgrind.* >/dev/null 2>&1; then
+if ls "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* >/dev/null 2>&1; then
     if grep -qE 'ERROR SUMMARY: [1-9]|definitely lost: [1-9]' \
-            "$WORK"/logs/valgrind.* 2>/dev/null; then
-        echo "FAIL: valgrind errors:"
-        grep -E 'ERROR SUMMARY|definitely lost' "$WORK"/logs/valgrind.*
+            "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* 2>/dev/null; then
+        echo "FAIL: valgrind/helgrind errors:"
+        grep -E 'ERROR SUMMARY|definitely lost' \
+            "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* 2>/dev/null
         problems=1
     fi
 fi
