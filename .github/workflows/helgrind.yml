@@ -1,4 +1,4 @@
-name: Valgrind Memcheck
+name: Helgrind
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -6,12 +6,12 @@ env:
 
 on:
   schedule:
-    # Monthly, 1st @ 03:30 UTC.
-    - cron: "30 3 1 * *"
+    # Monthly, 1st @ 04:30 UTC.
+    - cron: "30 4 1 * *"
   workflow_dispatch: {}
 
 concurrency:
-  group: valgrind-${{ github.workflow }}-${{ github.ref }}
+  group: helgrind-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -19,9 +19,9 @@ permissions:
 
 jobs:
   memcheck:
-    name: Memcheck soak
+    name: Helgrind
     runs-on: [self-hosted, builder02, lxc]
-    # Long monthly memcheck soak on self-hosted — no GitHub 6h cap.
+    # Long monthly helgrind soak on self-hosted — no GitHub 6h cap.
     timeout-minutes: 240
     steps:
       - name: Checkout module
@@ -44,8 +44,8 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: /var/cache/apt/archives
-          key: apt-valgrind-${{ runner.os }}-build-zstd-nginx
-          restore-keys: apt-valgrind-${{ runner.os }}-
+          key: apt-helgrind-${{ runner.os }}-build-zstd-nginx
+          restore-keys: apt-helgrind-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
@@ -58,7 +58,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
-          key: nginx-src-valgrind-${{ env.NGINX_VERSION }}
+          key: nginx-src-helgrind-${{ env.NGINX_VERSION }}
 
       - name: Download nginx source tarball
         run: |
@@ -85,9 +85,9 @@ jobs:
             --add-module="$GITHUB_WORKSPACE"
           make -j"$(nproc)"
 
-      - name: Soak under Valgrind Memcheck
+      - name: Soak under Helgrind
         env:
-          USE_VALGRIND: "1"
+          USE_HELGRIND: "1"
         run: |
           bash tools/soak.sh \
             "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" \
