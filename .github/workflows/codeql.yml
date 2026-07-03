@@ -31,7 +31,7 @@ permissions:
 jobs:
   codeql:
     name: CodeQL
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 30
     permissions:
       contents: read

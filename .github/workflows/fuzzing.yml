@@ -38,7 +38,7 @@ permissions:
 jobs:
   fuzz:
     name: Accept-Encoding parser fuzz
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 30
 
     steps:
