@@ -1,0 +1,279 @@
+name: CI Deep
+
+# Exhaustive dynamic analysis — monthly cron + on-demand only, NEVER on PR.
+# Consolidates the old fuzzing.yml + valgrind.yml + helgrind.yml +
+# security-scanners.yml into one workflow. codeql.yml is dropped entirely:
+# CodeQL / the GitHub Security tab is GitHub-Advanced-Security only and does
+# nothing on a private repo, so the SARIF-upload path is removed too — the
+# scanners still run and GATE on findings, they just don't upload.
+#
+# Jobs: fuzz (14400s/target) · memcheck soak · helgrind soak · scanners.
+#   * memcheck AND helgrind run under tools/soak.sh, which already passes
+#     --suppressions=valgrind.suppress and --error-exitcode=99 for BOTH tools
+#     (see tools/soak.sh) — the drift-fix baseline for every module.
+#
+# Action pins (keep in sync with build-test.yml header):
+# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  schedule:
+    # Monthly, 1st @ 03:30 UTC.
+    - cron: "30 3 1 * *"
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: "Per-target fuzz duration (seconds)"
+        required: false
+        default: "14400"
+
+concurrency:
+  group: ci-deep-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz (Accept-Encoding, long)
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 600
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install clang + libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Select fuzz duration
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "FUZZ_SECS=${{ github.event.inputs.fuzz_seconds }}" >> "$GITHUB_ENV"
+          else
+            echo "FUZZ_SECS=14400" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build fuzz target
+        run: bash fuzz/build.sh "$GITHUB_WORKSPACE/fuzz/fuzz_accept_encoding"
+
+      - name: Fuzz
+        run: |
+          set -euo pipefail
+          cd fuzz
+          set +e
+          ./fuzz_accept_encoding \
+            -max_total_time="$FUZZ_SECS" \
+            -dict=fuzz.dict \
+            -print_final_stats=1 \
+            -artifact_prefix=crash- \
+            corpus/
+          rc=$?
+          set -e
+          [ $rc -eq 0 ] || { echo "❌ fuzzer crash (exit $rc)"; exit 1; }
+          echo "✓ no crashes in ${FUZZ_SECS}s"
+
+      - name: Minimize + persist corpus
+        if: success()
+        run: |
+          cd fuzz
+          mkdir -p corpus-min
+          ./fuzz_accept_encoding -merge=1 corpus-min/ corpus/
+          echo "merged: $(find corpus-min -type f | wc -l) units"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fuzz-deep-crashes
+          path: ${{ github.workspace }}/fuzz/crash-*
+          retention-days: 30
+
+      - name: Upload minimized corpus
+        if: success()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fuzz-corpus
+          path: ${{ github.workspace }}/fuzz/corpus-min
+          retention-days: 30
+
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / fuzz FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+
+  memcheck:
+    name: Valgrind Memcheck soak
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 240
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
+          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libzstd-dev pkg-config \
+            valgrind wget zlib1g-dev zstd
+      - name: Build debug nginx + zstd module
+        run: |
+          set -euo pipefail
+          test -f "nginx-${NGINX_VERSION}.tar.gz" || wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
+            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat --with-debug --with-threads --with-file-aio \
+            --with-http_ssl_module --with-http_v2_module \
+            --with-http_gzip_static_module --with-http_realip_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+      - name: Memcheck soak (300s @ 4 conc, WITH suppressions)
+        env:
+          USE_VALGRIND: "1"
+        run: |
+          bash tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 300 4
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / memcheck FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+
+  helgrind:
+    name: Valgrind Helgrind soak
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 240
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
+          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libzstd-dev pkg-config \
+            valgrind wget zlib1g-dev zstd
+      - name: Build debug nginx + zstd module
+        run: |
+          set -euo pipefail
+          test -f "nginx-${NGINX_VERSION}.tar.gz" || wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
+            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat --with-debug --with-threads --with-file-aio \
+            --with-http_ssl_module --with-http_v2_module \
+            --with-http_gzip_static_module --with-http_realip_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+      - name: Helgrind soak (300s @ 4 conc, --error-exitcode=99, WITH suppressions)
+        env:
+          USE_HELGRIND: "1"
+        run: |
+          bash tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" 300 4
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / helgrind FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+
+  scanners:
+    name: Security scanners
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flawfinder clang-tidy python3 python3-pip nginx-dev
+          pip3 install --quiet semgrep
+      - name: Configure nginx src tree (clang-tidy headers)
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
+          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz"
+          tar -xzf "nginx-${ver}.tar.gz"; cd "nginx-${ver}"
+          CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
+          echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
+      - name: flawfinder
+        run: |
+          flawfinder --minlevel=1 \
+            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" 2>&1 | tee flawfinder.log
+      - name: clang-tidy (cert-*, security.*)
+        run: |
+          set -euo pipefail
+          N="$NGINX_SRC_TREE"
+          INCLUDES="-I$N/src/core -I$N/src/event -I$N/src/event/modules -I$N/src/event/quic \
+            -I$N/src/os/unix -I$N/objs -I$N/src/http -I$N/src/http/modules -I$N/src/http/v2 -I/usr/include"
+          status=0
+          for f in \
+            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
+            # shellcheck disable=SC2086,SC2046
+            clang-tidy "$f" \
+              --checks='-*,cert-*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
+              --warnings-as-errors='*' \
+              -- -DZSTD_STATIC_LINKING_ONLY $INCLUDES $(pkg-config --cflags libzstd) \
+              2>&1 | tee -a clang-tidy.log || status=1
+          done
+          exit "$status"
+      - name: semgrep
+        run: |
+          semgrep scan --config p/c --config p/security-audit \
+            "$GITHUB_WORKSPACE/filter/" "$GITHUB_WORKSPACE/static/" 2>&1 | tee semgrep.log || true
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: security-reports
+          path: |
+            ${{ github.workspace }}/flawfinder.log
+            ${{ github.workspace }}/clang-tidy.log
+            ${{ github.workspace }}/semgrep.log
+          retention-days: 14
