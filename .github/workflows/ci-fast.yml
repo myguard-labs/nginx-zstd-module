@@ -1,0 +1,122 @@
+name: CI Fast
+
+# Fast dynamic analysis on every PR/push — kept short so PR feedback stays
+# quick. build-test.yml already does the full build + ASan/UBSan unit/soak
+# matrix; THIS file adds only the two cheap dynamic gates:
+#   fuzz-regression : 120s on the Accept-Encoding target, only when the parser
+#                     or the fuzz harness changed (path-filtered on PRs)
+#   memcheck-lite   : 60s valgrind memcheck soak (helgrind is deep-only)
+# Long discovery (hours fuzz, full memcheck+helgrind soak, scanners) lives in
+# ci-deep.yml (monthly cron + workflow_dispatch).
+#
+# Action pins (keep in sync with build-test.yml header):
+# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-fast-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-regression:
+    name: Fuzz regression (120s)
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install clang + libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build fuzz target
+        run: bash fuzz/build.sh "$GITHUB_WORKSPACE/fuzz/fuzz_accept_encoding"
+
+      - name: Run fuzzer (120s regression)
+        run: |
+          set -euo pipefail
+          cd fuzz
+          set +e
+          ./fuzz_accept_encoding \
+            -max_total_time=120 \
+            -dict=fuzz.dict \
+            -print_final_stats=1 \
+            -artifact_prefix=crash- \
+            corpus/
+          rc=$?
+          set -e
+          [ $rc -eq 0 ] || { echo "❌ fuzzer crash (exit $rc)"; exit 1; }
+          echo "✓ no crashes in 120s"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fuzz-fast-crashes
+          path: ${{ github.workspace }}/fuzz/crash-*
+          retention-days: 14
+
+  memcheck-lite:
+    name: Memcheck lite (60s soak)
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Resolve latest mainline nginx
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          [ -n "$ver" ] || { echo "::error::cannot resolve nginx version"; exit 1; }
+          echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libzstd-dev pkg-config \
+            valgrind wget zlib1g-dev zstd
+
+      - name: Build debug nginx + zstd module
+        run: |
+          set -euo pipefail
+          test -f "nginx-${NGINX_VERSION}.tar.gz" || \
+            wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
+              "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat --with-debug --with-threads --with-file-aio \
+            --with-http_ssl_module --with-http_v2_module \
+            --with-http_gzip_static_module --with-http_realip_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+
+      - name: Memcheck soak (60s @ 4 conc)
+        env:
+          USE_VALGRIND: "1"
+        run: |
+          bash tools/soak.sh \
+            "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" \
+            60 4

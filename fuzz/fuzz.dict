@@ -1,0 +1,22 @@
+# libFuzzer dictionary for the Accept-Encoding parser.
+# Tokens the grammar actually uses — steers the fuzzer past the
+# structural boilerplate (codings, q-values, separators) far faster
+# than random bytes.
+"gzip"
+"deflate"
+"br"
+"zstd"
+"identity"
+"compress"
+"*"
+";q="
+"q=0"
+"q=1"
+"q=0.0"
+"q=1.0"
+", "
+","
+";"
+"="
+" "
+"\t"
