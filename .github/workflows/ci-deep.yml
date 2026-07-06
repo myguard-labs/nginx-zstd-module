@@ -1,8 +1,10 @@
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron + on-demand only, NEVER on PR.
-# Consolidates the old fuzzing.yml + valgrind.yml + helgrind.yml +
-# security-scanners.yml into one workflow. codeql.yml is dropped entirely:
+# The fast PR-time gates live in standalone workflows: fuzzing.yml (120s fuzz
+# regression), valgrind.yml (60s memcheck-lite soak) and security-scanners.yml
+# (scanners) run on every PR/push; THIS file stays the exhaustive monthly +
+# workflow_dispatch run. codeql.yml is dropped entirely:
 # CodeQL / the GitHub Security tab is GitHub-Advanced-Security only and does
 # nothing on a private repo, so the SARIF-upload path is removed too — the
 # scanners still run and GATE on findings, they just don't upload.

@@ -1,5 +1,7 @@
 [![Build & Test](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/build-test.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/build-test.yml)
-[![CI Fast](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-fast.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-fast.yml)
+[![Security scanners](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/security-scanners.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/security-scanners.yml)
+[![Fuzzing](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/fuzzing.yml)
+[![Valgrind](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/valgrind.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/valgrind.yml)
 [![CI Deep](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-deep.yml)
 
 📖 **Background reading:** 
@@ -10,7 +12,7 @@
 
 An nginx module for [Zstandard (zstd)](https://facebook.github.io/zstd/) compression. Zstandard typically achieves better compression ratios than gzip at comparable or faster speeds, making it a good choice for reducing transmitted response sizes.
 
-This is a hardened fork: every build is exercised against **nginx mainline and [Angie](https://angie.software/)**, the full test suite runs under **ASAN/UBSAN**, the `Accept-Encoding` parser is **continuously fuzzed**, and **CodeQL** plus flawfinder/semgrep/clang-tidy run on every change (see the badges above and [Testing & CI](#testing--ci)).
+This is a hardened fork: every build is exercised against **nginx mainline and [Angie](https://angie.software/)**, the full test suite runs under **ASAN/UBSAN**, the `Accept-Encoding` parser is **continuously fuzzed**, and flawfinder/semgrep/clang-tidy run on every change (see the badges above and [Testing & CI](#testing--ci)).
 
 # Table of Contents
 
@@ -840,16 +842,16 @@ log_format zstd '$request in=$zstd_bytes_in out=$zstd_bytes_out '
 
 # Testing & CI
 
-Five workflows guard every change (badges at the top); their cadence
-differs so PR feedback stays fast:
+Five workflows guard the module (badges at the top): four gate every
+push & PR, and CI Deep runs the exhaustive monthly pass:
 
 | Workflow | Cadence | What it does |
 |---|---|---|
 | **Build & Test** | every push & PR | Compiles the module against **nginx 1.31.0 mainline** and **Angie 1.11.5** with strict `-Werror` flags, then runs the full test suite: 46 `Test::Nginx::Socket` filter tests, 21 static-module tests, and end-to-end Python smoke tests (truncation, `Vary`, boundary sizes, repeated/concurrent requests, terminal-frame, the proxy-unbuffered and compression-matrix regressions, per-request CCtx isolation, reload-under-load, `zstd_long`/LDM, `$zstd_ratio`). A separate matrix entry rebuilds against **libzstd 1.4.x** (from source) to exercise the `< 1.5.6` and `≥ 1.4.0` fallback paths, and a parallel job rebuilds with **ASAN+UBSAN** and re-runs the smoke tests plus a `zstd_dict_file` config-reload leak check. A 10-minute mixed-load soak under ASAN+UBSAN runs on the weekly schedule. |
-| **CodeQL** | every push & PR + weekly | GitHub's `security-extended` C/C++ analysis against a real module build. |
-| **Security Scanners** | every push & PR + weekly | flawfinder, clang-tidy (`cert-*`, `bugprone-*`), and semgrep, with results uploaded as SARIF to the Security tab. |
-| **Fuzzing** | nightly + PRs touching the parser | A libFuzzer harness for the `ngx_http_zstd_accept_encoding()` / `ngx_http_zstd_eval_qvalue()` RFC 9110 `Accept-Encoding`/q-value parser. The fuzz target is sliced from the shipped header at build time, so there is no copy drift. See [`fuzz/README.md`](fuzz/README.md). |
-| **Valgrind Memcheck** | monthly + manual dispatch | A full Memcheck soak with `--track-origins=yes`, catching uninitialised-value reads and leaks that ASAN cannot. Monthly because a valgrind soak is ~20–50× slower than native. |
+| **Security scanners** | every push & PR | flawfinder, clang-tidy (`cert-*`, `clang-analyzer-security.*`), and semgrep, with the reports uploaded as build artifacts. |
+| **Fuzzing** | every push & PR | A 120-second libFuzzer regression run for the `ngx_http_zstd_accept_encoding()` / `ngx_http_zstd_eval_qvalue()` RFC 9110 `Accept-Encoding`/q-value parser. The fuzz target is sliced from the shipped header at build time, so there is no copy drift. See [`fuzz/README.md`](fuzz/README.md). |
+| **Valgrind** | every push & PR | A 60-second Memcheck-lite soak against a debug nginx build, catching uninitialised-value reads and leaks that ASAN cannot. |
+| **CI Deep** | monthly + manual dispatch | The exhaustive run: hours-long fuzzing on the same target, full Memcheck and Helgrind soaks (a valgrind soak is ~20–50× slower than native), and the same security scanners. |
 
 The test suite includes a dedicated regression test for every known
 historical bug class:

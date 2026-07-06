@@ -1,0 +1,68 @@
+name: Fuzzing
+
+# Fast fuzz regression gate on every PR/push — 120s libFuzzer run on the
+# Accept-Encoding target so PR feedback stays quick. The long (hours) fuzz
+# run lives in ci-deep.yml (monthly cron + workflow_dispatch).
+#
+# Action pins (keep in sync with build-test.yml header):
+# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ""
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: fuzzing-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-regression:
+    name: Fuzz regression (120s)
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install clang + libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build fuzz target
+        run: bash fuzz/build.sh "$GITHUB_WORKSPACE/fuzz/fuzz_accept_encoding"
+
+      - name: Run fuzzer (120s regression)
+        run: |
+          set -euo pipefail
+          cd fuzz
+          set +e
+          ./fuzz_accept_encoding \
+            -max_total_time=120 \
+            -dict=fuzz.dict \
+            -print_final_stats=1 \
+            -artifact_prefix=crash- \
+            corpus/
+          rc=$?
+          set -e
+          [ $rc -eq 0 ] || { echo "❌ fuzzer crash (exit $rc)"; exit 1; }
+          echo "✓ no crashes in 120s"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fuzz-fast-crashes
+          path: ${{ github.workspace }}/fuzz/crash-*
+          retention-days: 14
