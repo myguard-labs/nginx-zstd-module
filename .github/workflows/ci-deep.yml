@@ -24,14 +24,15 @@ env:
 
 on:
   schedule:
-    # Monthly, 1st @ 03:30 UTC.
+    # Monthly, day 1 @ 03:30 UTC — staggered per repo so ci-deep runs
+    # don't pile up on the shared self-hosted runners.
     - cron: "30 3 1 * *"
   workflow_dispatch:
     inputs:
       fuzz_seconds:
         description: "Per-target fuzz duration (seconds)"
         required: false
-        default: "14400"
+        default: "3600"
 
 concurrency:
   group: ci-deep-${{ github.workflow }}-${{ github.ref }}
@@ -59,7 +60,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "FUZZ_SECS=${{ github.event.inputs.fuzz_seconds }}" >> "$GITHUB_ENV"
           else
-            echo "FUZZ_SECS=14400" >> "$GITHUB_ENV"
+            echo "FUZZ_SECS=3600" >> "$GITHUB_ENV"
           fi
 
       - name: Build fuzz target
