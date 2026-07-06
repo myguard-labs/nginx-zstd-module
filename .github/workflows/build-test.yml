@@ -596,6 +596,7 @@ jobs:
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
           export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn"
+          rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
           # Startup-time warnings (e.g. zstd_bypass_vary without zstd_bypass)

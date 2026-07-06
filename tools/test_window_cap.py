@@ -134,6 +134,9 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
 
 def parse_frame_header(blob: bytes):
     """Return (single_segment, window_size_or_None, dict_id_or_0)."""
+    if len(blob) < 10:
+        raise RuntimeError(f"truncated response: {len(blob)} bytes is too "
+                           "short for a zstd frame header")
     if blob[:4] != ZSTD_MAGIC:
         raise RuntimeError(f"no zstd magic (hex={blob[:8].hex()})")
     fhd = blob[4]
