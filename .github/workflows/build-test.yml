@@ -52,7 +52,7 @@ jobs:
   #    at run time is what keeps CI from 404ing after a release.
   resolve:
     name: Resolve nginx version
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 5
     outputs:
       nginx_version: ${{ steps.v.outputs.nginx_version }}
@@ -80,7 +80,7 @@ jobs:
   # ── Lint & static analysis — no nginx build, fully independent ────────────
   validation:
     name: Validation
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 15
 
     steps:
@@ -219,7 +219,7 @@ jobs:
   # ── Build the module against nginx mainline (amd64) ─────────────────────
   build:
     name: Build (${{ matrix.flavor }} ${{ matrix.version }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 30
     needs: resolve
     strategy:
@@ -359,7 +359,7 @@ jobs:
   #    fallback paths still compile and produce correct compression. ─────
   build-old-libzstd:
     name: Build (libzstd 1.4.x — fallback paths)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 25
     needs: resolve
 
@@ -471,7 +471,7 @@ jobs:
   #    knowledge; ASAN is faster than valgrind for CI. ───────────────────────
   build-asan:
     name: Build ASAN+UBSAN
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 30
     needs: resolve
 
@@ -528,7 +528,7 @@ jobs:
     # context IS available there — so the resolved version shows in the job
     # title without a hardcoded literal.
     name: Tests (nginx ${{ needs.resolve.outputs.nginx_version }} mainline)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     needs: [resolve, build]
     env:
@@ -739,7 +739,7 @@ jobs:
   # ── Smoke tests under ASAN+UBSAN — fails on any memory/UB error ───────────
   tests-asan:
     name: Tests ASAN+UBSAN
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     needs: build-asan
 
