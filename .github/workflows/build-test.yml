@@ -592,6 +592,19 @@ jobs:
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Filter tests FAILED"; exit 1; fi
           echo "✓ Filter module: All tests passed"
 
+      - name: Run config-load warning tests
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          cd "$GITHUB_WORKSPACE"
+          # Startup-time warnings (e.g. zstd_bypass_vary without zstd_bypass)
+          # are only observable on the first request cycle, so they live in
+          # their own repeat_each(1) file.
+          perl t/02-conf-warn.t 2>&1 | sed 's/^Error:/Err:/' | tee t/conf-warn-tests.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Config-warning tests FAILED"; exit 1; fi
+          echo "✓ Config-load warning tests passed"
+
       - name: Run static module tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
@@ -721,6 +734,20 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18102 --backend-port 18103
           echo "✓ zstd_long (LDM) directive regression passed"
+
+      - name: Run window-cap + dictionary effect test
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # Frame-inspection effect test: with zstd_dict_file AND
+          # zstd_window_log 15 set, the emitted frame must declare a
+          # window <= 2^15 and reference the trained dictID (audit
+          # C2/R1 CDict-path regression); decode requires the dict and
+          # round-trips byte-exact.
+          python3 tools/test_window_cap.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18104 --backend-port 18105
+          echo "✓ window-cap + dictionary effect test passed"
 
       - name: Test summary
         if: success()
