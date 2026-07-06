@@ -221,7 +221,7 @@ jobs:
 
   scanners:
     name: Security scanners
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     steps:
       - name: Checkout module
@@ -229,8 +229,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y flawfinder clang-tidy python3 python3-pip nginx-dev
-          pip3 install --quiet semgrep
+          sudo apt-get install -y flawfinder clang-tidy python3 python3-pip pipx nginx-dev
+          # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
+          # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
+          # user pip install with --break-system-packages if pipx is unavailable.
+          if command -v pipx >/dev/null; then
+            pipx install --quiet semgrep
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          else
+            pip3 install --quiet --user --break-system-packages semgrep
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
       - name: Configure nginx src tree (clang-tidy headers)
         run: |
           set -euo pipefail
