@@ -82,7 +82,7 @@ jobs:
             *.c
             *.h
           paths-ignore: |
-            nginx-*
+            nginx-*/**
 
       - name: Build module sources for CodeQL
         run: |
