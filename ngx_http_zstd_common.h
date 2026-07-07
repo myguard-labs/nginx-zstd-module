@@ -312,15 +312,17 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
 
 
 /*
- * ngx_http_zstd_ok()
+ * ngx_http_zstd_accepts()
  *
- * Returns NGX_OK if the request is a main request whose client advertises
- * acceptable zstd support (Accept-Encoding accepts "zstd" with q > 0, via
- * an explicit token or the "*" wildcard).
- * Sets r->gzip_tested / r->gzip_ok as side effects for Vary handling.
+ * Side-effect-free acceptance predicate: NGX_OK iff this is a main request
+ * whose client advertises acceptable zstd support (Accept-Encoding accepts
+ * "zstd" with q > 0, via an explicit token or the "*" wildcard). Does NOT
+ * touch r->gzip_tested / r->gzip_ok — callers that only need the decision
+ * (e.g. the static module, which must not suppress a gzip_static fallback
+ * before it even knows whether a .zst file exists) use this.
  */
 static ngx_int_t
-ngx_http_zstd_ok(ngx_http_request_t *r)
+ngx_http_zstd_accepts(ngx_http_request_t *r)
 {
     ngx_table_elt_t  *ae;
 
@@ -338,7 +340,30 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
      * "shorter than 'zstd'" fast-reject is no longer valid; an empty value
      * is still a decline (the walk below returns NGX_DECLINED).
      */
-    if (ngx_http_zstd_accept_encoding(&ae->value) != NGX_OK) {
+    return ngx_http_zstd_accept_encoding(&ae->value);
+}
+
+
+/*
+ * ngx_http_zstd_ok()
+ *
+ * As ngx_http_zstd_accepts(), but additionally latches r->gzip_tested /
+ * r->gzip_ok = 0 on a positive result, so a later gzip filter/handler
+ * declines and does not double-compress a response we are about to encode as
+ * zstd. Only the on-the-fly filter module uses this: it calls ngx_http_zstd_ok()
+ * at the point it commits to compressing (Content-Encoding: zstd is set
+ * immediately after), so latching gzip off here is always followed by an
+ * actual zstd encoding — the latch never strands a response with neither
+ * coding. The static module must NOT use this (see ngx_http_zstd_accepts()).
+ *
+ * ngx_inline: only the filter TU calls this; the static TU includes the header
+ * but uses ngx_http_zstd_accepts() instead, so a plain `static` definition
+ * trips -Werror=unused-function there. An inline definition is exempt.
+ */
+static ngx_inline ngx_int_t
+ngx_http_zstd_ok(ngx_http_request_t *r)
+{
+    if (ngx_http_zstd_accepts(r) != NGX_OK) {
         return NGX_DECLINED;
     }
 

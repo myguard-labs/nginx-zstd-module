@@ -600,3 +600,79 @@ Content-Encoding: zstd
 --- error_code: 200
 --- no_error_log
 [error]
+
+
+
+=== TEST 27: zstd_static "on" declining does not suppress the gzip fallback
+# Regression for the gzip-fallback latch. ngx_http_zstd_ok() latches
+# r->gzip_tested=1 / r->gzip_ok=0 as a side effect; the static handler
+# used to call it (before the .zst existence check), so when the .zst was
+# absent it declined but left gzip permanently marked "not ok" for the
+# request. A later gzip filter/handler then short-circuited on the cached
+# decision and served identity instead of gzip. The fix routes the static
+# decision through the side-effect-free ngx_http_zstd_accepts().
+#
+# Reproduces with the always-present gzip *filter* (no gzip_static needed):
+# request a plain file that has NO sibling .zst. zstd_static declines; the
+# core static handler serves it; the gzip filter must still compress it.
+# Pre-fix: Content-Encoding is absent (gzip suppressed). Post-fix: gzip.
+--- config
+    location /gz/ {
+        zstd_static on;
+        gzip on;
+        gzip_min_length 1;
+        gzip_types text/plain;
+        root html;
+    }
+--- user_files
+>>> gz/plain.txt
+gzip fallback body long enough to exceed gzip_min_length and actually compress padding padding padding padding
+--- request
+GET /gz/plain.txt
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+Content-Encoding: gzip
+--- error_code: 200
+--- no_error_log
+[error]
+
+
+
+=== TEST 28: zstd_static coexists with gzip_static; .gz still served
+# Interop guard, sibling of TEST 27 but for the gzip_static *module*.
+# NOTE: unlike the gzip *filter* (TEST 27), gzip_static is a CONTENT_PHASE
+# handler. It is a built-in module, so its handler is pushed onto the
+# content-phase array before the dynamically-loaded zstd_static handler and
+# runs FIRST -- it serves the .gz before zstd_static ever runs, so the
+# ngx_http_zstd_ok() latch could not suppress it even on the pre-fix code.
+# (Verified: this test passes on both pre-fix and the fixed tree; the real
+# latch regression is covered by TEST 27 via the post-content gzip filter.)
+# Kept as a coexistence contract: with both directives on and a .gz but no
+# .zst present, zstd_static declines and gzip_static serves the .gz -- the
+# two static handlers must not fight over the request.
+#
+# The request has NO sibling .zst (so zstd_static declines) but DOES have a
+# real gzip-compressed plain.txt.gz (so gzip_static must serve it).
+--- config
+    location /gzs/ {
+        zstd_static on;
+        gzip_static on;
+        root html;
+    }
+--- user_files eval
+my $body = "gzip_static fallback body long enough to matter " x 4;
+my $gz;
+require IO::Compress::Gzip;
+IO::Compress::Gzip::gzip(\$body => \$gz)
+    or die "gzip failed: $IO::Compress::Gzip::GzipError";
+">>> gzs/plain.txt\n$body>>> gzs/plain.txt.gz\n$gz";
+--- request
+GET /gzs/plain.txt
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+Content-Encoding: gzip
+--- error_code: 200
+--- no_error_log
+[error]

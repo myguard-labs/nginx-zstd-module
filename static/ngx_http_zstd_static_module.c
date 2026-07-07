@@ -120,7 +120,15 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     }
 
     if (zscf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
-        rc = ngx_http_zstd_ok(r);
+        /*
+         * Side-effect-free predicate, NOT ngx_http_zstd_ok(): the latter
+         * latches r->gzip_ok = 0, which would suppress a gzip_static / gzip
+         * fallback for THIS request even when we go on to decline below
+         * (e.g. the .zst file is absent). We only decide here; when we
+         * actually serve the .zst the response carries Content-Encoding: zstd,
+         * which makes the gzip filter decline on its own.
+         */
+        rc = ngx_http_zstd_accepts(r);
 
     } else {
         rc = NGX_OK;
