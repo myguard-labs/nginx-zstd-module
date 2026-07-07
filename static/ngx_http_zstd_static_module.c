@@ -251,7 +251,17 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * fall back to a read+lseek pair that would mutate the shared fd
      * offset. Every modern POSIX target has it; this guard is
      * essentially a build-time tripwire.
+     *
+     * Skipped when the file was opened with O_DIRECT (of.is_directio, set by
+     * ngx_open_cached_file when "directio <size>" is configured and the file
+     * meets the threshold). An O_DIRECT read requires the buffer, offset and
+     * length all aligned to the device block size; this deliberately tiny,
+     * unaligned 4-byte pread would fail with EINVAL on every request, wrongly
+     * declining the .zst and spamming NGX_LOG_CRIT. The probe is only a
+     * best-effort corruption guard, so forgoing it under directio is the
+     * correct trade — the file is still served, just without the sanity check.
      */
+    if (!of.is_directio) {
     if (of.size < 4) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "zstd static: \"%s\" too small to be a zstd frame "
@@ -289,6 +299,11 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                           (ngx_uint_t) magic[2], (ngx_uint_t) magic[3]);
             return NGX_DECLINED;
         }
+    }
+    } else {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+                       "zstd static: skipping magic probe on directio "
+                       "file \"%s\" (O_DIRECT alignment)", path.data);
     }
 #endif /* NGX_HAVE_PREAD */
 
