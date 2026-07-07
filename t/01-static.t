@@ -570,3 +570,33 @@ Accept-Encoding: gzip
 Vary: Accept-Encoding
 --- no_error_log
 [error]
+
+
+
+=== TEST 26: zstd_static serves a .zst under directio without a failed pread
+# Regression for the O_DIRECT magic-probe bug. With "directio" active the
+# open_file_cache opens the .zst with O_DIRECT; the 4-byte, unaligned
+# magic pread() then fails EINVAL, wrongly declining every .zst above the
+# threshold and spamming NGX_LOG_CRIT. The fix skips the probe when
+# of.is_directio. Assert the precompressed frame is still served (200 +
+# Content-Encoding: zstd) and no CRIT/[error] appears.
+#
+# NOTE: O_DIRECT support is filesystem-dependent (tmpfs may not honour it),
+# so this deterministically catches the "declined + CRIT" regression only
+# where O_DIRECT actually engages; everywhere else it still asserts correct
+# serving. directio 1 = every file >= 1 byte is eligible (test.zst is 3717B).
+--- config
+    location /test {
+        zstd_static on;
+        directio 1;
+        root ../../t/suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- error_code: 200
+--- no_error_log
+[error]
