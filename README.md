@@ -3,6 +3,7 @@
 [![Fuzzing](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/fuzzing.yml)
 [![Valgrind](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/valgrind.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/valgrind.yml)
 [![CI Deep](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-deep.yml)
+[![CodeQL](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/codeql.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/codeql.yml)
 
 📖 **Background reading:** 
 - [zstd nginx module: what it does, bugs fixed](https://deb.myguard.nl/2026/05/zstd-nginx-module-what-it-does-bugs-fixed/)
