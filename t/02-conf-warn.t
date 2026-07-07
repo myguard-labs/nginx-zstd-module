@@ -74,3 +74,41 @@ GET /paired
 Accept-Encoding: zstd
 --- no_error_log eval
 [qr/zstd_bypass_vary.*without/, qr/\[error\]/]
+
+
+
+=== TEST 3: zstd_static rejects an invalid enum value cleanly
+# Regression for the missing ngx_null_string sentinel in the
+# ngx_http_zstd_static[] ngx_conf_enum_t array. ngx_conf_set_enum_slot()
+# scans until name.len == 0; without the terminating { ngx_null_string, 0 }
+# an unmatched value walked off the array end (OOB read, wild-pointer
+# ngx_strcasecmp -> possible crash / ASAN abort). With the sentinel an
+# unknown value is a clean "invalid value" config error. The ASAN CI job
+# runs this binary, so a re-introduced OOB read aborts here.
+--- config
+    location /bad {
+        zstd_static maybe;
+        root html;
+    }
+--- must_die
+--- error_log
+invalid value "maybe"
+--- no_error_log
+[alert]
+
+
+
+=== TEST 4: zstd_static accepts the last valid enum value ("always")
+# Positive counterpart: the sentinel must not shorten the valid range.
+# "always" is the final real entry, immediately before the sentinel — it
+# still parses and loads.
+--- config
+    location /ok {
+        zstd_static always;
+        root html;
+    }
+--- request
+GET /ok/nope
+--- error_code: 404
+--- no_error_log
+invalid value

@@ -32,6 +32,7 @@ static ngx_conf_enum_t  ngx_http_zstd_static[] = {
     { ngx_string("off"), NGX_HTTP_ZSTD_STATIC_OFF },
     { ngx_string("on"), NGX_HTTP_ZSTD_STATIC_ON },
     { ngx_string("always"), NGX_HTTP_ZSTD_STATIC_ALWAYS },
+    { ngx_null_string, 0 }
 };
 
 
