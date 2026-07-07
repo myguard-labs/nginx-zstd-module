@@ -70,7 +70,7 @@ wget -q "https://nginx.org/download/${tarball}.asc" -O "${tarball}.asc"
 gnupghome="$(mktemp -d)"
 export GNUPGHOME="$gnupghome"
 chmod 700 "$gnupghome"
-for key in nginx_signing mdounin maxim sb thresh pluknet; do
+for key in nginx_signing mdounin maxim sb thresh pluknet arut; do
     wget -q "https://nginx.org/keys/${key}.key" -O - 2>/dev/null \
         | gpg --quiet --import 2>/dev/null || true
 done
