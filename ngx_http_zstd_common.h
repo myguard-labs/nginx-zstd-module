@@ -211,6 +211,19 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
         while (p < end && (*p == ' ' || *p == '\t')) {
             p++;
         }
+
+        /*
+         * After the OWS that may trail any parameter (its q-specific
+         * check above only catches junk BEFORE this OWS skip, e.g.
+         * "q=1x"), only ';' (another parameter), ',' (next element), or
+         * end may follow -- anything else is trailing junk the loop's own
+         * "while (*p == ';')" condition would otherwise silently accept
+         * as "no more parameters" instead of rejecting (e.g.
+         * "zstd;q=1 garbage" previously parsed as zstd;q=1).
+         */
+        if (p < end && *p != ';' && *p != ',') {
+            return -1;
+        }
     }
 
     return q;
