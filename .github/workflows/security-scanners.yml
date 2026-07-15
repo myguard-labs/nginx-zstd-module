@@ -53,6 +53,15 @@ jobs:
           ver=$(curl -fsSL https://nginx.org/en/download.html \
             | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
           wget -q "https://nginx.org/download/nginx-${ver}.tar.gz"
+          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz.asc" -O "nginx-${ver}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in "$GITHUB_WORKSPACE"/tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${ver}.tar.gz.asc" "nginx-${ver}.tar.gz"
+          rm -rf "$gnupghome"
           tar -xzf "nginx-${ver}.tar.gz"; cd "nginx-${ver}"
           CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
           echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
