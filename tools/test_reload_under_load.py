@@ -128,7 +128,7 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
     raise RuntimeError(f"nothing listening on 127.0.0.1:{port}")
 
 
-def one(port: int, rid: int, zstd_bin: str) -> None:
+def one(port: int, rid: int, zstd_bin: str, dict_path: pathlib.Path) -> None:
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/r/{rid}",
         headers={"Accept-Encoding": "zstd",
@@ -141,8 +141,14 @@ def one(port: int, rid: int, zstd_bin: str) -> None:
         blob = resp.read()
     if blob[:4] != b"\x28\xb5\x2f\xfd":
         raise RuntimeError(f"rid={rid}: no zstd magic")
-    r = subprocess.run([zstd_bin, "-dq", "-c"], input=blob,
-                       capture_output=True)
+    # nginx.conf below sets zstd_dict_file, so every response is compressed
+    # against that dictionary (ZSTD_CCtx_refCDict in the filter module) --
+    # the decoder needs the same dictionary via -D, or libzstd correctly
+    # rejects the frame as "Data corruption detected" even though nothing is
+    # actually corrupt. Omitting -D here previously made this test fail on
+    # every run regardless of reload timing (any response, any size).
+    r = subprocess.run([zstd_bin, "-dq", "-c", "-D", str(dict_path)],
+                       input=blob, capture_output=True)
     if r.returncode != 0:
         raise RuntimeError(f"rid={rid}: zstd -d failed: "
                            + r.stderr.decode("utf-8", "replace"))
@@ -235,7 +241,7 @@ http {{
                             rid = counter["n"]
                             counter["n"] += 1
                         try:
-                            one(args.port, rid, args.zstd_bin)
+                            one(args.port, rid, args.zstd_bin, dict_path)
                         except Exception as e:  # noqa: BLE001
                             failures.append(str(e))
 
