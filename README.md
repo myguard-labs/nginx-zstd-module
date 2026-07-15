@@ -5,7 +5,7 @@
 [![CI Deep](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-deep.yml)
 [![CodeQL](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/codeql.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/codeql.yml)
 
-📖 **Background reading:** 
+📖 **Background reading:**
 - [zstd nginx module: what it does, bugs fixed](https://deb.myguard.nl/2026/05/zstd-nginx-module-what-it-does-bugs-fixed/)
 - [nginx zstd vs brotli vs zlib-ng — a compression comparison](https://deb.myguard.nl/2026/05/nginx-zstd-vs-brotli-vs-zlib-ng-compression/)
 
@@ -13,7 +13,7 @@
 
 An nginx module for [Zstandard (zstd)](https://facebook.github.io/zstd/) compression. Zstandard typically achieves better compression ratios than gzip at comparable or faster speeds, making it a good choice for reducing transmitted response sizes.
 
-This is a hardened fork: every build is exercised against **nginx mainline and [Angie](https://angie.software/)**, the full test suite runs under **ASAN/UBSAN**, the `Accept-Encoding` parser is **continuously fuzzed**, and flawfinder/semgrep/clang-tidy run on every change (see the badges above and [Testing & CI](#testing--ci)).
+This is a hardened fork: every push/PR is exercised against **nginx mainline**, the full test suite runs under **ASAN/UBSAN**, the `Accept-Encoding` parser is **continuously fuzzed**, flawfinder/semgrep/clang-tidy run on every change, and a monthly deep pass additionally covers **nginx stable** and **[Angie](https://angie.software/)** (see the badges above and [Testing & CI](#testing--ci)).
 
 # Table of Contents
 
@@ -173,7 +173,7 @@ load_module modules/ngx_http_zstd_static_module.so;
 
 | Component | Minimum | Recommended | CI-verified |
 |---|---|---|---|
-| **nginx** | 1.9.11 (first `--add-dynamic-module` release) | latest mainline / stable | **1.31.0 mainline** |
+| **nginx** | 1.9.11 (first `--add-dynamic-module` release) | latest mainline / stable | **latest mainline** (resolved dynamically every CI run, not pinned) + **stable** and **Angie**, both pinned in CI Deep's monthly matrix |
 | **Angie** | 1.x | latest | **1.11.5** |
 | **libzstd** | **1.4.0** | **≥ 1.5.6** | 1.5.x (full suite) + **1.4.x** fallback-paths build |
 | **OS** | Linux/BSD/RHEL-family | — | Ubuntu (GitHub runners) |
@@ -843,16 +843,19 @@ log_format zstd '$request in=$zstd_bytes_in out=$zstd_bytes_out '
 
 # Testing & CI
 
-Five workflows guard the module (badges at the top): four gate every
-push & PR, and CI Deep runs the exhaustive monthly pass:
+Six workflows guard the module (badges at the top): five gate every
+push & PR, and CI Deep runs the exhaustive monthly pass. A seventh,
+Bump, runs weekly but only opens a version-bump PR — it does not gate
+anything itself.
 
 | Workflow | Cadence | What it does |
 |---|---|---|
-| **Build & Test** | every push & PR | Compiles the module against **nginx 1.31.0 mainline** and **Angie 1.11.5** with strict `-Werror` flags, then runs the full test suite: 46 `Test::Nginx::Socket` filter tests, 21 static-module tests, and end-to-end Python smoke tests (truncation, `Vary`, boundary sizes, repeated/concurrent requests, terminal-frame, the proxy-unbuffered and compression-matrix regressions, per-request CCtx isolation, reload-under-load, `zstd_long`/LDM, `$zstd_ratio`). A separate matrix entry rebuilds against **libzstd 1.4.x** (from source) to exercise the `< 1.5.6` and `≥ 1.4.0` fallback paths, and a parallel job rebuilds with **ASAN+UBSAN** and re-runs the smoke tests plus a `zstd_dict_file` config-reload leak check. A 10-minute mixed-load soak under ASAN+UBSAN runs on the weekly schedule. |
+| **Build & Test** | every push & PR | Compiles the module against **nginx mainline** (resolved at run time — see [Compatibility](#compatibility)) with strict `-Werror` flags, then runs the full test suite: 79 `Test::Nginx::Socket` filter tests, 28 static-module tests, 4 config-warning tests, and end-to-end Python smoke tests (truncation, `Vary`, boundary sizes, repeated/concurrent requests, terminal-frame, the proxy-unbuffered and compression-matrix regressions, per-request CCtx isolation, reload-under-load, `zstd_long`/LDM, `$zstd_ratio`). A separate matrix entry rebuilds against **libzstd 1.4.x** (from source) to exercise the `< 1.5.6` and `≥ 1.4.0` fallback paths, and a parallel job rebuilds with **ASAN+UBSAN** and re-runs the smoke tests plus a `zstd_dict_file` config-reload leak check. **Angie is not built here** — see CI Deep below, the only workflow that exercises it. |
 | **Security scanners** | every push & PR | flawfinder, clang-tidy (`cert-*`, `clang-analyzer-security.*`), and semgrep, with the reports uploaded as build artifacts. |
 | **Fuzzing** | every push & PR | A 120-second libFuzzer regression run for the `ngx_http_zstd_accept_encoding()` / `ngx_http_zstd_eval_qvalue()` RFC 9110 `Accept-Encoding`/q-value parser. The fuzz target is sliced from the shipped header at build time, so there is no copy drift. See [`fuzz/README.md`](fuzz/README.md). |
 | **Valgrind** | every push & PR | A 60-second Memcheck-lite soak against a debug nginx build, catching uninitialised-value reads and leaks that ASAN cannot. |
-| **CI Deep** | monthly + manual dispatch | The exhaustive run: hours-long fuzzing on the same target, full Memcheck and Helgrind soaks (a valgrind soak is ~20–50× slower than native), and the same security scanners. |
+| **CodeQL** | every push & PR + monthly | GitHub's semantic C/C++ analysis (`security-extended` query pack) over the filter/static module sources. |
+| **CI Deep** | monthly + manual dispatch | The exhaustive run: a `build-flavors` matrix that compiles and runs the full `Test::Nginx::Socket` suite against **nginx mainline, nginx stable, and Angie** (the only workflow that builds Angie at all), hours-long fuzzing on the same target, full Memcheck and Helgrind soaks (a valgrind soak is ~20–50× slower than native), and the same security scanners. |
 
 The test suite includes a dedicated regression test for every known
 historical bug class:

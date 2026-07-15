@@ -24,8 +24,8 @@ class DetectPackageLayoutTests(unittest.TestCase):
         snippet.write_text(
             "\n".join(
                 [
-                    f"load_module modules/ngx_http_zstd_filter_module.so;",
-                    f"load_module modules/ngx_http_zstd_static_module.so;",
+                    "load_module modules/ngx_http_zstd_filter_module.so;",
+                    "load_module modules/ngx_http_zstd_static_module.so;",
                 ]
             ),
             encoding="utf-8",

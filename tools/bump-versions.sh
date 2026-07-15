@@ -46,9 +46,9 @@ cd "$(dirname "$0")/.."
 latest_nginx_stable() {
     local page
     page="$(curl -fsSL https://nginx.org/en/download.html)"
-    echo "${page#*"Stable version"}" \
-        | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' | head -1 \
-        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
+    echo "${page#*"Stable version"}" |
+        grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' | head -1 |
+        grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
 }
 
 latest_angie() {
@@ -154,7 +154,7 @@ PYEOF
 
 bump_angie_sha256_pin() {
     local old="$1" new="$2" digest="$3"
-    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0  # already pinned
+    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0 # already pinned
     # Insert the new pin right after the table's opening line; leave old
     # entries in place (ci-build.sh keys by version, older callers still work).
     sed -i "/declare -A ANGIE_SHA256=(/a\\    [\"${new}\"]=\"${digest}\"" tools/ci-build.sh
@@ -163,7 +163,7 @@ bump_angie_sha256_pin() {
 
 bump_nginx_sha256_pin() {
     local old="$1" new="$2" digest="$3"
-    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0  # already pinned
+    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0 # already pinned
     sed -i "/declare -A NGINX_SHA256=(/a\\    [\"${new}\"]=\"${digest}\"" tools/ci-build.sh
     CHANGED=1
 }

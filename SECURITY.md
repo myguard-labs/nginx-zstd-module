@@ -79,4 +79,5 @@ bash fuzz/build.sh && ./fuzz/fuzz_accept_encoding -max_total_time=60 fuzz/corpus
 ```
 
 See [`.github/workflows/`](.github/workflows/) (build-test, codeql,
-security-scanners, fuzzing) and [`AGENTS.md`](AGENTS.md).
+security-scanners, fuzzing, valgrind, ci-deep, bump) and the
+[Testing & CI](README.md#testing--ci) section of the README.

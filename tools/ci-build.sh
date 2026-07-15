@@ -39,7 +39,7 @@ FLAVOR="${1:-nginx}"
 VERSION="${2:-}"
 
 case "$FLAVOR" in
-    nginx|angie) ;;
+    nginx | angie) ;;
     *)
         echo "ERROR: unsupported flavor: $FLAVOR (want: nginx|angie)" >&2
         exit 2
@@ -53,9 +53,9 @@ if [ -z "$VERSION" ]; then
     fi
     # Resolve the current mainline release; nginx.org only keeps the newest
     # mainline tarball, so a hardcoded version eventually 404s.
-    VERSION="$(curl -fsSL https://nginx.org/en/download.html \
-        | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-        | sort -V | tail -1)"
+    VERSION="$(curl -fsSL https://nginx.org/en/download.html |
+        grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' |
+        sort -V | tail -1)"
     if [ -z "$VERSION" ]; then
         echo "ERROR: could not resolve mainline nginx version from nginx.org" >&2
         exit 1
@@ -186,8 +186,8 @@ else
         echo "✓ sha256 verified for ${DIR}.tar.gz"
     else
         echo "WARNING: no pinned sha256 for angie $VERSION -- add one to" \
-             "ANGIE_SHA256 in tools/ci-build.sh (downloaded tarball is" \
-             "UNVERIFIED)" >&2
+            "ANGIE_SHA256 in tools/ci-build.sh (downloaded tarball is" \
+            "UNVERIFIED)" >&2
     fi
 fi
 

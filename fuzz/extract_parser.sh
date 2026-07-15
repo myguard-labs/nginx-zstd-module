@@ -39,18 +39,18 @@ awk '
         print
         if ($0 == "}") { capture = 0 }
     }
-' "$HEADER" > "$OUT"
+' "$HEADER" >"$OUT"
 
-if ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" \
-   || ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" \
-   || ! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" \
-   || [ "$(tail -n1 "$OUT")" != "}" ]; then
+if ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" ||
+    ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" ||
+    ! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" ||
+    [ "$(tail -n1 "$OUT")" != "}" ]; then
     echo "✗ failed to extract the Accept-Encoding parser from $HEADER" >&2
     echo "  (header layout changed? update extract_parser.sh)" >&2
     rm -f "$OUT"
     exit 1
 fi
 
-LINES=$(wc -l < "$OUT")
+LINES=$(wc -l <"$OUT")
 echo "✓ extracted ngx_http_zstd_skip_quoted() + ngx_http_zstd_eval_qvalue()" \
-     "+ ngx_http_zstd_accept_encoding() — $LINES lines -> $OUT"
+    "+ ngx_http_zstd_accept_encoding() — $LINES lines -> $OUT"

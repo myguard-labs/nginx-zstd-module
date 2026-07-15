@@ -2,12 +2,11 @@ name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron + on-demand only, NEVER on PR.
 # The fast PR-time gates live in standalone workflows: fuzzing.yml (120s fuzz
-# regression), valgrind.yml (60s memcheck-lite soak) and security-scanners.yml
-# (scanners) run on every PR/push; THIS file stays the exhaustive monthly +
-# workflow_dispatch run. codeql.yml is dropped entirely:
-# CodeQL / the GitHub Security tab is GitHub-Advanced-Security only and does
-# nothing on a private repo, so the SARIF-upload path is removed too — the
-# scanners still run and GATE on findings, they just don't upload.
+# regression), valgrind.yml (60s memcheck-lite soak), security-scanners.yml
+# (scanners), and codeql.yml (semantic analysis) all run on every PR/push;
+# THIS file stays the exhaustive monthly + workflow_dispatch run: the
+# multi-flavor build matrix (mainline/stable/angie) plus hours-long fuzzing
+# and full Memcheck/Helgrind soaks that would blow the PR-gate time budget.
 #
 # Jobs: build-flavors (nginx mainline/stable + angie) · fuzz (14400s/target) ·
 #   memcheck soak · helgrind soak · scanners.
