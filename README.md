@@ -845,8 +845,8 @@ log_format zstd '$request in=$zstd_bytes_in out=$zstd_bytes_out '
 
 Six workflows guard the module (badges at the top): five gate every
 push & PR, and CI Deep runs the exhaustive monthly pass. A seventh,
-Bump, runs weekly but only opens a version-bump PR — it does not gate
-anything itself.
+[`bump.yml`](.github/workflows/bump.yml) (Bump), runs weekly but only
+opens a version-bump PR — it does not gate anything itself.
 
 | Workflow | Cadence | What it does |
 |---|---|---|
@@ -856,6 +856,7 @@ anything itself.
 | **Valgrind** | every push & PR | A 60-second Memcheck-lite soak against a debug nginx build, catching uninitialised-value reads and leaks that ASAN cannot. |
 | **CodeQL** | every push & PR + monthly | GitHub's semantic C/C++ analysis (`security-extended` query pack) over the filter/static module sources. |
 | **CI Deep** | monthly + manual dispatch | The exhaustive run: a `build-flavors` matrix that compiles and runs the full `Test::Nginx::Socket` suite against **nginx mainline, nginx stable, and Angie** (the only workflow that builds Angie at all), hours-long fuzzing on the same target, full Memcheck and Helgrind soaks (a valgrind soak is ~20–50× slower than native), and the same security scanners. |
+| **Bump** ([`bump.yml`](.github/workflows/bump.yml)) | weekly + manual dispatch | Checks nginx.org/angie.software for newer nginx-stable/Angie releases than what's pinned in CI Deep's `build-flavors` matrix, and opens a PR (never pushes directly to protected `master`) with the updated pin + a freshly-verified sha256 digest. Does not gate merges itself — normal required checks review the PR. |
 
 The test suite includes a dedicated regression test for every known
 historical bug class:

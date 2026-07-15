@@ -139,6 +139,20 @@ jobs:
           python3 -m unittest -v test_test_encoding test_test_package_artifact
           echo "✓ Python harness unit tests passed"
 
+      # Audit sha e289021 F1/F7 regression coverage: no nginx build needed,
+      # so these run here rather than in the build/tests jobs.
+      - name: fuzz_seconds dispatch-input validation (F1 regression)
+        run: bash "$GITHUB_WORKSPACE"/tools/test_fuzz_seconds_validation.sh
+
+      - name: README/SECURITY/CONTRIBUTING vs live workflows (F7 regression)
+        run: bash "$GITHUB_WORKSPACE"/tools/test_docs_ci_drift.sh
+
+      # Audit sha e289021 F2/F3 regression coverage: exercises ci-build.sh's
+      # mv-guard and provenance checks directly (offline cases + one live
+      # clean-root angie build).
+      - name: ci-build.sh clean-root + provenance regressions (F2/F3)
+        run: bash "$GITHUB_WORKSPACE"/tools/test_ci_build_provenance.sh
+
       - name: Shell script linting (shellcheck)
         run: |
           # Gate on error-severity findings (real bugs); style/info noise does
