@@ -20,7 +20,6 @@ dictionary and a ``zstd_window_log 15`` cap and asserts:
 import argparse
 import http.server
 import pathlib
-import shutil
 import socket
 import socketserver
 import struct

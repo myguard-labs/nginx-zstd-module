@@ -58,8 +58,12 @@ Your PR merges when **all** checks are green. If a gate fails and you
 believe the gate is wrong, say so in the PR — with evidence, not vibes.
 
 Before pushing a parser or fuzz-harness change, fuzz locally first:
-`fuzz/build.sh` compiles every `fuzz/fuzz_*.c` with `-Werror`, so a stale
-harness signature fails right there instead of in CI.
+`fuzz/build.sh` compiles the target under ASAN+UBSAN
+(`-fsanitize=address,undefined`), so a stale harness signature or a
+sanitizer-caught bug surfaces right there instead of in CI. (The
+module's own C sources are compiled `-Werror` — see
+[`build-test.yml`](.github/workflows/build-test.yml) — the fuzz
+harness itself is not.)
 
 ## Coding conventions
 

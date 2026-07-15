@@ -12,15 +12,23 @@
 # built under /tmp and deleted it on exit. NO_CACHE=1 forces a from-scratch
 # rebuild of a given flavor/version pair.
 #
-# nginx tarballs are verified via PGP (nginx.org's own recommended method,
-# https://nginx.org/en/pgp_keys.html) — no sha256sum file is published for
-# them. angie.software does not publish a PGP signature for release tarballs,
-# so angie tarballs are instead checked against a pinned sha256 recorded
-# below, computed once from an HTTPS fetch (same approach the sibling
-# nginx-skeleton-module repo uses for both flavors). A version not in the
-# table still builds (this script tracks moving releases; refusing to build
-# an unpinned version would break every future version bump until someone
-# updates the table first) but prints a loud warning so the gap is visible.
+# nginx tarballs are verified via PGP against the signer keys VENDORED in
+# tools/keys/ (committed to this repo) — never fetched from nginx.org at CI
+# time. Bootstrapping the verification keys from the same origin that serves
+# the tarball+signature gives an origin compromise the ability to substitute
+# all three (audit sha e289021 F3); a key rotation is a reviewed PR that adds
+# a new file under tools/keys/, not a runtime fetch. For a statically-pinned
+# nginx version (nginx-stable in ci-deep.yml's matrix) the sha256 is ALSO
+# checked against NGINX_SHA256 below, same as angie -- floating mainline
+# (resolved at CI run time, see build-test.yml's `resolve` job) has no static
+# pin and relies on PGP alone. angie.software does not publish a PGP
+# signature for release tarballs, so angie tarballs are checked by sha256
+# only, pinned in ANGIE_SHA256 below (computed once from an HTTPS fetch, same
+# approach the sibling nginx-skeleton-module repo uses for both flavors). A
+# version not in a pin table still builds (this script tracks moving
+# releases; refusing to build an unpinned version would break every future
+# version bump until someone updates the table first) but prints a loud
+# warning so the gap is visible.
 
 set -euo pipefail
 
@@ -31,7 +39,7 @@ FLAVOR="${1:-nginx}"
 VERSION="${2:-}"
 
 case "$FLAVOR" in
-    nginx|angie) ;;
+    nginx | angie) ;;
     *)
         echo "ERROR: unsupported flavor: $FLAVOR (want: nginx|angie)" >&2
         exit 2
@@ -45,9 +53,9 @@ if [ -z "$VERSION" ]; then
     fi
     # Resolve the current mainline release; nginx.org only keeps the newest
     # mainline tarball, so a hardcoded version eventually 404s.
-    VERSION="$(curl -fsSL https://nginx.org/en/download.html \
-        | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-        | sort -V | tail -1)"
+    VERSION="$(curl -fsSL https://nginx.org/en/download.html |
+        grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' |
+        sort -V | tail -1)"
     if [ -z "$VERSION" ]; then
         echo "ERROR: could not resolve mainline nginx version from nginx.org" >&2
         exit 1
@@ -58,6 +66,15 @@ fi
 declare -A ANGIE_SHA256=(
     ["1.11.5"]="b5f297c6df2a74b9d0091a7cdd747fffd2d0e1d0be43632da61c1c7539db2043"
 )
+
+# --- pinned sha256 for statically-pinned nginx-stable versions we've
+# actually verified (floating mainline, resolved at CI run time, has no
+# entry here and relies on the PGP check alone) ---
+declare -A NGINX_SHA256=(
+    ["1.30.3"]="e5823dc6f45610993def93ebf6cfce68264af4958c77e874b7d20f3709001b8f"
+)
+
+KEYRING_DIR="$SCRIPT_DIR/keys"
 
 ROOT="${BUILD_ROOT:-$MODULE_DIR/.build}"
 NO_CACHE="${NO_CACHE:-0}"
@@ -100,56 +117,90 @@ echo ""
 if [ ! -f "$TARBALL" ]; then
     wget -q -O "$TARBALL" "$URL"
     echo "✓ Downloaded ${DIR}.tar.gz"
-
-    if [ "$FLAVOR" = "nginx" ]; then
-        # Always fetch over HTTPS and verify the detached PGP signature
-        # against the nginx release-signing keys before unpacking. A plain
-        # HTTP download lets a network attacker swap the source that we then
-        # configure and compile.
-        wget -q "${URL}.asc" -O "${TARBALL}.asc"
-
-        gnupghome="$(mktemp -d)"
-        export GNUPGHOME="$gnupghome"
-        chmod 700 "$gnupghome"
-        for key in nginx_signing mdounin maxim sb thresh pluknet arut; do
-            wget -q "https://nginx.org/keys/${key}.key" -O - 2>/dev/null \
-                | gpg --quiet --import 2>/dev/null || true
-        done
-
-        if gpg --quiet --verify "${TARBALL}.asc" "$TARBALL"; then
-            echo "✓ PGP signature verified for ${DIR}.tar.gz"
-        else
-            echo "✗ PGP signature verification FAILED for ${DIR}.tar.gz" >&2
-            rm -rf "$gnupghome" "$TARBALL" "${TARBALL}.asc"
-            exit 1
-        fi
-        rm -rf "$gnupghome"
-        unset GNUPGHOME
-    else
-        EXPECTED="${ANGIE_SHA256[$VERSION]:-}"
-        if [ -n "$EXPECTED" ]; then
-            ACTUAL="$(sha256sum "$TARBALL" | awk '{print $1}')"
-            if [ "$ACTUAL" != "$EXPECTED" ]; then
-                echo "✗ sha256 mismatch for ${DIR}.tar.gz" >&2
-                echo "  expected: $EXPECTED" >&2
-                echo "  actual:   $ACTUAL" >&2
-                rm -f "$TARBALL"
-                exit 1
-            fi
-            echo "✓ sha256 verified for ${DIR}.tar.gz"
-        else
-            echo "WARNING: no pinned sha256 for angie $VERSION -- add one to" \
-                 "ANGIE_SHA256 in tools/ci-build.sh (downloaded tarball is" \
-                 "UNVERIFIED)" >&2
-        fi
-    fi
 else
     echo "✓ Using cached ${DIR}.tar.gz"
 fi
 
+# Verification always runs, cache hit or fresh download -- a cached tarball
+# is exactly as untrusted as a freshly-downloaded one until re-checked
+# (audit sha e289021 F3: "cached archives are not reverified" was a gap in
+# the pre-fix version of this script).
+if [ "$FLAVOR" = "nginx" ]; then
+    # Always fetch over HTTPS and verify the detached PGP signature against
+    # the nginx release-signing keys VENDORED in tools/keys/ (not fetched
+    # from nginx.org, which also serves the tarball+signature -- see the
+    # file header). A plain HTTP download lets a network attacker swap the
+    # source that we then configure and compile.
+    if [ ! -f "${TARBALL}.asc" ]; then
+        wget -q "${URL}.asc" -O "${TARBALL}.asc"
+    fi
+
+    gnupghome="$(mktemp -d)"
+    export GNUPGHOME="$gnupghome"
+    chmod 700 "$gnupghome"
+    shopt -s nullglob
+    keyfiles=("$KEYRING_DIR"/*.key)
+    shopt -u nullglob
+    if [ ${#keyfiles[@]} -eq 0 ]; then
+        echo "✗ no vendored keys found in $KEYRING_DIR" >&2
+        rm -rf "$gnupghome" "$TARBALL" "${TARBALL}.asc"
+        exit 1
+    fi
+    for keyfile in "${keyfiles[@]}"; do
+        gpg --quiet --import "$keyfile" 2>/dev/null
+    done
+
+    if gpg --quiet --verify "${TARBALL}.asc" "$TARBALL"; then
+        echo "✓ PGP signature verified for ${DIR}.tar.gz"
+    else
+        echo "✗ PGP signature verification FAILED for ${DIR}.tar.gz" >&2
+        rm -rf "$gnupghome" "$TARBALL" "${TARBALL}.asc"
+        exit 1
+    fi
+    rm -rf "$gnupghome"
+    unset GNUPGHOME
+
+    EXPECTED="${NGINX_SHA256[$VERSION]:-}"
+    if [ -n "$EXPECTED" ]; then
+        ACTUAL="$(sha256sum "$TARBALL" | awk '{print $1}')"
+        if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "✗ sha256 mismatch for ${DIR}.tar.gz" >&2
+            echo "  expected: $EXPECTED" >&2
+            echo "  actual:   $ACTUAL" >&2
+            rm -f "$TARBALL" "${TARBALL}.asc"
+            exit 1
+        fi
+        echo "✓ sha256 verified for ${DIR}.tar.gz"
+    fi
+else
+    EXPECTED="${ANGIE_SHA256[$VERSION]:-}"
+    if [ -n "$EXPECTED" ]; then
+        ACTUAL="$(sha256sum "$TARBALL" | awk '{print $1}')"
+        if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "✗ sha256 mismatch for ${DIR}.tar.gz" >&2
+            echo "  expected: $EXPECTED" >&2
+            echo "  actual:   $ACTUAL" >&2
+            rm -f "$TARBALL"
+            exit 1
+        fi
+        echo "✓ sha256 verified for ${DIR}.tar.gz"
+    else
+        echo "WARNING: no pinned sha256 for angie $VERSION -- add one to" \
+            "ANGIE_SHA256 in tools/ci-build.sh (downloaded tarball is" \
+            "UNVERIFIED)" >&2
+    fi
+fi
+
 if [ ! -d "$SRCDIR" ]; then
     tar -xzf "$TARBALL" -C "$ROOT"
-    mv "$ROOT/$DIR" "$SRCDIR"
+    # The tarball's top-level dir name ($DIR = "<flavor>-<version>") and our
+    # build-tree name ($SRCDIR) are the same string, so the extracted path
+    # IS already $SRCDIR -- moving it onto itself fails ("cannot move to a
+    # subdirectory of itself") on a clean root / NO_CACHE=1 run. Only mv if
+    # extraction actually landed somewhere else.
+    if [ "$ROOT/$DIR" != "$SRCDIR" ]; then
+        mv "$ROOT/$DIR" "$SRCDIR"
+    fi
 fi
 
 cd "$SRCDIR"

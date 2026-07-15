@@ -1975,3 +1975,47 @@ Content-Encoding: zstd
 Content-Type: text/wgsl
 --- no_error_log
 [error]
+
+
+
+=== TEST 78: qvalue followed by whitespace then trailing junk is malformed
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=1 garbage
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 79: qvalue followed by tab then trailing junk is malformed
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=0.5	junk
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]

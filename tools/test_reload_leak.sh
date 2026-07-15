@@ -27,9 +27,9 @@ trap cleanup EXIT
 mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/html"
 
 # A non-trivial dictionary so ZSTD_createCDict() actually allocates.
-head -c 8192 /dev/urandom | base64 > "$WORK/html/zstd.dict"
+head -c 8192 /dev/urandom | base64 >"$WORK/html/zstd.dict"
 
-cat > "$WORK/conf/nginx.conf" <<EOF
+cat >"$WORK/conf/nginx.conf" <<EOF
 daemon off;
 master_process on;
 worker_processes 1;
@@ -76,7 +76,8 @@ done
 # every cycle's pool cleanup (including the dict cleanup handler) runs.
 curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' "http://127.0.0.1:18099/"
 kill -QUIT "$NGINX_PID"
-wait "$NGINX_PID"; rc=$?
+wait "$NGINX_PID"
+rc=$?
 
 if [ -n "$(ls "$WORK"/logs/asan* 2>/dev/null || true)" ]; then
     echo "❌ ASAN reported a leak across $RELOADS reloads:"

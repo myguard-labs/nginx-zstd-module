@@ -15,15 +15,20 @@
 #     no static mainline pin in this repo to bump.
 #   - nginx STABLE pin  -- ci-deep.yml's build-flavors matrix (label: stable)
 #   - angie pin         -- ci-deep.yml's build-flavors matrix (label: angie)
-#   - ANGIE_SHA256       -- tools/ci-build.sh (nginx tarballs are PGP-verified
-#                            at build time instead, so no nginx sha256 table
-#                            exists to bump)
+#   - NGINX_SHA256       -- tools/ci-build.sh, nginx-stable only (verified
+#                            against the tarball's OWN PGP signature via the
+#                            vendored keys in tools/keys/ before the digest is
+#                            recorded, so a bad bump can't silently pin a
+#                            malicious tarball's hash -- floating mainline has
+#                            no entry here, see above)
+#   - ANGIE_SHA256       -- tools/ci-build.sh (angie.software publishes no
+#                            PGP signature, so sha256 is the only check)
 #
 # A version bump with a stale sha256 pin is worse than no pin (ci-build.sh
 # treats a missing pin as "print a warning", but a WRONG pin is a hard FATAL
-# for angie) -- so every angie version edit here is paired with a digest
-# computed from the exact tarball that version resolves to, never carried
-# over from a previous entry.
+# for a pinned version) -- so every stable/angie version edit here is paired
+# with a digest computed from the exact tarball that version resolves to,
+# never carried over from a previous entry.
 
 set -euo pipefail
 
@@ -41,9 +46,9 @@ cd "$(dirname "$0")/.."
 latest_nginx_stable() {
     local page
     page="$(curl -fsSL https://nginx.org/en/download.html)"
-    echo "${page#*"Stable version"}" \
-        | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' | head -1 \
-        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
+    echo "${page#*"Stable version"}" |
+        grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' | head -1 |
+        grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
 }
 
 latest_angie() {
@@ -81,7 +86,7 @@ echo "pinned: nginx stable=$CUR_STABLE angie=$CUR_ANGIE"
 
 CHANGED=0
 
-# --- sha256 helper (angie only -- nginx is PGP-verified at build time) ---
+# --- sha256 helpers ---
 sha256_for_angie() {
     local version="$1" url tmp digest
     url="https://download.angie.software/files/angie-${version}.tar.gz"
@@ -89,6 +94,41 @@ sha256_for_angie() {
     curl -fsSL "$url" -o "$tmp"
     digest="$(sha256sum "$tmp" | awk '{print $1}')"
     rm -f "$tmp"
+    echo "$digest"
+}
+
+# nginx-stable also gets its detached signature checked against the vendored
+# keyring (tools/keys/) before we trust the digest we're about to pin -- a
+# bump script that records a hash without checking provenance first would
+# just be moving the F3 trust gap here instead of fixing it.
+sha256_for_nginx_stable() {
+    local version="$1" url tmp digest gnupghome keyfiles
+    url="https://nginx.org/download/nginx-${version}.tar.gz"
+    tmp="$(mktemp)"
+    curl -fsSL "$url" -o "$tmp"
+    curl -fsSL "${url}.asc" -o "${tmp}.asc"
+
+    gnupghome="$(mktemp -d)"
+    GNUPGHOME="$gnupghome"
+    export GNUPGHOME
+    chmod 700 "$gnupghome"
+    shopt -s nullglob
+    keyfiles=(tools/keys/*.key)
+    shopt -u nullglob
+    for keyfile in "${keyfiles[@]}"; do
+        gpg --quiet --import "$keyfile" 2>/dev/null
+    done
+    if ! gpg --quiet --verify "${tmp}.asc" "$tmp" 2>/dev/null; then
+        rm -rf "$gnupghome" "$tmp" "${tmp}.asc"
+        unset GNUPGHOME
+        echo "FATAL: PGP verification failed for nginx-${version}.tar.gz -- refusing to pin an unverified digest" >&2
+        exit 1
+    fi
+    rm -rf "$gnupghome"
+    unset GNUPGHOME
+
+    digest="$(sha256sum "$tmp" | awk '{print $1}')"
+    rm -f "$tmp" "${tmp}.asc"
     echo "$digest"
 }
 
@@ -114,17 +154,27 @@ PYEOF
 
 bump_angie_sha256_pin() {
     local old="$1" new="$2" digest="$3"
-    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0  # already pinned
+    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0 # already pinned
     # Insert the new pin right after the table's opening line; leave old
     # entries in place (ci-build.sh keys by version, older callers still work).
     sed -i "/declare -A ANGIE_SHA256=(/a\\    [\"${new}\"]=\"${digest}\"" tools/ci-build.sh
     CHANGED=1
 }
 
+bump_nginx_sha256_pin() {
+    local old="$1" new="$2" digest="$3"
+    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0 # already pinned
+    sed -i "/declare -A NGINX_SHA256=(/a\\    [\"${new}\"]=\"${digest}\"" tools/ci-build.sh
+    CHANGED=1
+}
+
 if [ "$NEW_STABLE" != "$CUR_STABLE" ]; then
     echo "bump nginx stable: $CUR_STABLE -> $NEW_STABLE"
     if [ "$DRY_RUN" = 0 ]; then
+        DIGEST="$(sha256_for_nginx_stable "$NEW_STABLE")"
+        echo "  sha256 $DIGEST"
         bump_matrix_pin stable "$CUR_STABLE" "$NEW_STABLE"
+        bump_nginx_sha256_pin "$CUR_STABLE" "$NEW_STABLE" "$DIGEST"
     else
         CHANGED=1
     fi

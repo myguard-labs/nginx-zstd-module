@@ -275,6 +275,20 @@ jobs:
         if: steps.src-tarball.outputs.cache-hit != 'true'
         run: wget -q -O "${{ matrix.dir }}.tar.gz" "${{ matrix.url }}"
 
+      - name: Verify nginx tarball PGP signature
+        if: matrix.flavor == 'nginx'
+        run: |
+          set -euo pipefail
+          wget -q -O "${{ matrix.dir }}.tar.gz.asc" "${{ matrix.url }}.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "${{ matrix.dir }}.tar.gz.asc" "${{ matrix.dir }}.tar.gz"
+          rm -rf "$gnupghome"
+
       - name: Configure (full debug build)
         run: |
           tar -xzf "${{ matrix.dir }}.tar.gz"
@@ -425,6 +439,20 @@ jobs:
         if: steps.nginx-tarball-old.outputs.cache-hit != 'true'
         run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 
+      - name: Verify nginx tarball PGP signature
+        run: |
+          set -euo pipefail
+          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
+            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
+          rm -rf "$gnupghome"
+
       - name: Configure & build nginx with module against libzstd 1.4.x
         run: |
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
@@ -500,6 +528,20 @@ jobs:
       - name: Download nginx source tarball
         if: steps.nginx-tarball.outputs.cache-hit != 'true'
         run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        run: |
+          set -euo pipefail
+          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
+            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
+          rm -rf "$gnupghome"
 
       - name: Configure & build nginx with ASAN + UBSAN
         run: |
