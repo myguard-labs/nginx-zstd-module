@@ -149,7 +149,14 @@ fi
 
 if [ ! -d "$SRCDIR" ]; then
     tar -xzf "$TARBALL" -C "$ROOT"
-    mv "$ROOT/$DIR" "$SRCDIR"
+    # The tarball's top-level dir name ($DIR = "<flavor>-<version>") and our
+    # build-tree name ($SRCDIR) are the same string, so the extracted path
+    # IS already $SRCDIR -- moving it onto itself fails ("cannot move to a
+    # subdirectory of itself") on a clean root / NO_CACHE=1 run. Only mv if
+    # extraction actually landed somewhere else.
+    if [ "$ROOT/$DIR" != "$SRCDIR" ]; then
+        mv "$ROOT/$DIR" "$SRCDIR"
+    fi
 fi
 
 cd "$SRCDIR"
