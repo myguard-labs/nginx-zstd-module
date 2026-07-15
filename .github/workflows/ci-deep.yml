@@ -9,10 +9,19 @@ name: CI Deep
 # nothing on a private repo, so the SARIF-upload path is removed too — the
 # scanners still run and GATE on findings, they just don't upload.
 #
-# Jobs: fuzz (14400s/target) · memcheck soak · helgrind soak · scanners.
+# Jobs: build-flavors (nginx mainline/stable + angie) · fuzz (14400s/target) ·
+#   memcheck soak · helgrind soak · scanners.
 #   * memcheck AND helgrind run under tools/soak.sh, which already passes
 #     --suppressions=valgrind.suppress and --error-exitcode=99 for BOTH tools
 #     (see tools/soak.sh) — the drift-fix baseline for every module.
+#
+# build-flavors exists because build-test.yml (the fast PR gate) only builds
+# ONE pinned nginx version (mainline) — the module's README documents Angie
+# support and tracks nginx stable too, but nothing in CI actually built angie
+# or nginx stable until this job. It is here (monthly), not in the PR gate,
+# because each leg is a from-scratch configure+compile+Test::Nginx run and
+# three of them would blow the PR gate's budget. Uses tools/ci-build.sh, which
+# supports flavor+version args and sha256-verifies the tarball it downloads.
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -42,6 +51,71 @@ permissions:
   contents: read
 
 jobs:
+  build-flavors:
+    name: Build & Test::Nginx (${{ matrix.flavor }} ${{ matrix.version }})
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: nginx
+            version: "1.31.2"
+            label: mainline
+          - flavor: nginx
+            version: "1.30.3"
+            label: stable
+          - flavor: angie
+            version: "1.11.5"
+            label: angie
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libzstd-dev pkg-config \
+            wget zstd libperl-dev cpanminus
+
+      - name: Build server and dynamic modules
+        run: bash tools/ci-build.sh "${{ matrix.flavor }}" "${{ matrix.version }}"
+
+      - name: Verify built modules
+        run: |
+          build=".build/${{ matrix.flavor }}-${{ matrix.version }}/objs"
+          test -f "$build/${{ matrix.flavor }}"
+          test -f "$build/ngx_http_zstd_filter_module.so"
+          test -f "$build/ngx_http_zstd_static_module.so"
+          echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/$build/${{ matrix.flavor }}" >> "$GITHUB_ENV"
+
+      - name: Cache Perl modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
+
+      - name: Install Test::Nginx::Socket
+        run: |
+          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+
+      - name: Run t/ (filter + static + conf-warn)
+        env:
+          # See build-test.yml's identical setting for why this must be 20,
+          # not the ~2s Test::Nginx::Socket default.
+          TEST_NGINX_TIMEOUT: "20"
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-${{ matrix.flavor }}-${{ matrix.version }}"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          cd "$GITHUB_WORKSPACE"
+          # t/01-static.t asserts on fixture mtimes (Last-Modified/If-Modified-Since);
+          # pin them to a fixed timestamp, same as build-test.yml's tests job.
+          touch -d @1541504307 t/suite/test t/suite/test.zst
+          prove -v t/00-filter.t t/01-static.t t/02-conf-warn.t
+
   fuzz:
     name: Fuzz (Accept-Encoding, long)
     runs-on: [self-hosted, builder02, lxc]
