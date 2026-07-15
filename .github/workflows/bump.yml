@@ -1,18 +1,18 @@
 name: Bump versions
 
 # Weekly: check nginx.org/angie.software for newer nginx-stable/angie
-# releases than what's pinned in ci-deep.yml's build-flavors matrix, and pull
-# the vendored nginx-tests submodule to its upstream HEAD. nginx mainline is
-# NOT touched here -- it's resolved dynamically at CI run time (see
-# build-test.yml's `resolve` job / ci-deep.yml's per-job resolve steps), so
-# there's no static mainline pin to bump.
+# releases than what's pinned in ci-deep.yml's build-flavors matrix. nginx
+# mainline is NOT touched here -- it's resolved dynamically at CI run time
+# (see build-test.yml's `resolve` job / ci-deep.yml's per-job resolve steps),
+# so there's no static mainline pin to bump.
 #
 # tools/bump-versions.sh does the actual work (also runnable locally with
-# --dry-run to preview). Commits and pushes straight to master -- this repo
-# has no branch protection gate for this path, and a version/digest/submodule
-# bump is exactly the kind of low-risk, easily-revertable change that doesn't
-# need a human in the loop before landing. The next build-test.yml run on
-# master is what actually proves the bump didn't break anything.
+# --dry-run to preview). Opens a PR rather than pushing straight to master --
+# master carries a required-pull-request ruleset with no bypass actor, so a
+# direct push is always rejected (audit sha e289021 F4); the bot instead
+# pushes a branch and opens a PR via BUMP_PR_TOKEN (a classic PAT -- the
+# default GITHUB_TOKEN cannot create PRs on myguard-labs repos). Normal
+# review/required-checks still gate the merge.
 #
 # Action pins (keep in sync with build-test.yml):
 # actions/checkout@v5 -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -28,36 +28,44 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   bump:
-    name: Bump nginx-stable/angie/nginx-tests pins
+    name: Bump nginx-stable/angie pins
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          persist-credentials: true
-          submodules: true
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Run bump script
         id: bump
         run: bash tools/bump-versions.sh
 
-      - name: Commit and push if anything changed
+      - name: Open PR if anything changed
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_PR_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain)" ]; then
-            echo "nothing changed, skipping commit"
+            echo "nothing changed, skipping PR"
             exit 0
           fi
+          branch="bump/versions-$(date -u +%Y%m%d)"
           git config user.name "myguard-bump-bot"
           git config user.email "actions@users.noreply.github.com"
+          git checkout -b "$branch"
           git add -A
-          git commit -m "chore: bump nginx-stable/angie/nginx-tests pins
+          git commit -m "chore: bump nginx-stable/angie pins
 
           Automated weekly version check (tools/bump-versions.sh)."
-          git push origin HEAD:master
+          git push origin "$branch"
+          gh pr create \
+            --title "chore: bump nginx-stable/angie pins ($(date -u +%Y-%m-%d))" \
+            --body "Automated weekly version check (tools/bump-versions.sh). Review the diff and let required CI checks gate the merge." \
+            --base master \
+            --head "$branch"
