@@ -130,11 +130,23 @@ jobs:
           sudo apt-get install -y clang
 
       - name: Select fuzz duration
+        env:
+          RAW_FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "FUZZ_SECS=${{ github.event.inputs.fuzz_seconds }}" >> "$GITHUB_ENV"
+            case "$RAW_FUZZ_SECONDS" in
+              ''|*[!0-9]*)
+                echo "::error::fuzz_seconds must be a non-negative integer, got: $RAW_FUZZ_SECONDS"
+                exit 1
+                ;;
+            esac
+            if [ "$RAW_FUZZ_SECONDS" -gt 14400 ]; then
+              echo "::error::fuzz_seconds exceeds the 14400s (4h) budget: $RAW_FUZZ_SECONDS"
+              exit 1
+            fi
+            printf 'FUZZ_SECS=%s\n' "$RAW_FUZZ_SECONDS" >> "$GITHUB_ENV"
           else
-            echo "FUZZ_SECS=3600" >> "$GITHUB_ENV"
+            printf 'FUZZ_SECS=3600\n' >> "$GITHUB_ENV"
           fi
 
       - name: Build fuzz target
