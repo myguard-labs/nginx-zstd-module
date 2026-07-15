@@ -13,6 +13,10 @@
 # nginx build tree (when building out-of-tree inside this repo)
 objs/
 
+# tools/ci-build.sh persistent build tree (nginx/angie source + compiled
+# binaries, one dir per flavor-version)
+.build/
+
 # Test runner working directories (nginx test::nginx servroot)
 t/servroot/
 t/servroot-*/

@@ -1,0 +1,13 @@
+Changes with http-zstd
+
+    *) Added CI matrix building nginx mainline, nginx stable, and angie
+       (monthly, in ci-deep.yml's build-flavors job), running the Perl
+       Test::Nginx suite against each.
+
+    *) Extended tools/ci-build.sh to accept a flavor argument (nginx|angie)
+       and persist the built server + both dynamic modules under .build/,
+       instead of only building pinned nginx mainline into a /tmp dir that
+       got deleted on exit.
+
+    *) Added tools/bump-versions.sh + weekly bump.yml workflow to keep the
+       nginx-stable/angie pins current.

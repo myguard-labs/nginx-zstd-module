@@ -1,0 +1,63 @@
+name: Bump versions
+
+# Weekly: check nginx.org/angie.software for newer nginx-stable/angie
+# releases than what's pinned in ci-deep.yml's build-flavors matrix, and pull
+# the vendored nginx-tests submodule to its upstream HEAD. nginx mainline is
+# NOT touched here -- it's resolved dynamically at CI run time (see
+# build-test.yml's `resolve` job / ci-deep.yml's per-job resolve steps), so
+# there's no static mainline pin to bump.
+#
+# tools/bump-versions.sh does the actual work (also runnable locally with
+# --dry-run to preview). Commits and pushes straight to master -- this repo
+# has no branch protection gate for this path, and a version/digest/submodule
+# bump is exactly the kind of low-risk, easily-revertable change that doesn't
+# need a human in the loop before landing. The next build-test.yml run on
+# master is what actually proves the bump didn't break anything.
+#
+# Action pins (keep in sync with build-test.yml):
+# actions/checkout@v5 -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+on:
+  schedule:
+    # Weekly, Monday 04:00 UTC.
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: bump-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump nginx-stable/angie/nginx-tests pins
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: true
+          submodules: true
+          fetch-depth: 0
+
+      - name: Run bump script
+        id: bump
+        run: bash tools/bump-versions.sh
+
+      - name: Commit and push if anything changed
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "nothing changed, skipping commit"
+            exit 0
+          fi
+          git config user.name "myguard-bump-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: bump nginx-stable/angie/nginx-tests pins
+
+          Automated weekly version check (tools/bump-versions.sh)."
+          git push origin HEAD:master
