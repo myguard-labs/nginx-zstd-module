@@ -85,10 +85,20 @@ fi
 "${RUN[@]}" &
 NGINX_PID=$!
 
+ready=0
 for _ in $(seq 1 100); do
-    curl -fsS -o /dev/null "http://127.0.0.1:18222/tiny" 2>/dev/null && break
+    if curl -fsS -o /dev/null "http://127.0.0.1:18222/tiny" 2>/dev/null; then
+        ready=1
+        break
+    fi
     sleep 0.1
 done
+if [ "$ready" -ne 1 ]; then
+    echo "FAIL: nginx never became ready (no successful /tiny request in 10s)" >&2
+    kill "$NGINX_PID" 2>/dev/null || true
+    tail -40 "$WORK/logs/error.log" || true
+    exit 1
+fi
 
 echo "soak: ${DURATION}s, concurrency ${CONC}$( [ "${USE_VALGRIND:-0}" = 1 ] && echo ' (valgrind)'; [ "${USE_HELGRIND:-0}" = 1 ] && echo ' (helgrind)')"
 END=$(( $(date +%s) + DURATION ))
@@ -98,7 +108,7 @@ worker() {
     local wid="$1"
     local paths=(/tiny /medium /large /compressible
                  "/bypass" "/bypass?nozstd=1")
-    local i=0
+    local i=0 ok=0 bad=0
     while [ "$(date +%s)" -lt "$END" ]; do
         p=${paths[$((RANDOM % ${#paths[@]}))]}
         # Vary Accept-Encoding incl. clients that do not support zstd.
@@ -109,11 +119,23 @@ worker() {
                 "http://127.0.0.1:18222$p" -o "$body" 2>/dev/null; then
             # If it came back zstd-encoded, it must decode cleanly.
             if head -c4 "$body" | od -An -tx1 | grep -q '28 b5 2f fd'; then
-                zstd -dq -c "$body" >/dev/null 2>&1 || { echo "BAD zstd $p"; return 1; }
+                if zstd -dq -c "$body" >/dev/null 2>&1; then
+                    ok=$((ok + 1))
+                else
+                    echo "BAD zstd $p"
+                    bad=$((bad + 1))
+                fi
+            else
+                ok=$((ok + 1))
             fi
+        else
+            echo "FAIL request $p (curl exit $?)"
+            bad=$((bad + 1))
         fi
         rm -f "$body"
     done
+    echo "worker $wid: $ok ok, $bad bad/failed"
+    [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]
 }
 
 pids=()
