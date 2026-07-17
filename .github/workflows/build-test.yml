@@ -928,4 +928,135 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           bash tools/test_reload_leak.sh "$TEST_NGINX_BINARY" 5
 
+  # ── gcov coverage — separate --coverage build so the sanitizer/strict
+  #    builds above stay unpolluted by instrumentation overhead. Informational
+  #    (not a hard gate on absolute %, since most of the remainder is
+  #    alloc-failure/ZSTD-API-error defensive paths not worth fault-injecting)
+  #    but DOES fail if line coverage regresses below the last-known floor, so
+  #    a future change can't silently drop tested surface. ─────────────────
+  coverage:
+    name: Coverage (gcov/lcov)
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 20
+    needs: resolve
+    env:
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+            libpcre2-dev zlib1g-dev libssl-dev libperl-dev cpanminus \
+            python3 python3-requests zstd lcov wget
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        run: |
+          set -euo pipefail
+          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
+            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
+          rm -rf "$gnupghome"
+
+      - name: Configure & build nginx with --coverage instrumentation
+        run: |
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat --with-debug --with-threads --with-file-aio \
+            --with-http_ssl_module --with-http_v2_module --with-http_v3_module \
+            --with-http_gzip_static_module --with-http_realip_module \
+            --with-http_sub_module --with-http_addition_module \
+            --with-http_stub_status_module --with-http_auth_request_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY --coverage -O0 -g $(pkg-config --cflags libzstd zlib libpcre2-8 openssl)" \
+            --with-ld-opt="--coverage $(pkg-config --libs libzstd zlib libpcre2-8 openssl)" \
+            --add-dynamic-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+          echo "TEST_NGINX_BINARY=$PWD/objs/nginx" >> "$GITHUB_ENV"
+          echo "COV_OBJDIR=$PWD/objs/addon" >> "$GITHUB_ENV"
+
+      - name: Install Test::Nginx::Socket
+        run: |
+          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+
+      - name: Run TAP suite (drives filter/static/conf-warn paths)
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          cd "$GITHUB_WORKSPACE"
+          prove t/*.t
+
+      - name: Run correctness/regression tool suite (drives filter edge cases)
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 19080
+          python3 tools/test_compression_matrix.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19096 --backend-port 19097
+          python3 tools/test_concurrent_cctx_isolation.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19098 --backend-port 19099
+          python3 tools/test_proxy_unbuffered_truncation.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19094 --backend-port 19095
+          python3 tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 19093
+          python3 tools/test_window_cap.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19104 --backend-port 19105
+          python3 tools/test_zstd_long_ldm.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19102 --backend-port 19103
+
+      - name: Capture coverage (lcov) and enforce line-coverage floor
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          lcov --capture --directory "$COV_OBJDIR" --output-file zstd-coverage.info \
+            --rc lcov_branch_coverage=1 --ignore-errors inconsistent
+          lcov --summary zstd-coverage.info --rc lcov_branch_coverage=1 | tee coverage-summary.txt
+          # Floor set from the 2026-07-17 coverage push (79.2% -> 80.2% line).
+          # Bump this only when a deliberate coverage improvement raises it —
+          # never lower it to make a regression pass.
+          floor_pct=80
+          line_pct=$(grep "lines" coverage-summary.txt | grep -oE '[0-9]+\.[0-9]+%' | head -1 | tr -d '%')
+          line_pct_int=${line_pct%.*}
+          echo "Line coverage: ${line_pct}% (floor: ${floor_pct}%)"
+          if [ "$line_pct_int" -lt "$floor_pct" ]; then
+            echo "❌ Line coverage ${line_pct}% dropped below floor ${floor_pct}%"
+            exit 1
+          fi
+          echo "✓ Line coverage floor held"
+
+      - name: Generate HTML coverage report
+        if: always()
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          genhtml zstd-coverage.info --output-directory coverage-html \
+            --branch-coverage --ignore-errors inconsistent || true
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: coverage-report
+          path: |
+            ${{ github.workspace }}/zstd-coverage.info
+            ${{ github.workspace }}/coverage-summary.txt
+            ${{ github.workspace }}/coverage-html
+          retention-days: 14
+
 
