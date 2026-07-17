@@ -1004,6 +1004,9 @@ jobs:
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
           cd "$GITHUB_WORKSPACE"
+          # 01-static.t asserts on a fixed ETag derived from fixture mtime;
+          # pin it or every run gets a fresh checkout mtime and fails.
+          touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
           prove t/*.t
 
       - name: Run correctness/regression tool suite (drives filter edge cases)
