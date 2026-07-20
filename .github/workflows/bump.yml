@@ -89,8 +89,18 @@ jobs:
           esac
           ASKPASS
           chmod 700 "$askpass"
-          GIT_ASKPASS="$askpass" git push origin "$branch"
+          # Force-push: the branch name is date-based, so a same-day re-run
+          # (a manual dispatch, or a retry after a failure) collides with the
+          # branch the earlier run created and is otherwise rejected
+          # non-fast-forward. The branch is bot-owned and disposable.
+          GIT_ASKPASS="$askpass" git push --force-with-lease origin "$branch"
           rm -f "$askpass"
+          # An open PR for this branch may already exist from that earlier
+          # run; the push above has refreshed it, so there is nothing to do.
+          if [ -n "$(gh pr list --head "$branch" --state open --json number -q '.[0].number')" ]; then
+            echo "PR for $branch already open, refreshed by the push"
+            exit 0
+          fi
           gh pr create \
             --title "chore: bump nginx-stable/angie pins ($(date -u +%Y-%m-%d))" \
             --body "Automated weekly version check (tools/bump-versions.sh). Review the diff and let required CI checks gate the merge." \
