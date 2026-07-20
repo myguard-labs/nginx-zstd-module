@@ -53,7 +53,15 @@ latest_nginx_stable() {
 
 latest_angie() {
     local json
-    json="$(curl -fsSL https://api.github.com/repos/webserver-llc/angie/releases/latest)"
+    # The runners share an egress IP, so the unauthenticated API allowance
+    # (60/hr) is routinely exhausted and this call 403s. Send GH_TOKEN when
+    # one is present -- authenticated requests get their own, far larger quota.
+    local -a auth=()
+    [ -n "${GH_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GH_TOKEN")
+    if ! json="$(curl -fsSL "${auth[@]}" https://api.github.com/repos/webserver-llc/angie/releases/latest)"; then
+        echo "error: could not query the angie release API (rate limit? set GH_TOKEN)" >&2
+        return 1
+    fi
     echo "$json" | grep -m1 '"tag_name"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
 }
 

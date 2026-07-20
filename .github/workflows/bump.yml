@@ -49,6 +49,10 @@ jobs:
 
       - name: Run bump script
         id: bump
+        env:
+          # The angie release lookup hits api.github.com; unauthenticated the
+          # shared runner IP is rate-limited to 403s.
+          GH_TOKEN: ${{ secrets.BUMP_PR_TOKEN }}
         run: bash tools/bump-versions.sh
 
       - name: Open PR if anything changed
