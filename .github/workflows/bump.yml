@@ -14,6 +14,11 @@ name: Bump versions
 # default GITHUB_TOKEN cannot create PRs on myguard-labs repos). Normal
 # review/required-checks still gate the merge.
 #
+# BUMP_PR_TOKEN authenticates BOTH halves: gh (via GH_TOKEN) for the PR, and
+# git (via GIT_ASKPASS) for the branch push. persist-credentials is false, so
+# the push has no ambient credential of its own -- without the askpass helper
+# it dies on "could not read Username for 'https://github.com'".
+#
 # Action pins (keep in sync with build-test.yml):
 # actions/checkout@v5 -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
@@ -49,6 +54,7 @@ jobs:
       - name: Open PR if anything changed
         env:
           GH_TOKEN: ${{ secrets.BUMP_PR_TOKEN }}
+          BUMP_PR_TOKEN: ${{ secrets.BUMP_PR_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain)" ]; then
@@ -63,7 +69,24 @@ jobs:
           git commit -m "chore: bump nginx-stable/angie pins
 
           Automated weekly version check (tools/bump-versions.sh)."
-          git push origin "$branch"
+          # persist-credentials is false, so the checkout leaves no git
+          # credential behind and a plain `git push` prompts for a username
+          # (fatal: could not read Username, run 29722422889). GH_TOKEN
+          # authenticates gh but not git, so hand git its own credential via
+          # the askpass helper -- keeps the token out of argv and out of
+          # .git/config, unlike an inline x-access-token@ push URL.
+          git config credential.helper ''
+          askpass="$(mktemp)"
+          cat > "$askpass" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            Username*) echo x-access-token ;;
+            *) printf '%s' "$BUMP_PR_TOKEN" ;;
+          esac
+          ASKPASS
+          chmod 700 "$askpass"
+          GIT_ASKPASS="$askpass" git push origin "$branch"
+          rm -f "$askpass"
           gh pr create \
             --title "chore: bump nginx-stable/angie pins ($(date -u +%Y-%m-%d))" \
             --body "Automated weekly version check (tools/bump-versions.sh). Review the diff and let required CI checks gate the merge." \
