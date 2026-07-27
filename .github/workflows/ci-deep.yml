@@ -62,10 +62,10 @@ jobs:
             version: "1.31.2"
             label: mainline
           - flavor: nginx
-            version: "1.30.3"
+            version: "1.30.4"
             label: stable
           - flavor: angie
-            version: "1.11.5"
+            version: "1.12.1"
             label: angie
     steps:
       - name: Checkout module
