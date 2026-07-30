@@ -698,3 +698,33 @@ X-Sent-Content-Encoding: zstd
 --- error_code: 200
 --- no_error_log
 [error]
+
+
+
+=== TEST 30: a .zst that is a DIRECTORY is declined, origin served instead
+# of.is_dir branch in the static handler. ngx_open_cached_file() succeeds on a
+# directory, so without the is_dir check the handler would proceed to serve a
+# directory fd as a response body. Creating "dir.txt.zst/" as a real directory
+# (via a file nested inside it) makes the sibling lookup hit a directory; the
+# handler must decline and let the plain origin be served.
+--- config
+    location /isdir/ {
+        zstd_static on;
+        root html;
+    }
+--- user_files
+>>> isdir/dir.txt
+plain origin body served because the .zst sibling is a directory
+>>> isdir/dir.txt.zst/keep.txt
+this file only exists to make dir.txt.zst a directory
+--- request
+GET /isdir/dir.txt
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+! Content-Encoding
+--- response_body
+plain origin body served because the .zst sibling is a directory
+--- error_code: 200
+--- no_error_log
+[error]

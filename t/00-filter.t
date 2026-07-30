@@ -2158,3 +2158,185 @@ Accept-Encoding: zstd
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 86: OWS around the "=" of a q parameter is accepted (RFC 9110 BWS)
+# Covers the two optional-whitespace skips that bracket the "=" in
+# ngx_http_zstd_eval_qvalue: whitespace after the parameter name and
+# whitespace before its value. Both loops were unexecuted — every prior test
+# wrote "q=..." with no spaces, so a tolerated-by-grammar header shape was
+# entirely untested. q=1 keeps zstd acceptable, so the response compresses.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd; q = 1
+--- response_headers_like
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 87: "q=" with the value missing at end-of-field is rejected
+# The `p >= end` guard right after the "=" is consumed: the field ends before
+# any qvalue digit. Distinct from TEST 81 ("q" with no "=" at all) — this one
+# reaches the is_q branch and runs out of input inside it. Malformed
+# parameter => the element is dropped => zstd is not acceptable => identity.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=
+--- response_headers
+! Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 88: an unquoted non-q parameter value is skipped to the delimiter
+# The `else { p++; }` arm of the non-q value scanner. TEST 83 covered the
+# quoted-string arm; an ordinary unquoted token value never exercised the
+# byte-at-a-time path. The parameter is ignored and the following "q=0"
+# still parses, so zstd is NOT acceptable here — proving the scanner stopped
+# at the ';' rather than swallowing the rest of the field.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;foo=bar;q=0
+--- response_headers
+! Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 89: a quoted-string starting mid-value is skipped, parsing continues
+# A non-q parameter whose value mixes unquoted bytes and a quoted-string
+# ("a\"b\""): the scanner steps byte-at-a-time until the '"', then hands off to
+# ngx_http_zstd_skip_quoted for the quoted run, then resumes. Both arms of that
+# loop therefore run for a single parameter. The trailing q=1 must still be
+# found and parsed, proving the quoted region was skipped as one unit and the
+# cursor landed on the ';' — not swallowed past it (which would drop the q and
+# silently change the negotiated weight).
+#
+# NOTE: the early-return guard in skip_quoted (p >= end || *p != '"') is NOT
+# reachable from here, or from any HTTP input: the only call site tests
+# *p == '"' first. It is defensive-only, left uncovered deliberately.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;foo=a"b";q=1
+--- response_headers_like
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 90: a HEAD advertises the same Content-Encoding its GET would produce
+# RFC 9110 §9.3.2: a HEAD response carries the header fields the equivalent GET
+# would have sent, with no body. So a compressible HEAD MUST still advertise
+# "Content-Encoding: zstd" (a client uses it to size/negotiate the later GET),
+# while sending zero body bytes.
+#
+# This pins the direction deliberately, because the opposite assertion looks
+# just as plausible: "no body, so no Content-Encoding". Verified against a live
+# server before writing it — HEAD and GET emit identical Content-Encoding here.
+#
+# Note on the module's own r->header_only short-circuit in the header filter:
+# it is NOT what handles this request. r->header_only is set by nginx's
+# ngx_http_header_filter_module, which runs AFTER the zstd filter in the chain,
+# so on a plain HEAD the flag is still 0 when zstd inspects the response. That
+# branch only fires for internally generated header-only responses, and is left
+# uncovered rather than faked with a test that would assert the wrong contract.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+HEAD /filter
+--- more_headers
+Accept-Encoding: zstd
+--- error_code: 200
+--- response_headers
+Content-Encoding: zstd
+--- response_body
+--- no_error_log
+[error]
+
+
+
+=== TEST 91: a subrequest does not run the zstd header filter
+# ngx_http_zstd_ok's `r != r->main` guard: only the main request negotiates a
+# content coding. An SSI-included subrequest must not be compressed
+# independently (that would emit a nested zstd frame inside the parent's
+# body). The parent here is text/html with zstd off, so the assembled page
+# arrives identity and readable — if the guard regressed, the include would
+# be zstd bytes spliced mid-page.
+--- config
+    location /page.html {
+        ssi on;
+        default_type text/html;
+        root $TEST_NGINX_SERVER_ROOT/html;
+    }
+    location /inc {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "INCLUDED-PAYLOAD-INCLUDED-PAYLOAD-INCLUDED-PAYLOAD";
+    }
+--- user_files
+>>> page.html
+BEGIN<!--# include virtual="/inc" -->END
+--- request
+GET /page.html
+--- more_headers
+Accept-Encoding: zstd
+--- response_body
+BEGININCLUDED-PAYLOAD-INCLUDED-PAYLOAD-INCLUDED-PAYLOADEND
+--- no_error_log
+[error]

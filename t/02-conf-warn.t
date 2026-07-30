@@ -112,3 +112,154 @@ GET /ok/nope
 --- error_code: 404
 --- no_error_log
 invalid value
+
+
+
+=== TEST 5: zstd_dict_file without zstd_dict_file_unsafe refuses to start
+# RFC1 gate (init_main_conf): a dictionary-compressed body is emitted as a
+# plain "Content-Encoding: zstd" that no generic client can decode and that
+# RFC 9842 (dcz) does not negotiate. Starting without the explicit
+# acknowledgement must be a hard config error, not a warning — otherwise the
+# non-standard mode ships silently. Guards the operator-acknowledgement gate.
+--- http_config
+    zstd_dict_file $TEST_NGINX_SERVER_ROOT/html/zstd.dict;
+--- user_files
+>>> zstd.dict
+the quick brown fox jumps over the lazy dog
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+Set "zstd_dict_file_unsafe on;" to acknowledge you control both ends
+--- no_error_log
+[alert]
+
+
+
+=== TEST 6: zstd_dict_file pointing at a missing file fails at config load
+# The open() failure path in merge_loc_conf. A dictionary that vanished (bad
+# path, un-deployed asset) must fail startup with the filename in the message,
+# rather than starting and silently compressing without the dictionary.
+--- http_config
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $TEST_NGINX_SERVER_ROOT/html/does-not-exist.dict;
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+does-not-exist.dict" failed
+--- no_error_log
+[alert]
+
+
+
+=== TEST 7: zstd_comp_level above the library maximum is rejected
+# ngx_http_zstd_comp_level bounds the level against ZSTD_minCLevel()/
+# ZSTD_maxCLevel() at config load. Without the check libzstd would reject the
+# value per-request, turning one typo into a 500 on every response for the
+# location. Test above the upper bound rather than below the lower one:
+# ZSTD_maxCLevel() is 22 and stable, while ZSTD_minCLevel() is -131072, so a
+# "clearly too negative" literal would have to be enormous to stay invalid.
+--- config
+    location /lvl {
+        zstd on;
+        zstd_comp_level 23;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+zstd compression level must be between
+--- no_error_log
+[alert]
+
+
+
+=== TEST 8: zstd_window_log outside the library bounds is rejected
+# C3 regression: zstd_window_log is validated against
+# ZSTD_cParam_getBounds(ZSTD_c_windowLog) at config load, not hard-coded
+# constants. 99 is above upperBound on every supported libzstd; catching it
+# here turns a per-request 500 into a clear startup error.
+--- config
+    location /wl {
+        zstd on;
+        zstd_window_log 99;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+"zstd_window_log" must be 0 (default) or between
+--- no_error_log
+[alert]
+
+
+
+=== TEST 9: zstd_window_log accepts 0 (explicit "library default")
+# Positive counterpart to TEST 8: the bounds check must special-case 0 rather
+# than comparing it against lowerBound (which is > 0), or "keep zstd's
+# level-derived default" would be unspellable.
+--- config
+    location /wl0 {
+        zstd on;
+        zstd_window_log 0;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "compress me compress me compress me compress me";
+    }
+--- request
+GET /wl0
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 10: a non-numeric zstd_window_log is rejected as an invalid number
+# ngx_conf_zstd_set_num_slot_with_negatives' ngx_atoi failure path. The custom
+# slot parser exists to accept negative levels, so its error handling is the
+# module's own code rather than nginx's stock ngx_conf_set_num_slot.
+--- config
+    location /wlx {
+        zstd on;
+        zstd_window_log abc;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+invalid number
+--- no_error_log
+[alert]
+
+
+
+=== TEST 11: a duplicate zstd_comp_level in one location is rejected
+# The "is duplicate" guard in ngx_conf_zstd_set_num_slot_with_negatives. The
+# custom slot must reject a repeated directive exactly like nginx's stock
+# num slot, or the second value would silently win.
+--- config
+    location /dup {
+        zstd on;
+        zstd_comp_level 3;
+        zstd_comp_level 5;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+"zstd_comp_level" directive is duplicate
+--- no_error_log
+[alert]
