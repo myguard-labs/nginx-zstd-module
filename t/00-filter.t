@@ -2127,3 +2127,31 @@ Accept-Encoding: zstd;foo="unterminated
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+=== TEST 85: Content-Encoding entry leaves the headers_out chain terminated
+# nginx >= 1.23 links same-name response headers via ngx_table_elt_t.next
+# and expects every producer to NULL-terminate the chain it starts, as
+# core's own gzip filter and gzip_static do. The stale pointer is not
+# reachable through plain HTTP with current core, so this pins the nearest
+# observable contract: Content-Encoding on the wire and as read back from
+# the headers_out list ($sent_http_content_encoding via add_header).
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        add_header X-Sent-Content-Encoding $sent_http_content_encoding;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+X-Sent-Content-Encoding: zstd
+--- no_error_log
+[error]

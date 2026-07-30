@@ -676,3 +676,25 @@ Content-Encoding: gzip
 --- error_code: 200
 --- no_error_log
 [error]
+
+
+=== TEST 29: Content-Encoding entry leaves the headers_out chain terminated
+# Sibling of filter TEST 85 for the static module: the .zst sidecar path
+# pushes its own Content-Encoding entry and must terminate the header
+# chain the same way (see core ngx_http_gzip_static_module.c).
+--- config
+    location /test {
+        zstd_static on;
+        add_header X-Sent-Content-Encoding $sent_http_content_encoding;
+        root ../../t/suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+Content-Encoding: zstd
+X-Sent-Content-Encoding: zstd
+--- error_code: 200
+--- no_error_log
+[error]
