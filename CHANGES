@@ -1,5 +1,17 @@
 Changes with http-zstd
 
+    *) Feature: RFC 9842 dcz dictionary compression. New repeatable
+       zstd_dcz_dict_file directive (http/server/location) loads
+       dictionaries hashed at config load; a request whose
+       Available-Dictionary matches and whose Accept-Encoding lists dcz
+       explicitly gets the response compressed against that dictionary
+       (ZSTD_CCtx_refPrefix, window capped at the RFC's 8 MB client
+       guarantee) as Content-Encoding: dcz with the 40-byte dcz frame
+       header. Both response variants emit Vary: Available-Dictionary;
+       cross-site requests (Sec-Fetch-Site) fall back to plain zstd.
+       Covered by t/03-dcz.t, tools/test_dcz.py (also under ASAN and in
+       coverage), and new dcz fuzz corpus entries.
+
     *) Added CI matrix building nginx mainline, nginx stable, and angie
        (monthly, in ci-deep.yml's build-flavors job), running the Perl
        Test::Nginx suite against each.

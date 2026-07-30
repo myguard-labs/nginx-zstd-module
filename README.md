@@ -36,6 +36,7 @@ This is a hardened fork: every push/PR is exercised against **nginx mainline**, 
     * [zstd_bypass](#zstd_bypass)
     * [zstd_bypass_vary](#zstd_bypass_vary)
     * [zstd_dict_file](#zstd_dict_file)
+    * [zstd_dcz_dict_file](#zstd_dcz_dict_file)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
     * [zstd_static](#zstd_static)
 * [Variables](#variables)
@@ -728,7 +729,7 @@ existing bypass behaviour cacheable without poisoning.
 
 Loads a pre-trained zstd dictionary for use during compression. Dictionaries can significantly improve compression ratios for small, structurally similar responses (e.g. JSON API responses).
 
-> **Requires explicit opt-in.** This directive emits an ordinary `Content-Encoding: zstd` response that was compressed with an external dictionary. That is **not** HTTP dictionary negotiation — [RFC 9842](https://www.rfc-editor.org/rfc/rfc9842) (Sept 2025) defines the `dcz` content coding and `Available-Dictionary` for that, which this module does not yet implement. A generic client that only advertises `Accept-Encoding: zstd` **cannot decode** the result, and a shared cache keys it as an ordinary zstd variant. nginx therefore refuses to start with `zstd_dict_file` set unless you also set `zstd_dict_file_unsafe on;`, acknowledging that you control both ends and will key any shared cache accordingly.
+> **Requires explicit opt-in.** This directive emits an ordinary `Content-Encoding: zstd` response that was compressed with an external dictionary. That is **not** HTTP dictionary negotiation — [RFC 9842](https://www.rfc-editor.org/rfc/rfc9842) (Sept 2025) defines the `dcz` content coding and `Available-Dictionary` for that, implemented by [zstd_dcz_dict_file](#zstd_dcz_dict_file) below, which is what you want unless you control both ends. A generic client that only advertises `Accept-Encoding: zstd` **cannot decode** the result, and a shared cache keys it as an ordinary zstd variant. nginx therefore refuses to start with `zstd_dict_file` set unless you also set `zstd_dict_file_unsafe on;`, acknowledging that you control both ends and will key any shared cache accordingly.
 
 > **Warning:** The `Content-Encoding: zstd` token in HTTP does not include any mechanism for the client to discover or negotiate which dictionary the server is using. Only use this directive if you control both ends of the connection and can guarantee that both the server and client use the same dictionary (for example, by advertising it via a custom HTTP header). See [tokers/zstd-nginx-module#2](https://github.com/tokers/zstd-nginx-module/issues/2) for background.
 
@@ -754,6 +755,53 @@ http {
         }
     }
 }
+```
+
+---
+
+### zstd_dcz_dict_file
+
+**Syntax:** `zstd_dcz_dict_file /path/to/dictionary;`
+**Default:** `—`
+**Context:** `http`, `server`, `location` (repeatable)
+
+Standards-based dictionary compression per [RFC 9842](https://www.rfc-editor.org/rfc/rfc9842) (Compression Dictionary Transport). Each occurrence loads one dictionary — typically a **previous version of the resource** (delta-style) or a trained dictionary — and registers its SHA-256 as a negotiation key. When a request arrives whose `Available-Dictionary` header matches a loaded dictionary **and** whose `Accept-Encoding` lists `dcz` explicitly with a non-zero weight, the response is compressed against that dictionary and sent as `Content-Encoding: dcz`: a fixed 40-byte header (a zstd skippable frame carrying the dictionary's SHA-256) followed by an ordinary zstd frame. Chrome 130+ negotiates this automatically for same-origin resources. Every gate miss — unknown hash, no explicit `dcz` token (`*` deliberately does not match), `dcz;q=0`, a malformed `Available-Dictionary`, or `Sec-Fetch-Site` other than `same-origin`/`none` — falls back to the plain `zstd` path.
+
+Unlike `zstd_dict_file`, no opt-in flag is needed: dcz is real HTTP negotiation, and only clients that advertised the dictionary ever receive it.
+
+The module handles the response side; **advertising** the dictionary to clients is one `add_header` on the dictionary resource (usually the resource itself, so today's file becomes the dictionary for tomorrow's):
+
+```nginx
+http {
+    zstd on;
+
+    server {
+        location /app/ {
+            # Yesterday's release, now serving as the delta base.
+            zstd_dcz_dict_file /var/www/releases/app-v41.js;
+
+            # Today's file is itself the dictionary for the NEXT release:
+            # a returning client sends Available-Dictionary: :sha256:.
+            add_header Use-As-Dictionary 'match="/app/*.js"';
+        }
+    }
+}
+```
+
+Operational notes:
+
+* **Caching.** Whenever dictionaries are configured, the module emits `Vary: Available-Dictionary` on **both** the dcz and the plain-zstd variants — which encoding a client receives depends on that request header for every client, and a shared cache that failed to key on it could serve an undecodable dcz body to a dictionary-less client. Keep `gzip_vary on` so `Vary: Accept-Encoding` is emitted alongside.
+* **Dictionary lifecycle.** Files are read and hashed once at config parse (`nginx -t` validates them; empty or > 10 MB files and duplicate contents are load errors). Rotate dictionaries by updating the config and reloading. A location that declares its own `zstd_dcz_dict_file` list replaces the inherited one wholesale.
+* **Window and memory.** dcz frames never declare a window above 8 MB (the RFC's unconditional client guarantee), sized down to dictionary + expected content when smaller. An explicit `zstd_window_log` below that still wins — a dictionary does not void the memory cap. Dictionaries are referenced per request via `ZSTD_CCtx_refPrefix()` (RFC 9842 `type=raw` semantics); the per-request table build over the dictionary costs roughly milliseconds per MB of dictionary, so prefer focused dictionaries (the previous version of one resource) over giant blobs.
+* **Cross-origin.** Requests with `Sec-Fetch-Site` other than `same-origin`/`none` fall back to plain zstd rather than attempting RFC 9842's CORS legs. `Dictionary-ID` is not consumed — the hash is a complete key — so omit `id=` from `Use-As-Dictionary` (clients would echo it, but nothing here needs it).
+
+Verify a response end-to-end with the zstd CLI (the 40-byte header is a valid skippable frame, so no stripping is needed):
+
+```bash
+curl -s -H 'Accept-Encoding: zstd, dcz' \
+     -H "Available-Dictionary: :$(openssl dgst -sha256 -binary app-v41.js | base64):" \
+     https://example.com/app/app-v42.js \
+| zstd -d -D app-v41.js | diff - app-v42.js && echo "byte-exact"
 ```
 
 ---

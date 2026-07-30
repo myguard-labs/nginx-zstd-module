@@ -673,6 +673,17 @@ jobs:
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Static tests FAILED"; exit 1; fi
           echo "✓ Static module: All tests passed"
 
+      - name: Run dcz negotiation tests
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-dcz"
+          rm -rf "$TEST_NGINX_SERVROOT"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          cd "$GITHUB_WORKSPACE"
+          perl t/03-dcz.t 2>&1 | sed 's/^Error:/Err:/' | tee t/dcz-tests.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ dcz tests FAILED"; exit 1; fi
+          echo "✓ dcz negotiation tests passed"
+
       - name: Run truncation smoke test
         run: |
           cd "$GITHUB_WORKSPACE"
@@ -806,6 +817,18 @@ jobs:
             --port 18104 --backend-port 18105
           echo "✓ window-cap + dictionary effect test passed"
 
+      - name: Run RFC 9842 dcz end-to-end test
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # dcz negotiation matrix plus the wire contract t/03-dcz.t
+          # cannot check: the 40-byte frame header (skippable magic +
+          # dictionary SHA-256), decode via `zstd -d -D` capped at the
+          # RFC's 8 MB client-window guarantee, byte-compare to origin,
+          # and proof the dictionary engaged (dcz body < plain zstd).
+          python3 tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" --port 18106
+          echo "✓ RFC 9842 dcz end-to-end test passed"
+
       - name: Test summary
         if: success()
         run: echo "✓ All Perl + Python end-to-end tests passed"
@@ -818,6 +841,7 @@ jobs:
           path: |
             ${{ github.workspace }}/t/filter-tests.log
             ${{ github.workspace }}/t/static-tests.log
+            ${{ github.workspace }}/t/dcz-tests.log
           retention-days: 7
 
   # ── Smoke tests under ASAN+UBSAN — fails on any memory/UB error ───────────
@@ -918,6 +942,11 @@ jobs:
           python3 tools/test_concurrent_cctx_isolation.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18098 \
             --backend-port 18099 --concurrency 8 --rounds 3
+          # dcz under ASAN/UBSAN: ZSTD_CCtx_refPrefix references
+          # config-pool memory from the request path and the 40-byte
+          # frame header is hand-assembled — both lifetime/OOB classes.
+          python3 tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18089
           echo "✓ All smoke tests clean under ASAN+UBSAN"
 
       - name: zstd_dict_file reload leak check (CDict lifecycle)
@@ -1024,6 +1053,7 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" --port 19104 --backend-port 19105
           python3 tools/test_zstd_long_ldm.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19102 --backend-port 19103
+          python3 tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" --port 19106
 
       - name: Capture coverage (lcov) and enforce line-coverage floor
         run: |
