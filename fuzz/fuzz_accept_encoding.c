@@ -282,6 +282,21 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
     }
 
+    /*
+     * The generic walker behind the wrapper, exercised with the second
+     * production token ("dcz", explicit-only — no wildcard) so the
+     * parameterized name-match path also runs under ASAN on every input.
+     * Weights are milli-q by contract: anything outside -1..1000 means
+     * the walker fell through a path it should not have.
+     */
+    {
+        ngx_int_t dq = ngx_http_zstd_coding_weight(&ae, "dcz",
+                                                   sizeof("dcz") - 1, 0);
+        if (dq < -1 || dq > 1000) {
+            __builtin_trap();
+        }
+    }
+
     free(buf);
     return 0;
 }

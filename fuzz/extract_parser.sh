@@ -36,7 +36,7 @@ fi
 awk '
     { sub(/\r$/, "") }
     /^static (ngx_int_t|u_char \*)$/ { pending = 1; buf = $0 ORS; next }
-    pending && /^ngx_http_zstd_(skip_quoted|eval_qvalue|accept_encoding)\(/ {
+    pending && /^ngx_http_zstd_(skip_quoted|eval_qvalue|coding_weight|accept_encoding)\(/ {
         capture = 1; pending = 0; print buf; print; next
     }
     pending { pending = 0; buf = "" }
@@ -48,6 +48,7 @@ awk '
 
 if ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" ||
     ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" ||
+    ! grep -q 'ngx_http_zstd_coding_weight' "$OUT" ||
     ! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" ||
     [ "$(tail -n1 "$OUT")" != "}" ]; then
     echo "✗ failed to extract the Accept-Encoding parser from $HEADER" >&2
@@ -58,4 +59,5 @@ fi
 
 LINES=$(wc -l <"$OUT")
 echo "✓ extracted ngx_http_zstd_skip_quoted() + ngx_http_zstd_eval_qvalue()" \
-    "+ ngx_http_zstd_accept_encoding() — $LINES lines -> $OUT"
+    "+ ngx_http_zstd_coding_weight() + ngx_http_zstd_accept_encoding()" \
+    "— $LINES lines -> $OUT"

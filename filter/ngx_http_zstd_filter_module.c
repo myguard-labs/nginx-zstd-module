@@ -13,9 +13,27 @@
 #include <limits.h>  /* INT_MAX — config-load bound on (int)-narrowed sizes */
 
 #include "../ngx_http_zstd_common.h"
+#include "../ngx_http_zstd_sha256.h"
 
 
 #define NGX_HTTP_ZSTD_MAX_DICT_SIZE  (10 * 1024 * 1024)  /* 10 MB limit */
+
+/*
+ * RFC 9842 §2.2 dcz framing: an 8-byte zstd skippable-frame header
+ * (magic 0x184D2A5E and frame-size 32, both little-endian on the wire)
+ * followed by the 32-byte SHA-256 of the dictionary, prepended to an
+ * ordinary zstd frame. Existing zstd decoders skip it by design, so
+ * `zstd -d -D <dict>` decodes a dcz body as-is.
+ */
+#define NGX_HTTP_ZSTD_DCZ_HEADER_LEN  (8 + NGX_HTTP_ZSTD_SHA256_DIGEST_LEN)
+
+/*
+ * RFC 9842 §2.2.2: a dcz client guarantees a decode window of at least
+ * max(8 MB, 1.25 x dictionary size). Never exceeding 2^23 (8 MB) keeps
+ * every emitted frame inside the guarantee for any dictionary size, so
+ * the module does not need to reason about the 1.25x branch.
+ */
+#define NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG  23
 
 
 typedef struct {
@@ -23,6 +41,22 @@ typedef struct {
     ngx_flag_t                   dict_unsafe;   /* explicit opt-in for the
                                                  * non-RFC-9842 dict mode; S1/RFC1 */
 } ngx_http_zstd_main_conf_t;
+
+
+/*
+ * One RFC 9842 dictionary, loaded at config parse. `bytes` is the raw
+ * file content in cf->pool (worker-lifetime; old workers keep their
+ * forked copy across a reload until they drain), referenced per request
+ * via ZSTD_CCtx_refPrefix() — RFC 9842 type=raw semantics exactly. The
+ * SHA-256 is the negotiation key: it is what a client's
+ * Available-Dictionary header carries and what the dcz frame header
+ * must embed.
+ */
+typedef struct {
+    ngx_str_t                    file;    /* resolved path, for logs */
+    ngx_str_t                    bytes;   /* raw dictionary contents */
+    u_char                       hash[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN];
+} ngx_http_zstd_dcz_dict_t;
 
 
 typedef struct {
@@ -45,6 +79,8 @@ typedef struct {
     ngx_array_t                 *types_keys;
 
     ZSTD_CDict                  *dict;
+
+    ngx_array_t                 *dcz_dicts;  /* ngx_http_zstd_dcz_dict_t */
 } ngx_http_zstd_loc_conf_t;
 
 
@@ -73,6 +109,11 @@ typedef struct {
     ngx_http_request_t          *request;
     ZSTD_CCtx                   *cctx;
 
+    /* dictionary negotiated for this response via Available-Dictionary;
+     * NULL means plain zstd. Points into the loc conf's dcz_dicts array
+     * (config-pool lifetime, outlives the request). */
+    ngx_http_zstd_dcz_dict_t    *dcz_dict;
+
     size_t                       bytes_in;
     size_t                       bytes_out;
 
@@ -89,6 +130,12 @@ typedef struct {
     unsigned                     flush:1;
     unsigned                     done:1;
     unsigned                     nomem:1;
+
+    /* the 40-byte dcz frame header has been queued on the out chain.
+     * Guarded separately from CCtx init because the init block can run
+     * more than once (a data-less flush call arrives before the first
+     * input sets buffer_in.src) and the prefix must never be duplicated. */
+    unsigned                     dcz_header_sent:1;
 
     /* PR #49: Action state machine (COMPRESS, FLUSH, or END) */
     ngx_http_zstd_action_t       action;
@@ -173,6 +220,14 @@ static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static void ngx_http_zstd_cleanup_dict(void *data);
 static void ngx_http_zstd_cleanup_cctx(void *data);
+static char *ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static ngx_table_elt_t *ngx_http_zstd_find_request_header(
+    ngx_http_request_t *r, const char *name, size_t len);
+static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
+    ngx_http_request_t *r, ngx_http_zstd_loc_conf_t *zlcf);
+static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
+    ngx_http_zstd_ctx_t *ctx);
 
 
 static ngx_http_zstd_comp_level_bounds_t  ngx_http_zstd_comp_level_bounds = {
@@ -301,6 +356,13 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       offsetof(ngx_http_zstd_main_conf_t, dict_unsafe),
       NULL },
 
+    { ngx_string("zstd_dcz_dict_file"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_zstd_dcz_dict_file,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
     ngx_null_command
 };
 
@@ -342,6 +404,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     ngx_table_elt_t           *h;
     ngx_http_zstd_loc_conf_t  *zlcf;
     ngx_http_zstd_ctx_t       *ctx;
+    ngx_http_zstd_dcz_dict_t  *dcz;
 
     zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
 
@@ -477,7 +540,24 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     r->gzip_vary = 1;
 
-    if (ngx_http_zstd_ok(r) != NGX_OK) {
+    /*
+     * RFC 9842 dcz negotiation first: a client that advertises a
+     * dictionary we hold (Available-Dictionary hash match) and accepts
+     * the dcz coding gets dictionary compression; everything else falls
+     * through to the plain zstd path unchanged.
+     */
+    dcz = ngx_http_zstd_dcz_negotiate(r, zlcf);
+
+    if (dcz != NULL) {
+        /*
+         * Latch gzip off exactly as ngx_http_zstd_ok() does on the plain
+         * path: the commitment to encode is made immediately below, so a
+         * later gzip filter must not double-compress.
+         */
+        r->gzip_tested = 1;
+        r->gzip_ok = 0;
+
+    } else if (ngx_http_zstd_ok(r) != NGX_OK) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd: skip, client did not accept zstd encoding");
         return ngx_http_next_header_filter(r);
@@ -492,6 +572,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     ctx->request = r;
     ctx->last_out = &ctx->out;
+    ctx->dcz_dict = dcz;
 
     h = ngx_list_push(&r->headers_out.headers);
     if (h == NULL) {
@@ -503,8 +584,37 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     h->next = NULL;
 #endif
     ngx_str_set(&h->key, "Content-Encoding");
-    ngx_str_set(&h->value, "zstd");
+    if (dcz != NULL) {
+        ngx_str_set(&h->value, "dcz");
+    } else {
+        ngx_str_set(&h->value, "zstd");
+    }
     r->headers_out.content_encoding = h;
+
+    /*
+     * With dictionaries configured, WHICH encoding this location serves
+     * depends on the request's Available-Dictionary header — the dcz
+     * variant obviously, but equally the plain zstd variant a
+     * dictionary-less client receives. A shared cache must therefore key
+     * on it for BOTH variants or it can serve a dcz body to a client
+     * without the dictionary (undecodable). Accept-Encoding itself is
+     * already covered by gzip_vary above; caches union all Vary lines.
+     */
+    if (zlcf->dcz_dicts != NULL && zlcf->dcz_dicts->nelts > 0) {
+        ngx_table_elt_t  *v;
+
+        v = ngx_list_push(&r->headers_out.headers);
+        if (v == NULL) {
+            return NGX_ERROR;
+        }
+
+        v->hash = 1;
+#if (nginx_version >= 1023000)
+        v->next = NULL;
+#endif
+        ngx_str_set(&v->key, "Vary");
+        ngx_str_set(&v->value, "Available-Dictionary");
+    }
 
     r->main_filter_need_in_memory = 1;
 
@@ -525,6 +635,172 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
                    r->headers_out.content_length_n);
 
     return ngx_http_next_header_filter(r);
+}
+
+
+/*
+ * Case-insensitive lookup of a request header nginx keeps no dedicated
+ * headers_in slot for (Available-Dictionary, Sec-Fetch-Site). Plain list
+ * walk — both headers appear at most once and only on dictionary-aware
+ * requests, so a hashed lookup buys nothing here.
+ */
+static ngx_table_elt_t *
+ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
+    size_t len)
+{
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h;
+
+    part = &r->headers_in.headers.part;
+    h = part->elts;
+
+    for (i = 0; ; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].key.len == len
+            && ngx_strncasecmp(h[i].key.data, (u_char *) name, len) == 0)
+        {
+            return &h[i];
+        }
+    }
+
+    return NULL;
+}
+
+
+/*
+ * RFC 9842 dcz negotiation. Returns the configured dictionary this
+ * response must be compressed against, or NULL for the plain zstd path.
+ * Every requirement is a hard gate — on any miss the response falls back
+ * to ordinary content negotiation, never to a broken dcz:
+ *
+ *   - the location has zstd_dcz_dict_file dictionaries;
+ *   - the request carries Available-Dictionary, a structured-field byte
+ *     sequence (":base64:") decoding to exactly 32 bytes (the SHA-256 of
+ *     the client's cached dictionary), and it matches one of ours;
+ *   - Accept-Encoding lists dcz explicitly with q>0. The "*" wildcard
+ *     deliberately does NOT match: only a client that actually holds the
+ *     dictionary can decode dcz, so a blanket wildcard must not turn it
+ *     on (see ngx_http_zstd_coding_weight);
+ *   - Sec-Fetch-Site, when present, is "same-origin" or "none" (§8.3:
+ *     dictionaries are same-origin-partitioned secrets; a cross-site
+ *     response compressed against one leaks it). Browsers always send
+ *     the header; its absence means a non-browser client, where the
+ *     cross-origin read model does not apply.
+ *
+ * Dictionary-ID is intentionally not parsed: it only matters when the
+ * operator sets id= in Use-As-Dictionary, and the hash alone is a
+ * complete, collision-free key for the lookup below.
+ */
+static ngx_http_zstd_dcz_dict_t *
+ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
+    ngx_http_zstd_loc_conf_t *zlcf)
+{
+    u_char                     buf[48];
+    ngx_str_t                  b64, decoded;
+    ngx_uint_t                 i;
+    ngx_table_elt_t           *h, *ae;
+    ngx_http_zstd_dcz_dict_t  *dicts;
+
+    if (zlcf->dcz_dicts == NULL || zlcf->dcz_dicts->nelts == 0) {
+        return NULL;
+    }
+
+    if (r != r->main) {
+        return NULL;
+    }
+
+    ae = r->headers_in.accept_encoding;
+    if (ae == NULL) {
+        return NULL;
+    }
+
+    h = ngx_http_zstd_find_request_header(r, "available-dictionary",
+                                          sizeof("available-dictionary") - 1);
+    if (h == NULL) {
+        return NULL;
+    }
+
+    /*
+     * RFC 8941 byte sequence: colon-delimited standard base64. 32 bytes
+     * encode to 44 characters with padding (43 without); anything longer
+     * cannot be a SHA-256 and is rejected before decoding.
+     */
+    if (h->value.len < 2
+        || h->value.data[0] != ':'
+        || h->value.data[h->value.len - 1] != ':'
+        || h->value.len - 2 > 44)
+    {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: malformed Available-Dictionary \"%V\"",
+                       &h->value);
+        return NULL;
+    }
+
+    b64.data = h->value.data + 1;
+    b64.len = h->value.len - 2;
+
+    decoded.data = buf;
+
+    if (ngx_decode_base64(&decoded, &b64) != NGX_OK
+        || decoded.len != NGX_HTTP_ZSTD_SHA256_DIGEST_LEN)
+    {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: Available-Dictionary \"%V\" is not a "
+                       "base64 SHA-256", &h->value);
+        return NULL;
+    }
+
+    h = ngx_http_zstd_find_request_header(r, "sec-fetch-site",
+                                          sizeof("sec-fetch-site") - 1);
+    if (h != NULL
+        && !(h->value.len == sizeof("same-origin") - 1
+             && ngx_strncasecmp(h->value.data, (u_char *) "same-origin",
+                                sizeof("same-origin") - 1) == 0)
+        && !(h->value.len == sizeof("none") - 1
+             && ngx_strncasecmp(h->value.data, (u_char *) "none",
+                                sizeof("none") - 1) == 0))
+    {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: skip, Sec-Fetch-Site \"%V\"", &h->value);
+        return NULL;
+    }
+
+    if (ngx_http_zstd_coding_weight(&ae->value, "dcz",
+                                    sizeof("dcz") - 1, 0) <= 0)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: skip, no explicit dcz in Accept-Encoding");
+        return NULL;
+    }
+
+    dicts = zlcf->dcz_dicts->elts;
+
+    for (i = 0; i < zlcf->dcz_dicts->nelts; i++) {
+        if (ngx_memcmp(dicts[i].hash, decoded.data,
+                       NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) == 0)
+        {
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "zstd dcz: dictionary \"%V\" negotiated",
+                           &dicts[i].file);
+            return &dicts[i];
+        }
+    }
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "zstd dcz: skip, no configured dictionary matches "
+                   "Available-Dictionary");
+    return NULL;
 }
 
 
@@ -558,6 +834,19 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         /* First call: configure the reused CCtx for this request. */
         if (ngx_http_zstd_filter_init_cctx(r, ctx) != NGX_OK) {
             goto failed;
+        }
+
+        /*
+         * dcz responses start with the fixed 40-byte frame header (RFC
+         * 9842 §2.2). Queue it ahead of any compressed output; the
+         * dcz_header_sent guard (not the init condition above) makes it
+         * once-only, because this block re-runs if a data-less flush
+         * arrives before the first input sets buffer_in.src.
+         */
+        if (ctx->dcz_dict != NULL && !ctx->dcz_header_sent) {
+            if (ngx_http_zstd_filter_emit_dcz_header(r, ctx) != NGX_OK) {
+                goto failed;
+            }
         }
     }
 
@@ -1084,6 +1373,58 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
 
 /*
+ * Queue the 40-byte dcz frame header (RFC 9842 §2.2) as the first link
+ * on the out chain: the zstd skippable-frame magic 0x184D2A5E with a
+ * declared 32-byte content, then the dictionary's SHA-256. Emitted from
+ * its own pool buffer rather than through the compressor's recycled
+ * buffers so it can never be reordered behind compressed output. A
+ * plain zstd decoder skips the frame; a dcz client checks the hash
+ * against the dictionary it advertised.
+ */
+static ngx_int_t
+ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
+    ngx_http_zstd_ctx_t *ctx)
+{
+    static const u_char  magic[8] = {
+        0x5e, 0x2a, 0x4d, 0x18,     /* 0x184D2A5E, little-endian */
+        0x20, 0x00, 0x00, 0x00      /* frame content size: 32 */
+    };
+
+    ngx_buf_t    *b;
+    ngx_chain_t  *cl;
+
+    b = ngx_create_temp_buf(r->pool, NGX_HTTP_ZSTD_DCZ_HEADER_LEN);
+    if (b == NULL) {
+        return NGX_ERROR;
+    }
+
+    b->last = ngx_cpymem(b->last, magic, sizeof(magic));
+    b->last = ngx_cpymem(b->last, ctx->dcz_dict->hash,
+                         NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+
+    cl = ngx_alloc_chain_link(r->pool);
+    if (cl == NULL) {
+        return NGX_ERROR;
+    }
+
+    cl->buf = b;
+    cl->next = NULL;
+
+    *ctx->last_out = cl;
+    ctx->last_out = &cl->next;
+
+    ctx->bytes_out += NGX_HTTP_ZSTD_DCZ_HEADER_LEN;
+    ctx->dcz_header_sent = 1;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "zstd dcz: 40-byte frame header queued (dict \"%V\")",
+                   &ctx->dcz_dict->file);
+
+    return NGX_OK;
+}
+
+
+/*
  * Set one ZSTD_CCtx parameter, logging a uniform NGX_LOG_ALERT and
  * returning NGX_ERROR on failure. Collapses the five structurally
  * identical setParameter+isError+log blocks in init_cctx into one
@@ -1224,7 +1565,66 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
         }
     }
 
-    if (zlcf->dict) {
+    if (ctx->dcz_dict != NULL) {
+        size_t     required;
+        ngx_int_t  wlog;
+
+        /*
+         * RFC 9842 window bound. The client guarantees a decode window of
+         * max(8 MB, 1.25 x dict size); staying at or under 2^23 keeps every
+         * frame inside that guarantee unconditionally. Within the cap, the
+         * window must reach back across the whole prefix from the end of
+         * the content or the far end of the dictionary stops matching —
+         * so size it to dictionary + expected content (1 MB guess when the
+         * length is unknown), rounded up to a power of two. An operator
+         * zstd_window_log below the computed value still wins: it is a
+         * memory ceiling, and a dictionary must not silently void it
+         * (that was audit C2/R1's lesson with the CDict path).
+         */
+        required = ctx->dcz_dict->bytes.len
+                   + (ctx->pledged_size >= 0
+                      ? (size_t) ctx->pledged_size
+                      : 1024 * 1024);
+
+        /* 10 = ZSTD_WINDOWLOG_MIN (static-API constant; literal so the
+         * plain-API build compiles) */
+        for (wlog = 10;
+             wlog < NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG
+             && ((size_t) 1 << wlog) < required;
+             wlog++) { /* void */ }
+
+        if (zlcf->window_log > 0 && zlcf->window_log < wlog) {
+            wlog = zlcf->window_log;
+        }
+
+        if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_windowLog, (int) wlog,
+                                    "windowLog(dcz)")
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+        /*
+         * Reference the raw dictionary bytes as a prefix — RFC 9842
+         * type=raw semantics exactly (ZSTD_CCtx_refPrefix interprets the
+         * buffer as raw content, not a trained-dictionary structure).
+         * Per-request table build over the prefix is the deliberate MVP
+         * trade against caching a CDict per (dict, level, window) tuple;
+         * the buffer itself is config-pool memory that outlives the
+         * request. Mutually exclusive with the trained zstd_dict_file
+         * CDict below: a dcz response's frame must reference ONLY the
+         * negotiated dictionary or the client cannot decode it.
+         */
+        rc = ZSTD_CCtx_refPrefix(cctx, ctx->dcz_dict->bytes.data,
+                                 ctx->dcz_dict->bytes.len);
+        if (ZSTD_isError(rc)) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "zstd: ZSTD_CCtx_refPrefix() failed: %s",
+                          ZSTD_getErrorName(rc));
+            return NGX_ERROR;
+        }
+
+    } else if (zlcf->dict) {
         rc = ZSTD_CCtx_refCDict(cctx, zlcf->dict);
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
@@ -1268,11 +1668,11 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
         }
     }
 
-    ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+    ngx_log_debug5(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "zstd cctx ready: level:%i long:%i window_log:%i "
-                   "dict:%p",
+                   "dict:%p dcz:%p",
                    zlcf->level, zlcf->long_mode, zlcf->window_log,
-                   zlcf->dict);
+                   zlcf->dict, ctx->dcz_dict);
 
     return NGX_OK;
 }
@@ -1362,6 +1762,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->long_mode = NGX_CONF_UNSET;
     conf->max_cctx_memory = NGX_CONF_UNSET;
     conf->bypass = NGX_CONF_UNSET_PTR;
+    conf->dcz_dicts = NGX_CONF_UNSET_PTR;
 
     return conf;
 }
@@ -1395,6 +1796,10 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->max_cctx_memory, prev->max_cctx_memory, 0);
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
     ngx_conf_merge_str_value(conf->bypass_vary, prev->bypass_vary, "");
+
+    /* a location that declares its own zstd_dcz_dict_file list replaces the
+     * inherited one wholesale (standard nginx array-directive semantics) */
+    ngx_conf_merge_ptr_value(conf->dcz_dicts, prev->dcz_dicts, NULL);
 
     /*
      * zstd_bypass_vary only makes sense alongside a zstd_bypass predicate: it
@@ -1914,6 +2319,139 @@ ngx_http_zstd_cleanup_dict(void *data)
     if (dict != NULL) {
         ZSTD_freeCDict(dict);
     }
+}
+
+
+/*
+ * zstd_dcz_dict_file <path> — load one RFC 9842 dictionary. The file is
+ * read and hashed here at config parse (nginx -t validates it), into
+ * cf->pool so the raw bytes live exactly as long as the configuration
+ * that references them. No CDict is built: the request path references
+ * the bytes with ZSTD_CCtx_refPrefix(), which honors whatever
+ * per-location parameters that request's CCtx carries — repeating the
+ * trained-dict path's CDict-per-(level,window) merge matrix here would
+ * buy latency only, and is deferred until profiling demands it.
+ */
+static char *
+ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_zstd_loc_conf_t *zlcf = conf;
+
+    size_t                     size;
+    ssize_t                    n;
+    ngx_fd_t                   fd;
+    ngx_str_t                 *value, path;
+    ngx_uint_t                 i;
+    ngx_file_info_t            info;
+    ngx_http_zstd_dcz_dict_t  *dict, *dicts;
+
+    (void) cmd;
+
+    value = cf->args->elts;
+    path = value[1];
+
+    if (ngx_conf_full_name(cf->cycle, &path, 1) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    if (zlcf->dcz_dicts == NGX_CONF_UNSET_PTR) {
+        zlcf->dcz_dicts = ngx_array_create(cf->pool, 2,
+                                           sizeof(ngx_http_zstd_dcz_dict_t));
+        if (zlcf->dcz_dicts == NULL) {
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    fd = ngx_open_file(path.data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    if (fd == NGX_INVALID_FILE) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_open_file_n " \"%V\" failed", &path);
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_fd_info(fd, &info) == NGX_FILE_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_fd_info_n " \"%V\" failed", &path);
+        goto failed;
+    }
+
+    size = ngx_file_size(&info);
+
+    if (size == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "dcz dictionary \"%V\" is empty", &path);
+        goto failed;
+    }
+
+    if (size > NGX_HTTP_ZSTD_MAX_DICT_SIZE) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "dcz dictionary \"%V\" too large: %uz bytes "
+                           "(limit: %d bytes)",
+                           &path, size, NGX_HTTP_ZSTD_MAX_DICT_SIZE);
+        goto failed;
+    }
+
+    dict = ngx_array_push(zlcf->dcz_dicts);
+    if (dict == NULL) {
+        goto failed;
+    }
+
+    dict->file = path;
+    dict->bytes.len = size;
+    dict->bytes.data = ngx_palloc(cf->pool, size);
+    if (dict->bytes.data == NULL) {
+        goto failed;
+    }
+
+    n = ngx_read_fd(fd, (void *) dict->bytes.data, size);
+    if (n < 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_read_fd_n " \"%V\" failed", &path);
+        goto failed;
+
+    } else if ((size_t) n != size) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           ngx_read_fd_n " \"%V\" incomplete read", &path);
+        goto failed;
+    }
+
+    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_close_file_n " \"%V\" failed", &path);
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_http_zstd_sha256(dict->bytes.data, size, dict->hash);
+
+    /*
+     * Two entries with the same hash make the negotiation lookup
+     * ambiguous (identical content under two paths is almost certainly a
+     * config mistake — e.g. a copy that was meant to be a new version).
+     * Fail loudly at load rather than silently matching the first.
+     */
+    dicts = zlcf->dcz_dicts->elts;
+
+    for (i = 0; i + 1 < zlcf->dcz_dicts->nelts; i++) {
+        if (ngx_memcmp(dicts[i].hash, dict->hash,
+                       NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) == 0)
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "dcz dictionary \"%V\" has the same content "
+                               "as \"%V\"", &path, &dicts[i].file);
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    return NGX_CONF_OK;
+
+failed:
+
+    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_close_file_n " \"%V\" failed", &path);
+    }
+
+    return NGX_CONF_ERROR;
 }
 
 

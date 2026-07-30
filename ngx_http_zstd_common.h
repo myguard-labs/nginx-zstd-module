@@ -230,18 +230,36 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
 }
 
 
+/*
+ * Generic weight lookup for one content coding in an Accept-Encoding
+ * value. Returns the effective weight for `coding` in milli-units
+ * (0..1000), or -1 when the header expresses no preference for it at
+ * all. An explicit token always decides (even q=0, which then overrides
+ * a permissive "*"); with no explicit token the "*" wildcard applies
+ * only when `allow_wildcard` is set — RFC 9110 §12.5.3's "*" matches
+ * any coding not explicitly listed, but a caller may legitimately
+ * require an explicit opt-in (dcz does: only a dictionary-aware client
+ * that actually holds the dictionary can decode a dcz response, so a
+ * blanket "*" must not turn it on).
+ *
+ * This is the walker ngx_http_zstd_accept_encoding() has always been,
+ * with the coding name parameterized; the zstd semantics are preserved
+ * verbatim by the wrapper below (the fuzz differential oracle depends
+ * on that).
+ */
 static ngx_int_t
-ngx_http_zstd_accept_encoding(ngx_str_t *ae)
+ngx_http_zstd_coding_weight(ngx_str_t *ae, const char *coding,
+    size_t coding_len, ngx_uint_t allow_wildcard)
 {
     u_char     *p   = ae->data;
     u_char     *end = ae->data + ae->len;
-    ngx_int_t   zstd_q = -1;     /* explicit "zstd" weight, -1 = absent */
-    ngx_int_t   star_q = -1;     /* "*" wildcard weight,    -1 = absent */
+    ngx_int_t   coding_q = -1;   /* explicit `coding` weight, -1 = absent */
+    ngx_int_t   star_q = -1;     /* "*" wildcard weight,      -1 = absent */
 
     while (p < end) {
 
         u_char     *tok, *name_end;
-        ngx_int_t   is_zstd, is_star, q;
+        ngx_int_t   is_coding, is_star, q;
 
         /* Skip OWS and empty list elements (RFC 9110 allows stray
          * commas, e.g. ", ,zstd"). */
@@ -269,9 +287,9 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
         }
         name_end = p;
 
-        is_zstd = ((size_t) (name_end - tok) == sizeof("zstd") - 1
-                   && ngx_strncasecmp(tok, (u_char *) "zstd",
-                                      sizeof("zstd") - 1) == 0);
+        is_coding = ((size_t) (name_end - tok) == coding_len
+                     && ngx_strncasecmp(tok, (u_char *) coding,
+                                        coding_len) == 0);
         is_star = (name_end - tok == 1 && tok[0] == '*');
 
         /* Step over any OWS between the name and its ';' or ','. */
@@ -285,8 +303,8 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
         }
 
         if (q >= 0) {
-            if (is_zstd) {
-                zstd_q = q;     /* a later duplicate explicit token wins */
+            if (is_coding) {
+                coding_q = q;   /* a later duplicate explicit token wins */
             } else if (is_star) {
                 star_q = q;
             }
@@ -310,17 +328,36 @@ ngx_http_zstd_accept_encoding(ngx_str_t *ae)
     }
 
     /*
-     * An explicit "zstd" token decides the result (even q=0, which then
-     * overrides a permissive "*"). With no explicit "zstd", the "*"
-     * wildcard applies if present. Acceptable iff the effective weight > 0.
+     * An explicit token decides the result (even q=0, which then
+     * overrides a permissive "*"). With no explicit token, the "*"
+     * wildcard applies if present and permitted by the caller.
      */
-    if (zstd_q >= 0) {
-        return zstd_q > 0 ? NGX_OK : NGX_DECLINED;
+    if (coding_q >= 0) {
+        return coding_q;
     }
-    if (star_q >= 0) {
-        return star_q > 0 ? NGX_OK : NGX_DECLINED;
+    if (allow_wildcard && star_q >= 0) {
+        return star_q;
     }
-    return NGX_DECLINED;
+    return -1;
+}
+
+
+/*
+ * zstd acceptance predicate over one Accept-Encoding value — the
+ * original entry point, now a thin wrapper. Semantics are unchanged:
+ * NGX_OK iff the effective weight for "zstd" (explicit token, else "*"
+ * wildcard) is > 0. The fuzz harness's independent reference oracle
+ * asserts exactly this decision, so any behavioural drift here is a
+ * fuzz failure, not just a review nit.
+ */
+static ngx_int_t
+ngx_http_zstd_accept_encoding(ngx_str_t *ae)
+{
+    ngx_int_t  q;
+
+    q = ngx_http_zstd_coding_weight(ae, "zstd", sizeof("zstd") - 1, 1);
+
+    return q > 0 ? NGX_OK : NGX_DECLINED;
 }
 
 
