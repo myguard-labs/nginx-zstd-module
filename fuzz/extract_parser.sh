@@ -29,7 +29,12 @@ fi
 # two parsers), so match on the following definition line. Capture them in
 # source order (skip_quoted, then eval_qvalue, then accept_encoding) so the
 # generated .inc compiles without forward declarations.
+# The leading sub() strips a CR so extraction also works from a Windows
+# checkout smudged to CRLF (core.autocrlf=true): the `$0 == "}"`
+# terminator and the anchored regexes below otherwise never match and
+# the build fails with the "header layout changed?" error misleadingly.
 awk '
+    { sub(/\r$/, "") }
     /^static (ngx_int_t|u_char \*)$/ { pending = 1; buf = $0 ORS; next }
     pending && /^ngx_http_zstd_(skip_quoted|eval_qvalue|accept_encoding)\(/ {
         capture = 1; pending = 0; print buf; print; next

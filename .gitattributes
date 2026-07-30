@@ -1,1 +1,24 @@
 *.t linguist-language=Text
+
+# Files that are executed or sourced by POSIX sh/perl on Linux (including
+# WSL builds from a Windows checkout) must stay LF: nginx's ./configure
+# sources `config`/`auto/zstd` with sh, which treats a CR as part of the
+# line and fails with "$'\r': command not found" when core.autocrlf=true
+# has smudged the checkout to CRLF.
+config text eol=lf
+auto/* text eol=lf
+*/config text eol=lf
+*.sh text eol=lf
+*.t text eol=lf
+
+# Byte-exact fixtures: fuzz corpus entries are raw Accept-Encoding header
+# bytes and .zst files are compressed frames — any EOL conversion corrupts
+# them.
+fuzz/corpus/* -text
+fuzz/fuzz.dict -text
+*.zst binary
+
+# t/suite/test's byte length is asserted verbatim by the static suite
+# (Content-Length and the size half of the ETag) — CRLF smudging changes
+# the on-disk size and fails every identity-response assertion.
+t/suite/* -text
