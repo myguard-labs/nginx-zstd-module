@@ -166,12 +166,17 @@ does-not-exist.dict" failed
 # ZSTD_maxCLevel() at config load. Without the check libzstd would reject the
 # value per-request, turning one typo into a 500 on every response for the
 # location. Test above the upper bound rather than below the lower one:
-# ZSTD_maxCLevel() is 22 and stable, while ZSTD_minCLevel() is -131072, so a
-# "clearly too negative" literal would have to be enormous to stay invalid.
+# ZSTD_minCLevel() is -131072, so a "clearly too negative" literal would have
+# to be enormous to stay invalid.
+#
+# The value is deliberately far above the bound rather than maxCLevel()+1: the
+# module reads the maximum from libzstd at runtime, so a literal 23 would stop
+# being invalid the day libzstd raises its ceiling, and this must_die block
+# would silently start passing for the wrong reason.
 --- config
     location /lvl {
         zstd on;
-        zstd_comp_level 23;
+        zstd_comp_level 999999;
         default_type text/plain;
         return 200 "body";
     }
