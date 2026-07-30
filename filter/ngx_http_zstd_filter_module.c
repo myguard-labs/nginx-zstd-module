@@ -541,6 +541,38 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     r->gzip_vary = 1;
 
     /*
+     * With dictionaries configured, WHICH encoding this location serves
+     * depends on the request's Available-Dictionary header — the dcz
+     * variant obviously, the plain zstd variant a dictionary-less client
+     * receives, and equally the identity fallback: a client sending
+     * "Accept-Encoding: dcz" (no zstd) with a hash we do not hold gets
+     * identity NOW, but the same client holding a dictionary we DO hold
+     * would get dcz — so a shared cache must key that identity variant
+     * on Available-Dictionary too, or it can keep serving it after the
+     * client acquires the dictionary (a silent compression loss). That
+     * is why this push sits ABOVE the acceptance gate below rather than
+     * next to the Content-Encoding push: every return before this point
+     * declines for reasons invariant in Available-Dictionary; the two
+     * paths after it are not invariant. Accept-Encoding itself is
+     * already covered by gzip_vary above; caches union all Vary lines.
+     */
+    if (zlcf->dcz_dicts != NULL && zlcf->dcz_dicts->nelts > 0) {
+        ngx_table_elt_t  *v;
+
+        v = ngx_list_push(&r->headers_out.headers);
+        if (v == NULL) {
+            return NGX_ERROR;
+        }
+
+        v->hash = 1;
+#if (nginx_version >= 1023000)
+        v->next = NULL;
+#endif
+        ngx_str_set(&v->key, "Vary");
+        ngx_str_set(&v->value, "Available-Dictionary");
+    }
+
+    /*
      * RFC 9842 dcz negotiation first: a client that advertises a
      * dictionary we hold (Available-Dictionary hash match) and accepts
      * the dcz coding gets dictionary compression; everything else falls
@@ -590,31 +622,6 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         ngx_str_set(&h->value, "zstd");
     }
     r->headers_out.content_encoding = h;
-
-    /*
-     * With dictionaries configured, WHICH encoding this location serves
-     * depends on the request's Available-Dictionary header — the dcz
-     * variant obviously, but equally the plain zstd variant a
-     * dictionary-less client receives. A shared cache must therefore key
-     * on it for BOTH variants or it can serve a dcz body to a client
-     * without the dictionary (undecodable). Accept-Encoding itself is
-     * already covered by gzip_vary above; caches union all Vary lines.
-     */
-    if (zlcf->dcz_dicts != NULL && zlcf->dcz_dicts->nelts > 0) {
-        ngx_table_elt_t  *v;
-
-        v = ngx_list_push(&r->headers_out.headers);
-        if (v == NULL) {
-            return NGX_ERROR;
-        }
-
-        v->hash = 1;
-#if (nginx_version >= 1023000)
-        v->next = NULL;
-#endif
-        ngx_str_set(&v->key, "Vary");
-        ngx_str_set(&v->value, "Available-Dictionary");
-    }
 
     r->main_filter_need_in_memory = 1;
 
@@ -2389,6 +2396,24 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                            "(limit: %d bytes)",
                            &path, size, NGX_HTTP_ZSTD_MAX_DICT_SIZE);
         goto failed;
+    }
+
+    /*
+     * Between the window cap (2^23) and the hard limit above the frame
+     * stays well-formed — the RFC's client guarantee is a floor of
+     * max(8 MB, 1.25 x dict), so an 8 MB window is inside it for any
+     * dictionary size — but bytes beyond the window are out of the
+     * matcher's reach and the far end of the dictionary silently stops
+     * contributing. That is a ratio cliff, not an error: warn at config
+     * load instead of letting the operator discover it in telemetry.
+     */
+    if (size > ((size_t) 1 << NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG)) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "dcz dictionary \"%V\" is %uz bytes, larger than "
+                           "the 8 MB dcz compression window; bytes beyond "
+                           "the window cannot be referenced during "
+                           "compression and only shrink the ratio benefit",
+                           &path, size);
     }
 
     dict = ngx_array_push(zlcf->dcz_dicts);

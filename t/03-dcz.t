@@ -1,5 +1,6 @@
 use Test::Nginx::Socket;
 use File::Basename;
+use File::Spec;
 use Digest::SHA qw(sha256);
 use MIME::Base64 qw(encode_base64);
 use lib 'lib';
@@ -35,6 +36,20 @@ my $dict_raw = do {
 };
 our $dict_b64 = encode_base64(sha256($dict_raw), "");
 our $bad_b64  = encode_base64("\x01" x 32, "");
+
+# A dictionary above the 8 MB dcz window cap but under the 10 MB hard
+# limit, generated rather than committed (nobody wants an 8 MB fixture
+# in-tree). Exposed to config blocks via $TEST_NGINX_DCZ_BIGDICT.
+my $big_path = File::Spec->catfile(File::Spec->tmpdir(),
+                                   "zstd-dcz-bigdict-$$.bin");
+{
+    open my $bf, '>', $big_path or die "bigdict: $!";
+    binmode $bf;
+    print {$bf} 'A' x (8 * 1024 * 1024 + 17);
+    close $bf;
+}
+$ENV{'TEST_NGINX_DCZ_BIGDICT'} = $big_path;
+END { unlink $big_path if $big_path; }
 
 no_long_string();
 log_level 'warn';
@@ -306,7 +321,61 @@ Content-Encoding: zstd
 
 
 
-=== TEST 12: an empty dictionary file is a config-load error
+=== TEST 12: identity fallback still varies on Available-Dictionary
+# PR #92 review: a client sending "Accept-Encoding: dcz" (no zstd) with
+# a hash we do not hold gets identity — but the SAME client holding a
+# dictionary we DO hold would get dcz, so the identity variant is not
+# invariant in Available-Dictionary. Without the Vary a shared cache
+# keeps serving the stored identity body after the client acquires the
+# right dictionary (silent compression loss). Guards the hoisting of
+# the Vary push above the acceptance gate.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: dcz\nAvailable-Dictionary: :$::bad_b64:"
+--- response_headers
+!Content-Encoding
+Vary: Available-Dictionary
+--- no_error_log
+[error]
+
+
+
+=== TEST 13: a dictionary above the 8 MB window cap warns at config load
+# The frame stays well-formed (the RFC client guarantee is a floor of
+# max(8 MB, 1.25 x dict)), but dictionary bytes beyond the window cannot
+# be referenced — a silent ratio cliff the operator should hear about at
+# load time, not discover in telemetry.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_DCZ_BIGDICT;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- error_log
+larger than the 8 MB dcz compression window
+--- no_error_log
+[error]
+
+
+
+=== TEST 14: an empty dictionary file is a config-load error
 --- config
     location /t {
         zstd on;
@@ -324,7 +393,7 @@ is empty
 
 
 
-=== TEST 13: two dictionaries with identical content are a config-load error
+=== TEST 15: two dictionaries with identical content are a config-load error
 # The negotiation lookup would be ambiguous; almost certainly a copy that
 # was meant to be a new version. Refuse to start rather than match the
 # first silently.
