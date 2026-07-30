@@ -37,6 +37,20 @@ def parse_args() -> argparse.Namespace:
         help="Path to the nginx binary to start for the test.",
     )
     parser.add_argument(
+        "--filter-module",
+        help=(
+            "Optional path to ngx_http_zstd_filter_module.so. "
+            "If omitted, a sibling module next to the nginx binary is used."
+        ),
+    )
+    parser.add_argument(
+        "--static-module",
+        help=(
+            "Optional path to ngx_http_zstd_static_module.so. "
+            "If omitted, a sibling module next to the nginx binary is used."
+        ),
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=18106,
@@ -57,7 +71,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def wait_for_port(port: int, timeout: float = 10.0) -> None:
+def detect_module(explicit, nginx: pathlib.Path, name: str):
+    """A dynamic-module build (--add-dynamic-module, e.g. the Coverage CI
+    job) needs load_module lines or `zstd on;` is an unknown directive
+    and nginx dies at config parse; a static build has no .so and needs
+    none. Mirror the sibling tools: an explicit path wins, else use a
+    module sitting next to the nginx binary if present."""
+    if explicit:
+        return pathlib.Path(explicit)
+    sib = nginx.parent / name
+    return sib if sib.exists() else None
+
+
+def wait_for_port(port: int, timeout: float = 10.0, stderr_file=None) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -65,7 +91,17 @@ def wait_for_port(port: int, timeout: float = 10.0) -> None:
                 return
         except OSError:
             time.sleep(0.1)
-    raise RuntimeError(f"nginx did not start listening on 127.0.0.1:{port}")
+
+    # A config-parse failure would otherwise surface only as this silent
+    # timeout; include what nginx actually said on stderr.
+    detail = ""
+    if stderr_file is not None and stderr_file.exists():
+        text = stderr_file.read_text(errors="replace").strip()
+        if text:
+            detail = f"; nginx stderr:\n{text}"
+    raise RuntimeError(
+        f"nginx did not start listening on 127.0.0.1:{port}{detail}"
+    )
 
 
 def build_fixtures(root: pathlib.Path, lines: int) -> tuple[bytes, bytes]:
@@ -89,13 +125,14 @@ def build_fixtures(root: pathlib.Path, lines: int) -> tuple[bytes, bytes]:
     return dict_path.read_bytes(), (root / "html" / "app.js").read_bytes()
 
 
-def write_config(root: pathlib.Path, port: int) -> pathlib.Path:
+def write_config(root: pathlib.Path, port: int, modules) -> pathlib.Path:
     conf_dir = root / "conf"
     conf_dir.mkdir()
     (root / "logs").mkdir()
+    load = "".join(f"load_module {m};\n" for m in modules)
     conf = conf_dir / "nginx.conf"
     conf.write_text(
-        f"""
+        f"""{load}
 worker_processes 1;
 daemon off;
 error_log logs/error.log warn;
@@ -181,21 +218,35 @@ def main() -> int:
             print(f"FAIL - {name} {detail}")
             failures.append(name)
 
+    nginx_path = pathlib.Path(args.nginx_binary)
+    modules = [
+        m
+        for m in (
+            detect_module(args.filter_module, nginx_path,
+                          "ngx_http_zstd_filter_module.so"),
+            detect_module(args.static_module, nginx_path,
+                          "ngx_http_zstd_static_module.so"),
+        )
+        if m
+    ]
+
     with tempfile.TemporaryDirectory(prefix="zstd-dcz-") as tmp:
         root = pathlib.Path(tmp)
         dict_bytes, resource = build_fixtures(root, args.fixture_lines)
-        conf = write_config(root, args.port)
+        conf = write_config(root, args.port, modules)
         dict_hash = hashlib.sha256(dict_bytes).digest()
         dict_b64 = base64.b64encode(dict_hash).decode()
         bad_b64 = base64.b64encode(b"\x01" * 32).decode()
 
-        nginx = subprocess.Popen(
-            [args.nginx_binary, "-p", str(root), "-c", str(conf)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        stderr_file = root / "nginx-stderr.log"
+        with stderr_file.open("wb") as stderr_handle:
+            nginx = subprocess.Popen(
+                [args.nginx_binary, "-p", str(root), "-c", str(conf)],
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_handle,
+            )
         try:
-            wait_for_port(args.port)
+            wait_for_port(args.port, stderr_file=stderr_file)
 
             # -- plain zstd client: baseline and cache-key contract
             headers, plain_body = fetch(
