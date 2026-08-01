@@ -58,15 +58,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # port: every leg of this matrix runs concurrently on the SAME
+          # self-hosted runner, so each needs its own Test::Nginx listen port
+          # — the 1984 default makes the losers die with "Address already in
+          # use" and bail out at whatever test they happened to reach.
+          # Spaced by 10 because Test::Nginx reserves port+1..+3 for its
+          # stream servers. Kept distinct from build-test.yml's ports too,
+          # since both workflows can run at once on this runner.
           - flavor: nginx
             version: "1.31.2"
             label: mainline
+            port: 1984
           - flavor: nginx
             version: "1.30.3"
             label: stable
+            port: 1994
           - flavor: angie
             version: "1.11.5"
             label: angie
+            port: 2004
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -105,6 +115,8 @@ jobs:
           # See build-test.yml's identical setting for why this must be 20,
           # not the ~2s Test::Nginx::Socket default.
           TEST_NGINX_TIMEOUT: "20"
+          # Per-leg listen port — see the matrix comment above.
+          TEST_NGINX_SERVER_PORT: "${{ matrix.port }}"
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
           export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-${{ matrix.flavor }}-${{ matrix.version }}"

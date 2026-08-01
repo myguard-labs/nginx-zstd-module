@@ -590,6 +590,12 @@ jobs:
     env:
       # Resolved mainline nginx — names the build artifact to download.
       NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
+      # Every Test::Nginx job on this self-hosted runner needs its own listen
+      # port: the 1984 default collides across concurrent jobs (and with
+      # ci-deep.yml's matrix), and the loser dies with "Address already in
+      # use" at whatever test it happened to reach. Spaced by 10 because
+      # Test::Nginx reserves port+1..+3 for its stream servers.
+      TEST_NGINX_SERVER_PORT: "2014"
 
     steps:
       - name: Checkout module
@@ -850,6 +856,9 @@ jobs:
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     needs: build-asan
+    env:
+      # Own Test::Nginx listen port — see the tests job for why.
+      TEST_NGINX_SERVER_PORT: "2024"
 
     steps:
       - name: Checkout module
@@ -970,6 +979,8 @@ jobs:
     needs: resolve
     env:
       NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
+      # Own Test::Nginx listen port — see the tests job for why.
+      TEST_NGINX_SERVER_PORT: "2034"
 
     steps:
       - name: Checkout module
