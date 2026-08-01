@@ -19,6 +19,7 @@ dictionary and a ``zstd_window_log 15`` cap and asserts:
 
 import argparse
 import http.server
+import os
 import pathlib
 import socket
 import socketserver
@@ -165,7 +166,10 @@ def main() -> int:
     payload = make_payload()
     _Handler.payload = payload
 
-    with tempfile.TemporaryDirectory(prefix="zstd-wincap-") as td:
+    with tempfile.TemporaryDirectory(prefix="zstd-wincap-") as td:
+        # mkdtemp gives 0700: run as root, workers drop to the
+        # compiled-in nginx user and cannot enter it -> 403s
+        os.chmod(td, 0o755)
         root = pathlib.Path(td)
         logs = root / "logs"
         logs.mkdir()

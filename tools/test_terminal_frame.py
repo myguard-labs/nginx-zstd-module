@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import importlib.util
+import os
 import pathlib
 import subprocess
 import sys
@@ -124,7 +125,10 @@ def main() -> int:
         if not module.exists():
             raise FileNotFoundError(f"zstd module not found: {module}")
 
-    with tempfile.TemporaryDirectory(prefix="zstd-terminal-frame-") as temp_dir_str:
+    with tempfile.TemporaryDirectory(prefix="zstd-terminal-frame-") as temp_dir_str:
+        # mkdtemp gives 0700: run as root, workers drop to the
+        # compiled-in nginx user and cannot enter it -> 403s
+        os.chmod(temp_dir_str, 0o755)
         temp_dir = pathlib.Path(temp_dir_str)
         html_dir = temp_dir / "html"
         conf_dir = temp_dir / "conf"

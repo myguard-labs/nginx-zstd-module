@@ -14,6 +14,7 @@ the dcz body must be smaller than the plain zstd body.
 import argparse
 import base64
 import hashlib
+import os
 import pathlib
 import shutil
 import socket
@@ -230,7 +231,10 @@ def main() -> int:
         if m
     ]
 
-    with tempfile.TemporaryDirectory(prefix="zstd-dcz-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="zstd-dcz-") as tmp:
+        # mkdtemp gives 0700: run as root, workers drop to the
+        # compiled-in nginx user and cannot enter it -> 403s
+        os.chmod(tmp, 0o755)
         root = pathlib.Path(tmp)
         dict_bytes, resource = build_fixtures(root, args.fixture_lines)
         conf = write_config(root, args.port, modules)

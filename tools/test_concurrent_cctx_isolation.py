@@ -46,6 +46,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import http.server
+import os
 import pathlib
 import socket
 import socketserver
@@ -183,7 +184,10 @@ def main() -> int:
                                "ngx_http_zstd_static_module.so"))
             if m]
 
-    with tempfile.TemporaryDirectory(prefix="zstd-cctx-") as td:
+    with tempfile.TemporaryDirectory(prefix="zstd-cctx-") as td:
+        # mkdtemp gives 0700: run as root, workers drop to the
+        # compiled-in nginx user and cannot enter it -> 403s
+        os.chmod(td, 0o755)
         root = pathlib.Path(td)
         logs = root / "logs"
         logs.mkdir()

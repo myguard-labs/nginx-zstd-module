@@ -795,6 +795,8 @@ Operational notes:
 * **Window and memory.** dcz frames never declare a window above 8 MB (the RFC's unconditional client guarantee), sized down to dictionary + expected content when smaller. An explicit `zstd_window_log` below that still wins — a dictionary does not void the memory cap. Dictionaries are referenced per request via `ZSTD_CCtx_refPrefix()` (RFC 9842 `type=raw` semantics); the per-request table build over the dictionary costs roughly milliseconds per MB of dictionary, so prefer focused dictionaries (the previous version of one resource) over giant blobs.
 * **Cross-origin.** Requests with `Sec-Fetch-Site` other than `same-origin`/`none` fall back to plain zstd rather than attempting RFC 9842's CORS legs. `Dictionary-ID` is not consumed — the hash is a complete key — so omit `id=` from `Use-As-Dictionary` (clients would echo it, but nothing here needs it).
 
+**Troubleshooting:** if `Vary: Available-Dictionary` appears but dcz never negotiates for hashes you know are right, run `nginx -T | grep dcz_dict_file` and check the loaded entries are your dictionary *files* � a deploy-generated list of directives must be pulled in with `include`, not passed to `zstd_dcz_dict_file` itself (which loyally loads the list file as a one-entry dictionary that matches nothing). Also check the error log for a rejected reload: a failed `nginx -t` leaves the previous configuration running.
+
 Verify a response end-to-end with the zstd CLI (the 40-byte header is a valid skippable frame, so no stripping is needed):
 
 ```bash

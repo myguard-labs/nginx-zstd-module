@@ -38,6 +38,7 @@ import argparse
 import gzip as _gzip
 import http.server
 import itertools
+import os
 import pathlib
 import shutil
 import socket
@@ -198,7 +199,10 @@ def main() -> int:
             if m]
     have_brotli = shutil.which("brotli") is not None
 
-    with tempfile.TemporaryDirectory(prefix="zstd-matrix-") as td:
+    with tempfile.TemporaryDirectory(prefix="zstd-matrix-") as td:
+        # mkdtemp gives 0700: run as root, workers drop to the
+        # compiled-in nginx user and cannot enter it -> 403s
+        os.chmod(td, 0o755)
         root = pathlib.Path(td)
         sroot = root / "static"
         logs = root / "logs"
