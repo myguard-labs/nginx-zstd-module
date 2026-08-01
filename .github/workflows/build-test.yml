@@ -583,17 +583,20 @@ jobs:
             test -f "$so" || { echo "✗ missing $so"; exit 1; }
           done
 
-          # Positive control: the zstd modules carry the libzstd
-          # DT_NEEDED through ngx_module_libs.
-          for so in ngx_http_zstd_filter_module.so \
-                    ngx_http_zstd_static_module.so; do
-            if ! readelf -d "$so" | grep -E 'NEEDED.*libzstd' > /dev/null; then
-              echo "✗ $so does not link libzstd (ngx_module_libs broken?)"
-              readelf -d "$so" | grep NEEDED || true
-              exit 1
-            fi
-            echo "✓ $so links libzstd"
-          done
+          # Positive control: the FILTER module carries the libzstd
+          # DT_NEEDED through ngx_module_libs — it references libzstd
+          # symbols, so no toolchain may drop it. The static module is
+          # deliberately NOT asserted either way: it serves pre-compressed
+          # files and calls no libzstd function, so an --as-needed
+          # toolchain (Ubuntu's default) legitimately drops its libzstd
+          # NEEDED while other toolchains keep it.
+          if ! readelf -d ngx_http_zstd_filter_module.so \
+               | grep -E 'NEEDED.*libzstd' > /dev/null; then
+            echo "✗ filter module does not link libzstd (ngx_module_libs broken?)"
+            readelf -d ngx_http_zstd_filter_module.so | grep NEEDED || true
+            exit 1
+          fi
+          echo "✓ filter module links libzstd"
 
           # The fix under test: an unrelated module in the same build
           # must NOT inherit libzstd.
