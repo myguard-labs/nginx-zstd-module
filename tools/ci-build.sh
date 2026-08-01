@@ -211,13 +211,29 @@ echo "Phase 2: Configuring $FLAVOR with zstd module"
 echo "=========================================================================="
 echo ""
 
+# The flags below are what t/ requires, not preferences — build-test.yml's
+# nginx carries the same set, and CI Deep's binary has to match or the suite
+# fails on the build rather than on the module:
+#   http_sub_module      — t/00-filter.t TEST 33 uses sub_filter
+#   http_auth_request    — t/00-filter.t TEST 58 uses auth_request
+#     (without either, config load fails with "unknown directive" and
+#      Test::Nginx bails out of the whole TAP file)
+#   --with-debug         — TEST 91 asserts on a debug-level error.log line
+#   ZSTD_STATIC_LINKING_ONLY — TEST 45 needs the memory-estimation API that
+#     zstd_max_cctx_memory is built on; auto/zstd only defines it on the
+#     explicit ZSTD_INC path, not on the pkg-config auto-discovery path this
+#     script takes.
 ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/"$FLAVOR" \
+    --with-debug \
     --with-http_ssl_module \
     --with-http_gzip_static_module \
     --with-http_realip_module \
     --with-http_v2_module \
+    --with-http_sub_module \
+    --with-http_auth_request_module \
+    --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY" \
     --add-dynamic-module="$ZSTD_MODULE_DIR" \
     2>&1 | tail -5
 

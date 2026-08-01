@@ -119,13 +119,20 @@ jobs:
           TEST_NGINX_SERVER_PORT: "${{ matrix.port }}"
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-${{ matrix.flavor }}-${{ matrix.version }}"
-          mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
           # t/01-static.t asserts on fixture mtimes (Last-Modified/If-Modified-Since);
           # pin them to a fixed timestamp, same as build-test.yml's tests job.
           touch -d @1541504307 t/suite/test t/suite/test.zst
-          prove -v t/00-filter.t t/01-static.t t/02-conf-warn.t
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-${{ matrix.flavor }}-${{ matrix.version }}"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          prove -v t/00-filter.t t/02-conf-warn.t
+          # 01-static.t serves fixtures via "root ../../t/suite", which only
+          # resolves when the servroot sits two levels under the checkout —
+          # a /tmp servroot makes every static case 404. Same split as
+          # build-test.yml's tests job.
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          prove -v t/01-static.t
 
   fuzz:
     name: Fuzz (Accept-Encoding, long)
