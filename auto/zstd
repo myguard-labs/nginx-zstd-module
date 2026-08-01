@@ -6,7 +6,16 @@
 # static/config. Exports:
 #   ngx_zstd_opt_I — compiler include flags for <zstd.h>
 #   ngx_zstd_opt_L — linker flags for libzstd
-# and appends the link flags to NGX_LD_OPT for static nginx builds.
+#
+# The link flags flow ONLY through each module's ngx_module_libs (see
+# filter/config and static/config): nginx's auto/module routes those to
+# CORE_LIBS for a static (--add-module) build and to the module's own
+# link line for a dynamic (--add-dynamic-module) build. They must NOT be
+# appended to NGX_LD_OPT — that variable is global to the whole build, so
+# every OTHER dynamic module in the same nginx configure (e.g. an
+# ngx_brotli pair) would pick up a spurious DT_NEEDED on libzstd, which
+# surfaces as dependency bloat in distro packaging (this module's .so
+# requirements leaking onto unrelated module packages).
 
 ngx_feature_incs="#include <zstd.h>"
 # ZSTD_compressStream2() (and ZSTD_CCtx_reset(), used unconditionally by the
@@ -124,8 +133,6 @@ END
     fi
 
 fi
-
-NGX_LD_OPT="$ngx_zstd_opt_L $NGX_LD_OPT"
 
 # Advisory: report the detected zstd version when a directive's full
 # functionality needs a newer library than the 1.4.0 floor enforced above.
