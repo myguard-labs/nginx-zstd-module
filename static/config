@@ -17,7 +17,14 @@ ngx_module_name=ngx_http_zstd_static_module
 ngx_module_incs="$ngx_zstd_opt_I"
 ngx_module_srcs=$HTTP_ZSTD_SRCS
 ngx_module_deps=$HTTP_ZSTD_DEPS
-ngx_module_libs="$ngx_zstd_opt_L"
+# No libs on purpose: the static module serves pre-compressed .zst files
+# and calls no libzstd function. Requesting $ngx_zstd_opt_L here only
+# produced a toolchain-dependent vestigial DT_NEEDED on the .so —
+# kept by linkers without --as-needed, dropped by toolchains that
+# default to it (e.g. Ubuntu) — encoding a linker default instead of
+# module behaviour, and differing from sibling static modules (the
+# brotli static module requests nothing).
+ngx_module_libs=
 ngx_module_order="ngx_http_brotli_static_module \
                   $ngx_module_name"
 
