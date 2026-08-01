@@ -1,6 +1,8 @@
-# libzstd discovery (ngx_zstd_opt_I / ngx_zstd_opt_L, NGX_LD_OPT, version
-# advisory) runs once in ../auto/zstd, sourced from the top-level config before
-# this file. Here we only declare the filter module itself.
+# libzstd discovery (ngx_zstd_opt_I / ngx_zstd_opt_L, version advisory) runs
+# once in ../auto/zstd, sourced from the top-level config before this file.
+# Here we only declare the filter module itself; the link flags are passed
+# via ngx_module_libs only (never the build-global NGX_LD_OPT — see
+# ../auto/zstd).
 
 HTTP_ZSTD_SRCS="$ngx_addon_dir/ngx_http_zstd_filter_module.c"
 

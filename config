@@ -1,8 +1,10 @@
 _ngx_zstd_root=$ngx_addon_dir
 
-# Discover libzstd once (sets ngx_zstd_opt_I / ngx_zstd_opt_L, appends to
-# NGX_LD_OPT, emits the version advisory). Both module configs below reuse the
-# result instead of repeating the probe.
+# Discover libzstd once (sets ngx_zstd_opt_I / ngx_zstd_opt_L, emits the
+# version advisory). Both module configs below reuse the result instead of
+# repeating the probe. The link flags flow only through each module's
+# ngx_module_libs — never NGX_LD_OPT, which is build-global and would leak
+# a libzstd DT_NEEDED onto every other dynamic module (see auto/zstd).
 . $_ngx_zstd_root/auto/zstd
 
 ngx_addon_dir=$_ngx_zstd_root/filter
