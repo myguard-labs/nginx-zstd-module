@@ -561,6 +561,7 @@ jobs:
 
       - name: Configure with zstd + stub as dynamic modules, build modules
         run: |
+          set -euo pipefail
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
           cd "nginx-${NGINX_VERSION}"
           ./configure \
@@ -573,40 +574,73 @@ jobs:
       - name: Assert linkage isolation (both directions)
         run: |
           set -euo pipefail
-          cd "nginx-${NGINX_VERSION}/objs"
+          cd "nginx-${NGINX_VERSION}"
 
           # Existence first: a renamed/missing .so must fail here, not
-          # let the negative assertion below pass vacuously.
+          # let the negative assertions below pass vacuously.
           for so in ngx_http_zstd_filter_module.so \
                     ngx_http_zstd_static_module.so \
                     ngx_http_linkcheck_module.so; do
-            test -f "$so" || { echo "✗ missing $so"; exit 1; }
+            test -f "objs/$so" || { echo "✗ missing objs/$so"; exit 1; }
           done
 
-          # Positive control: the FILTER module carries the libzstd
-          # DT_NEEDED through ngx_module_libs — it references libzstd
-          # symbols, so no toolchain may drop it. The static module is
-          # deliberately NOT asserted either way: it serves pre-compressed
-          # files and calls no libzstd function, so an --as-needed
-          # toolchain (Ubuntu's default) legitimately drops its libzstd
-          # NEEDED while other toolchains keep it.
-          if ! readelf -d ngx_http_zstd_filter_module.so \
-               | grep -E 'NEEDED.*libzstd' > /dev/null; then
-            echo "✗ filter module does not link libzstd (ngx_module_libs broken?)"
-            readelf -d ngx_http_zstd_filter_module.so | grep NEEDED || true
-            exit 1
-          fi
-          echo "✓ filter module links libzstd"
+          # PRIMARY assertions target the GENERATED LINK COMMAND, not
+          # the linked artifact: a toolchain defaulting to --as-needed
+          # (the gcc on these runners included) drops an unused libzstd
+          # NEEDED from the stub's .so even when the NGX_LD_OPT leak is
+          # present — a readelf-only negative therefore passes either
+          # way and tests nothing. The Makefile records what nginx's
+          # build system emitted, before the linker gets a vote. Grab
+          # the "$(LINK) -o objs/<so>" recipe line plus its backslash
+          # continuations (a plain target-to-blank-line sed range stops
+          # at the dependency list and never reaches the recipe).
+          rule() {
+            awk -v so="objs/$1.so" \
+              '$0 ~ ("-o " so) { grab = 1 }
+               grab { print; if ($0 !~ /\\$/) exit }' objs/Makefile
+          }
 
-          # The fix under test: an unrelated module in the same build
-          # must NOT inherit libzstd.
-          if readelf -d ngx_http_linkcheck_module.so \
-               | grep -E 'NEEDED.*libzstd' > /dev/null; then
-            echo "✗ stub module inherited a libzstd DT_NEEDED (NGX_LD_OPT leak)"
-            readelf -d ngx_http_linkcheck_module.so | grep NEEDED
+          # Positive control: the filter module's rule must carry
+          # -lzstd via ngx_module_libs — also proves rule() extracts a
+          # non-empty block, so the negative below cannot pass because
+          # the sed matched nothing.
+          if ! rule ngx_http_zstd_filter_module | grep -q -- '-lzstd'; then
+            echo "✗ filter module link rule lacks -lzstd (ngx_module_libs broken?)"
+            rule ngx_http_zstd_filter_module
             exit 1
           fi
-          echo "✓ stub module free of libzstd — no NGX_LD_OPT leak"
+          echo "✓ filter module link rule carries -lzstd"
+
+          # The fix under test: an unrelated module's link rule must
+          # NOT mention libzstd.
+          if rule ngx_http_linkcheck_module | grep -q -- '-lzstd'; then
+            echo "✗ stub module link rule carries -lzstd (NGX_LD_OPT leak)"
+            rule ngx_http_linkcheck_module
+            exit 1
+          fi
+          echo "✓ stub module link rule free of -lzstd — no NGX_LD_OPT leak"
+
+          # readelf belt under the Makefile suspenders: the filter's
+          # DT_NEEDED may not be dropped by any toolchain (it references
+          # libzstd symbols), and on toolchains without --as-needed the
+          # stub check additionally guards link inputs that reach the
+          # command line outside the module's own rule text. The static
+          # module is deliberately not asserted either way: it calls no
+          # libzstd function, so its NEEDED reflects the linker default,
+          # not module behaviour.
+          if ! readelf -d objs/ngx_http_zstd_filter_module.so \
+               | grep -E 'NEEDED.*libzstd' > /dev/null; then
+            echo "✗ filter module .so does not link libzstd"
+            readelf -d objs/ngx_http_zstd_filter_module.so | grep NEEDED || true
+            exit 1
+          fi
+          if readelf -d objs/ngx_http_linkcheck_module.so \
+               | grep -E 'NEEDED.*libzstd' > /dev/null; then
+            echo "✗ stub module .so inherited a libzstd DT_NEEDED"
+            readelf -d objs/ngx_http_linkcheck_module.so | grep NEEDED
+            exit 1
+          fi
+          echo "✓ readelf agrees on both"
 
   # ── ASAN + UBSAN build — catches the lifetime/UB bugs in this module's
   #    history (per-request ctx, terminal-frame). Uses valgrind.suppress'd

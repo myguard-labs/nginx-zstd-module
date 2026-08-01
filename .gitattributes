@@ -22,3 +22,7 @@ fuzz/fuzz.dict -text
 # (Content-Length and the size half of the ETag) — CRLF smudging changes
 # the on-disk size and fails every identity-response assertion.
 t/suite/* -text
+
+# CI-only stub module for the linkage-isolation job; keep it out of
+# release tarballs (git archive).
+/tools/ci-linkcheck-module export-ignore
