@@ -595,17 +595,31 @@ jobs:
           # build system emitted, before the linker gets a vote. Grab
           # the "$(LINK) -o objs/<so>" recipe line plus its backslash
           # continuations (a plain target-to-blank-line sed range stops
-          # at the dependency list and never reaches the recipe).
+          # at the dependency list and never reaches the recipe —
+          # nginx emits a blank line between the two). index() rather
+          # than a regex match, so the dots in "<name>.so" are literal.
           rule() {
             awk -v so="objs/$1.so" \
-              '$0 ~ ("-o " so) { grab = 1 }
+              'index($0, "-o " so) { grab = 1 }
                grab { print; if ($0 !~ /\\$/) exit }' objs/Makefile
           }
 
+          # Every assertion below is only as good as rule() returning
+          # the recipe it was asked for: an empty block makes a
+          # negative grep pass for free. Check extraction itself first,
+          # for both targets, before reading anything into the result.
+          for mod in ngx_http_zstd_filter_module ngx_http_linkcheck_module; do
+            rule "$mod" | grep -q . || {
+              echo "✗ no link rule extracted for $mod — objs/Makefile shape changed?"
+              exit 1
+            }
+          done
+
           # Positive control: the filter module's rule must carry
-          # -lzstd via ngx_module_libs — also proves rule() extracts a
-          # non-empty block, so the negative below cannot pass because
-          # the sed matched nothing.
+          # -lzstd via ngx_module_libs. Proves the per-module channel
+          # the fix relies on is live, so the negative below is a
+          # statement about NGX_LD_OPT and not about a build that
+          # linked no zstd at all.
           if ! rule ngx_http_zstd_filter_module | grep -q -- '-lzstd'; then
             echo "✗ filter module link rule lacks -lzstd (ngx_module_libs broken?)"
             rule ngx_http_zstd_filter_module
@@ -614,13 +628,19 @@ jobs:
           echo "✓ filter module link rule carries -lzstd"
 
           # The fix under test: an unrelated module's link rule must
-          # NOT mention libzstd.
-          if rule ngx_http_linkcheck_module | grep -q -- '-lzstd'; then
-            echo "✗ stub module link rule carries -lzstd (NGX_LD_OPT leak)"
+          # not mention zstd in any form. Matching bare "zstd" rather
+          # than the "-lzstd" spelling on purpose — pkg-config can hand
+          # back an absolute /usr/lib/.../libzstd.so or -l:libzstd.a,
+          # and a leak wearing either spelling is still a leak. Safe
+          # only for this target: the filter module's own rule names
+          # objs/ngx_http_zstd_filter_module.so, so the same pattern
+          # would match its filename and assert nothing.
+          if rule ngx_http_linkcheck_module | grep -qi zstd; then
+            echo "✗ stub module link rule references zstd (NGX_LD_OPT leak)"
             rule ngx_http_linkcheck_module
             exit 1
           fi
-          echo "✓ stub module link rule free of -lzstd — no NGX_LD_OPT leak"
+          echo "✓ stub module link rule free of zstd — no NGX_LD_OPT leak"
 
           # readelf belt under the Makefile suspenders: the filter's
           # DT_NEEDED may not be dropped by any toolchain (it references
