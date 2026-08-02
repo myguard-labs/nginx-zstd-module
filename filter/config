@@ -20,6 +20,39 @@ ngx_module_incs="$ngx_zstd_opt_I"
 ngx_module_srcs=$HTTP_ZSTD_SRCS
 ngx_module_deps=$HTTP_ZSTD_DEPS
 ngx_module_libs="$ngx_zstd_opt_L"
+
+# Optional acceleration for dcz dictionary hashing: RFC 9842 keys
+# negotiation on the SHA-256 of every registered dictionary, computed at
+# config load — so nginx -t and every reload pay it. libcrypto's EVP
+# SHA-256 (hardware-accelerated where available) is roughly an order of
+# magnitude faster than the portable fallback in
+# ../ngx_http_zstd_sha256.h, which turns seconds into a blip at
+# hundreds-of-dictionaries scale. Feature-tested, never required: with
+# no libcrypto the portable implementation is used and nothing changes.
+# The -lcrypto goes through ngx_module_libs so it stays scoped to this
+# module (never build-global NGX_LD_OPT — see ../auto/zstd).
+#
+# NGX_ZSTD_NO_LIBCRYPTO=1 in the configure environment skips the
+# detection entirely (used by CI to keep the portable path covered;
+# also the escape hatch if a build must not link libcrypto).
+if [ "${NGX_ZSTD_NO_LIBCRYPTO:-0}" != 1 ]; then
+    ngx_feature="OpenSSL EVP SHA-256 (libcrypto)"
+    ngx_feature_name="NGX_HTTP_ZSTD_HAVE_LIBCRYPTO"
+    ngx_feature_run=no
+    ngx_feature_incs="#include <openssl/evp.h>"
+    ngx_feature_path=
+    ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
+                      unsigned int   n;
+                      if (EVP_Digest(\"x\", 1, md, &n, EVP_sha256(), NULL) != 1)
+                          return 1"
+    ngx_feature_libs="-lcrypto"
+    . auto/feature
+
+    if [ $ngx_found = yes ]; then
+        ngx_module_libs="$ngx_module_libs -lcrypto"
+    fi
+fi
+
 ngx_module_order="$ngx_module_name \
                   ngx_pagespeed \
                   ngx_http_postpone_filter_module \

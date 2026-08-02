@@ -1,6 +1,5 @@
 /*
- * Minimal SHA-256 (FIPS 180-4) for hashing dcz dictionaries at config
- * load.
+ * SHA-256 (FIPS 180-4) for hashing dcz dictionaries at config load.
  *
  * Why a local implementation: RFC 9842 keys dictionary negotiation on the
  * SHA-256 of the dictionary bytes (the client's Available-Dictionary hash
@@ -8,8 +7,18 @@
  * ships only MD5/SHA-1 and OpenSSL is present only when nginx is built
  * with an SSL module — which this module must not require. The hash runs
  * once per configured dictionary at config load, never per request, so a
- * compact byte-at-a-time implementation is the right trade against a new
- * hard dependency.
+ * compact byte-at-a-time implementation is an acceptable floor.
+ *
+ * When filter/config detects libcrypto at build time
+ * (NGX_HTTP_ZSTD_HAVE_LIBCRYPTO), the one-shot entry point uses
+ * OpenSSL's EVP SHA-256 instead — hardware-accelerated where the CPU
+ * allows, and roughly an order of magnitude faster than the portable
+ * loop either way. That matters at real dictionary counts: config load
+ * (and so nginx -t and every reload) hashes each registered file, which
+ * at hundreds of entries turns into seconds of pure CPU with the
+ * portable code. The portable implementation stays compiled in as the
+ * runtime fallback: EVP_Digest() allocates internally and may fail
+ * under memory pressure, and falling back keeps this a total function.
  *
  * static inline (matching ngx_http_zstd_common.h's pattern): only the
  * filter TU uses it today; inline definitions are exempt from
@@ -22,6 +31,10 @@
 
 #include <ngx_config.h>
 #include <ngx_core.h>
+
+#if (NGX_HTTP_ZSTD_HAVE_LIBCRYPTO)
+#include <openssl/evp.h>
+#endif
 
 
 #define NGX_HTTP_ZSTD_SHA256_DIGEST_LEN  32
@@ -214,6 +227,21 @@ ngx_http_zstd_sha256(const u_char *data, size_t len,
     u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN])
 {
     ngx_http_zstd_sha256_t  c;
+
+#if (NGX_HTTP_ZSTD_HAVE_LIBCRYPTO)
+    unsigned int  mdlen;
+
+    mdlen = NGX_HTTP_ZSTD_SHA256_DIGEST_LEN;
+
+    if (EVP_Digest(data, len, digest, &mdlen, EVP_sha256(), NULL) == 1
+        && mdlen == NGX_HTTP_ZSTD_SHA256_DIGEST_LEN)
+    {
+        return;
+    }
+
+    /* EVP_Digest() allocates a context internally and can fail under
+       memory pressure; fall through to the portable implementation. */
+#endif
 
     ngx_http_zstd_sha256_init(&c);
     ngx_http_zstd_sha256_update(&c, data, len);

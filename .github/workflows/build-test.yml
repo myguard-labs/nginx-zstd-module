@@ -364,7 +364,13 @@ jobs:
                     -Wunreachable-code -Wunused -Werror"
           make -j"$(nproc)"
           ccache -s || true
-          echo "✓ nginx binary built"
+          # This binary feeds the full test suites, which are meant to run
+          # the accelerated dictionary-hash path: libcrypto must have been
+          # detected (the runner has OpenSSL headers — the build above uses
+          # --with-http_ssl_module), or hashing silently regressed to the
+          # portable fallback (the ASAN job covers that one deliberately).
+          grep -q 'NGX_HTTP_ZSTD_HAVE_LIBCRYPTO' objs/ngx_auto_config.h
+          echo "✓ nginx binary built (libcrypto EVP SHA-256 detected)"
 
       - name: Verify built binary
         run: |
@@ -714,6 +720,13 @@ jobs:
           rm -rf "$gnupghome"
 
       - name: Configure & build nginx with ASAN + UBSAN
+        env:
+          # Keep the portable SHA-256 fallback covered, and covered where
+          # it counts: this job's dcz suites then run the local hash
+          # implementation under ASAN+UBSAN (sanitizers see nothing useful
+          # inside libcrypto anyway), while the mainline build asserts the
+          # EVP path.
+          NGX_ZSTD_NO_LIBCRYPTO: 1
         run: |
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
           cd "nginx-${NGINX_VERSION}"
@@ -725,7 +738,10 @@ jobs:
             --with-ld-opt="$SAN $(pkg-config --libs libzstd zlib libpcre2-8)" \
             --add-module="$GITHUB_WORKSPACE"
           make -j"$(nproc)"
-          echo "✓ ASAN+UBSAN nginx binary built"
+          if grep -q 'NGX_HTTP_ZSTD_HAVE_LIBCRYPTO' objs/ngx_auto_config.h; then
+            echo "libcrypto leaked into the portable-fallback build"; exit 1
+          fi
+          echo "✓ ASAN+UBSAN nginx binary built (portable SHA-256 in use)"
 
       - name: Upload ASAN nginx binary
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
