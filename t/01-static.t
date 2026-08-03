@@ -728,3 +728,63 @@ plain origin body served because the .zst sibling is a directory
 --- error_code: 200
 --- no_error_log
 [error]
+
+
+
+=== TEST 31: a .zst declaring a >8MB window is declined (streaming frame)
+# The frame header (built byte-by-byte from RFC 8878 §3.1.1.1) declares
+# a 128 MB decompression window: magic, descriptor 0x00 (no
+# Single_Segment), Window_Descriptor 0x88 = exponent 17 -> 1 << 27.
+# That is what a Node streaming encoder stamps at high levels when not
+# told the input size — the file decodes fine with the zstd CLI but
+# every browser rejects it before decoding, so the handler must decline
+# from the header alone (trailing zeros stand in for the never-read
+# block data) and let the identity origin be served.
+--- config
+    location /bw/ {
+        zstd_static on;
+        root html;
+    }
+--- user_files eval
+">>> bw/big.js\nbig-window stream body\n>>> bw/big.js.zst\n"
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x88, 0x00, 0x00, 0x00)
+--- request
+GET /bw/big.js
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+! Content-Encoding
+--- response_body
+big-window stream body
+--- error_code: 200
+--- error_log
+declares a 134217728-byte decompression window
+
+
+
+=== TEST 32: a single-segment .zst with >8MB content size is declined
+# Single-segment frames carry no Window_Descriptor — the window IS the
+# frame content size, read from behind the optional dictionary id.
+# Descriptor 0xA0 = Single_Segment with a 4-byte content size; the
+# little-endian field declares 20 MB, over the browser cap, so the
+# handler must decline this layout too.
+--- config
+    location /bw/ {
+        zstd_static on;
+        root html;
+    }
+--- user_files eval
+">>> bw/single.js\nbig-window single-segment body\n>>> bw/single.js.zst\n"
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0xA0, 0x00, 0x00, 0x40, 0x01,
+       0x00, 0x00, 0x00)
+--- request
+GET /bw/single.js
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+! Content-Encoding
+--- response_body
+big-window single-segment body
+--- error_code: 200
+--- error_log
+declares a 20971520-byte decompression window

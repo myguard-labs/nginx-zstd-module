@@ -22,6 +22,22 @@
 #define NGX_HTTP_ZSTD_STATIC_ON         1
 #define NGX_HTTP_ZSTD_STATIC_ALWAYS     2
 
+/*
+ * The largest decompression window a served .zst frame may declare:
+ * 8 MB, the RFC 8878 §3.1.1.1.2 recommended decoder limit, which web
+ * clients enforce for Content-Encoding: zstd — Firefox and Chromium
+ * reject any frame declaring more WITHOUT decoding a byte
+ * (NS_ERROR_INVALID_CONTENT_ENCODING / ERR_CONTENT_DECODING_FAILED).
+ * The trap that makes this worth checking at serve time: streaming
+ * encoders that were not told the input size stamp the LEVEL's default
+ * window into every frame header (a 93 KB asset compressed by a
+ * Node-based build pipeline can declare 128 MB), so the file decodes
+ * fine with the zstd CLI yet fails in every browser. Matches the
+ * filter module's dcz window cap, which exists for the same client
+ * guarantee.
+ */
+#define NGX_HTTP_ZSTD_STATIC_MAX_WINDOW  (8 * 1024 * 1024)
+
 
 typedef struct {
     ngx_uint_t  enable;
@@ -278,22 +294,30 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     }
 
     {
-        u_char    magic[4];
+        /*
+         * 18 bytes covers the largest possible frame header prefix this
+         * check needs: magic(4) + descriptor(1) + window byte(1) for
+         * streaming frames, or magic(4) + descriptor(1) + dictionary
+         * id(<=4) + content size(<=8) for single-segment frames. Short
+         * files return fewer bytes; each parse path checks it got what
+         * that frame layout requires.
+         */
+        u_char    hdr[18];
         ssize_t   n;
         uint32_t  mw;
 
-        n = pread(of.fd, magic, sizeof(magic), 0);
-        if (n != (ssize_t) sizeof(magic)) {
+        n = pread(of.fd, hdr, sizeof(hdr), 0);
+        if (n < 4) {
             ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
-                          "zstd static: pread(\"%s\", 4 bytes) "
+                          "zstd static: pread(\"%s\", frame header) "
                           "returned %z", path.data, n);
             return NGX_DECLINED;
         }
 
-        mw = ((uint32_t) magic[0])
-           | ((uint32_t) magic[1] << 8)
-           | ((uint32_t) magic[2] << 16)
-           | ((uint32_t) magic[3] << 24);
+        mw = ((uint32_t) hdr[0])
+           | ((uint32_t) hdr[1] << 8)
+           | ((uint32_t) hdr[2] << 16)
+           | ((uint32_t) hdr[3] << 24);
 
         if (mw != ZSTD_MAGICNUMBER
             && (mw & ZSTD_MAGIC_SKIPPABLE_MASK)
@@ -303,9 +327,91 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                           "zstd static: \"%s\" is not a zstd frame "
                           "(leading bytes 0x%02xd%02xd%02xd%02xd)",
                           path.data,
-                          (ngx_uint_t) magic[0], (ngx_uint_t) magic[1],
-                          (ngx_uint_t) magic[2], (ngx_uint_t) magic[3]);
+                          (ngx_uint_t) hdr[0], (ngx_uint_t) hdr[1],
+                          (ngx_uint_t) hdr[2], (ngx_uint_t) hdr[3]);
             return NGX_DECLINED;
+        }
+
+        /*
+         * Declared-window check (RFC 8878 §3.1.1.1) on regular frames —
+         * see NGX_HTTP_ZSTD_STATIC_MAX_WINDOW for why: a frame
+         * declaring more than 8 MB is rejected by every browser before
+         * decoding, so serving it produces a page-breaking decode error
+         * that curl and the zstd CLI do not reproduce. Declining keeps
+         * the site working (the zstd filter, gzip_static or identity
+         * takes over) and puts the actionable cause in the error log.
+         *
+         * A skippable leading frame is exempt: the real frame header
+         * sits after a variable-length skip we will not chase here.
+         */
+        if (mw == ZSTD_MAGICNUMBER) {
+            uint64_t    window;
+            ngx_uint_t  i, fhd, fcs_size, off;
+
+            static const ngx_uint_t  did_len[4] = { 0, 1, 2, 4 };
+
+            if (n < 5) {
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "zstd static: \"%s\" frame header truncated",
+                              path.data);
+                return NGX_DECLINED;
+            }
+
+            fhd = hdr[4];
+
+            if (!(fhd & 0x20)) {
+                /* No Single_Segment flag: Window_Descriptor follows. */
+                if (n < 6) {
+                    ngx_log_error(NGX_LOG_ERR, log, 0,
+                                  "zstd static: \"%s\" frame header "
+                                  "truncated", path.data);
+                    return NGX_DECLINED;
+                }
+
+                window = (uint64_t) 1 << (10 + (hdr[5] >> 3));
+                window += (window >> 3) * (hdr[5] & 7);
+
+            } else {
+                /*
+                 * Single_Segment: no Window_Descriptor; the window is
+                 * the frame content size, read from behind the optional
+                 * dictionary id. Frame_Content_Size_flag 0 means a
+                 * 1-byte field here (the flag only means "absent" when
+                 * Single_Segment is unset).
+                 */
+                fcs_size = (fhd >> 6) ? ((ngx_uint_t) 1 << (fhd >> 6)) : 1;
+                off = 5 + did_len[fhd & 3];
+
+                if ((size_t) n < off + fcs_size) {
+                    ngx_log_error(NGX_LOG_ERR, log, 0,
+                                  "zstd static: \"%s\" frame header "
+                                  "truncated", path.data);
+                    return NGX_DECLINED;
+                }
+
+                window = 0;
+                for (i = 0; i < fcs_size; i++) {
+                    window |= (uint64_t) hdr[off + i] << (8 * i);
+                }
+
+                if (fcs_size == 2) {
+                    window += 256;  /* RFC 8878: 2-byte field is offset */
+                }
+            }
+
+            if (window > NGX_HTTP_ZSTD_STATIC_MAX_WINDOW) {
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "zstd static: \"%s\" declares a %uL-byte "
+                              "decompression window, above the 8 MB limit "
+                              "browsers enforce for Content-Encoding: zstd "
+                              "(RFC 8878) — declining so a fallback "
+                              "encoding is used; recompress with a window "
+                              "log <= 23 (streaming encoders default to "
+                              "the compression level's window when not "
+                              "told the input size)",
+                              path.data, window);
+                return NGX_DECLINED;
+            }
         }
     }
     } else {
