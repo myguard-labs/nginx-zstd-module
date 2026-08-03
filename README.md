@@ -761,13 +761,15 @@ http {
 
 ### zstd_dcz_dict_file
 
-**Syntax:** `zstd_dcz_dict_file /path/to/dictionary;`
+**Syntax:** `zstd_dcz_dict_file /path/to/dictionary [sha256hex];`
 **Default:** `—`
 **Context:** `http`, `server`, `location` (repeatable)
 
 Standards-based dictionary compression per [RFC 9842](https://www.rfc-editor.org/rfc/rfc9842) (Compression Dictionary Transport). Each occurrence loads one dictionary — typically a **previous version of the resource** (delta-style) or a trained dictionary — and registers its SHA-256 as a negotiation key. When a request arrives whose `Available-Dictionary` header matches a loaded dictionary **and** whose `Accept-Encoding` lists `dcz` explicitly with a non-zero weight, the response is compressed against that dictionary and sent as `Content-Encoding: dcz`: a fixed 40-byte header (a zstd skippable frame carrying the dictionary's SHA-256) followed by an ordinary zstd frame. Chrome 130+ negotiates this automatically for same-origin resources. Every gate miss — unknown hash, no explicit `dcz` token (`*` deliberately does not match), `dcz;q=0`, a malformed `Available-Dictionary`, or `Sec-Fetch-Site` other than `same-origin`/`none` — falls back to the plain `zstd` path.
 
 Unlike `zstd_dict_file`, no opt-in flag is needed: dcz is real HTTP negotiation, and only clients that advertised the dictionary ever receive it.
+
+The optional second argument supplies the dictionary's SHA-256 as 64 hex characters, trusted **verbatim** in place of hashing the file at config load — deploy tooling that generates the directive list has usually just computed every hash anyway (for deduplication), and skipping the load-time pass removes the dominant cost of `nginx -t` and reloads at hundreds of registered dictionaries. Only supply hashes for content-hashed immutable assets, from tooling that owns the config: a *stale* supplied hash keeps matching and serves responses those clients cannot decode, where a self-computed hash of a changed file simply stops matching (safe fallback to plain `zstd`). Malformed values are config-load errors.
 
 The module handles the response side; **advertising** the dictionary to clients is one `add_header` on the dictionary resource (usually the resource itself, so today's file becomes the dictionary for tomorrow's):
 

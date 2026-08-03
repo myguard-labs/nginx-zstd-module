@@ -37,6 +37,14 @@ my $dict_raw = do {
 our $dict_b64 = encode_base64(sha256($dict_raw), "");
 our $bad_b64  = encode_base64("\x01" x 32, "");
 
+# For the optional supplied-hash directive argument: the fixture's true
+# hash as hex, and a deliberately different well-formed hash. Supplying
+# the wrong one and negotiating against IT is the only observable proof
+# the module trusts the argument instead of hashing the file.
+our $dict_hex = unpack("H*", sha256($dict_raw));
+our $odd_hex  = "01" x 32;
+our $odd_b64  = encode_base64("\x01" x 32, "");
+
 # A dictionary above the 8 MB dcz window cap but under the 10 MB hard
 # limit, generated rather than committed (nobody wants an 8 MB fixture
 # in-tree). Exposed to config blocks via $TEST_NGINX_DCZ_BIGDICT.
@@ -410,5 +418,105 @@ GET /t
 --- must_die
 --- error_log
 has the same content as
+--- no_error_log
+[alert]
+
+
+
+=== TEST 16: supplied hash argument — correct value negotiates dcz
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::dict_hex;
+        default_type text/plain;
+        return 200 \"dcz negotiation body: shared-boilerplate compute render\n\";
+    }"
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+Vary: Available-Dictionary
+--- no_error_log
+[error]
+
+
+
+=== TEST 17: supplied hash is trusted verbatim, not recomputed
+# The directive declares a hash that is NOT the file's: negotiation must
+# key on the declared value (client presenting it gets dcz) — the only
+# observable proof the load-time hashing pass was actually skipped.
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::odd_hex;
+        default_type text/plain;
+        return 200 \"dcz negotiation body: shared-boilerplate compute render\n\";
+    }"
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::odd_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 18: supplied hash trusted verbatim — the file's true hash no longer matches
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::odd_hex;
+        default_type text/plain;
+        return 200 \"dcz negotiation body: shared-boilerplate compute render\n\";
+    }"
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 19: supplied hash with the wrong length is a config-load error
+--- config
+    location /t {
+        zstd on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict abc123;
+        default_type text/plain;
+        return 200 "unreachable\n";
+    }
+--- request
+GET /t
+--- must_die
+--- error_log
+invalid dcz dictionary hash
+--- no_error_log
+[alert]
+
+
+
+=== TEST 20: supplied hash with non-hex characters is a config-load error
+--- config
+    location /t {
+        zstd on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict zz23456789012345678901234567890123456789012345678901234567890123;
+        default_type text/plain;
+        return 200 "unreachable\n";
+    }
+--- request
+GET /t
+--- must_die
+--- error_log
+non-hex character
 --- no_error_log
 [alert]
