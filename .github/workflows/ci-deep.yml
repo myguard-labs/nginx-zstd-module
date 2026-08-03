@@ -70,11 +70,11 @@ jobs:
             label: mainline
             port: 1984
           - flavor: nginx
-            version: "1.30.3"
+            version: "1.30.4"
             label: stable
             port: 1994
           - flavor: angie
-            version: "1.11.5"
+            version: "1.12.1"
             label: angie
             port: 2004
     steps:
