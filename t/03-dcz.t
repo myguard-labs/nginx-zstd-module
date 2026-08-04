@@ -39,8 +39,11 @@ our $bad_b64  = encode_base64("\x01" x 32, "");
 
 # For the optional supplied-hash directive argument: the fixture's true
 # hash as hex, and a deliberately different well-formed hash. Supplying
-# the wrong one and negotiating against IT is the only observable proof
-# the module trusts the argument instead of hashing the file.
+# the wrong one and negotiating against IT pins that the declared value
+# is the negotiation key. (It does NOT prove the hashing pass was
+# skipped — the branch overwrites dict->hash either way; that evidence
+# is the zero user-time benchmark, and call-count instrumentation is
+# tracked in issue #100.)
 our $dict_hex = unpack("H*", sha256($dict_raw));
 our $odd_hex  = "01" x 32;
 our $odd_b64  = encode_base64("\x01" x 32, "");
@@ -444,10 +447,10 @@ Vary: Available-Dictionary
 
 
 
-=== TEST 17: supplied hash is trusted verbatim, not recomputed
+=== TEST 17: supplied hash is trusted verbatim as the negotiation key
 # The directive declares a hash that is NOT the file's: negotiation must
-# key on the declared value (client presenting it gets dcz) — the only
-# observable proof the load-time hashing pass was actually skipped.
+# key on the declared value (client presenting it gets dcz). See the
+# preamble note for what this does and does not prove.
 --- config eval
 "    location /t {
         zstd on;
@@ -488,10 +491,13 @@ Content-Encoding: zstd
 
 
 === TEST 19: supplied hash with the wrong length is a config-load error
+# The dictionary path deliberately does NOT exist: the hash error must
+# surface anyway, pinning that malformed literals are validated before
+# ngx_open_file() rather than shadowed by the file error.
 --- config
     location /t {
         zstd on;
-        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict abc123;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/no-such-dict abc123;
         default_type text/plain;
         return 200 "unreachable\n";
     }
@@ -506,10 +512,11 @@ invalid dcz dictionary hash
 
 
 === TEST 20: supplied hash with non-hex characters is a config-load error
+# Nonexistent path for the same reason as TEST 19.
 --- config
     location /t {
         zstd on;
-        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict zz23456789012345678901234567890123456789012345678901234567890123;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/no-such-dict zz23456789012345678901234567890123456789012345678901234567890123;
         default_type text/plain;
         return 200 "unreachable\n";
     }

@@ -2374,9 +2374,11 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
      * the argument is opt-in: with a self-computed hash a file that
      * changes on disk after clients stored it simply stops matching
      * (safe fallback to plain zstd); a stale supplied hash instead
-     * keeps matching and serves responses those clients cannot decode.
-     * The generator owns hash correctness — content-hashed immutable
-     * assets are the intended use.
+     * keeps matching, and the responses may fail to decode or silently
+     * decode to WRONG content (a same-size stale dictionary decodes
+     * successfully to wrong bytes — dcz frames carry no content
+     * checksum). The generator owns hash correctness — content-hashed
+     * immutable assets are the intended use.
      *
      * Validated before the file is opened so a malformed literal is
      * reported as such, not shadowed by file errors.
