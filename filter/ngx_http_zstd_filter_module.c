@@ -2513,11 +2513,11 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     /*
      * Two entries with the same hash make the negotiation lookup
-     * ambiguous (identical content under two paths is almost certainly a
-     * config mistake — e.g. a copy that was meant to be a new version).
-     * Fail loudly at load rather than silently matching the first. (With
-     * supplied hashes this deduplicates by DECLARED hash — which is also
-     * exactly what makes the lookup ambiguous.)
+     * ambiguous (for computed hashes that means identical content under
+     * two paths — almost certainly a config mistake, e.g. a copy that
+     * was meant to be a new version; supplied hashes are compared as
+     * declared). Fail loudly at load rather than silently matching the
+     * first.
      */
     dicts = zlcf->dcz_dicts->elts;
 
@@ -2526,7 +2526,7 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                        NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) == 0)
         {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "dcz dictionary \"%V\" has the same content "
+                               "dcz dictionary \"%V\" has the same hash "
                                "as \"%V\"", &path, &dicts[i].file);
             return NGX_CONF_ERROR;
         }

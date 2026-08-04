@@ -401,10 +401,10 @@ is empty
 
 
 
-=== TEST 15: two dictionaries with identical content are a config-load error
-# The negotiation lookup would be ambiguous; almost certainly a copy that
-# was meant to be a new version. Refuse to start rather than match the
-# first silently.
+=== TEST 15: two dictionaries with the same hash are a config-load error
+# The negotiation lookup would be ambiguous; for computed hashes that
+# means identical content — almost certainly a copy that was meant to be
+# a new version. Refuse to start rather than match the first silently.
 --- config
     location /t {
         zstd on;
@@ -417,7 +417,7 @@ is empty
 GET /t
 --- must_die
 --- error_log
-has the same content as
+has the same hash as
 --- no_error_log
 [alert]
 
