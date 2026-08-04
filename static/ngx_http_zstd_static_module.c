@@ -38,6 +38,15 @@
  */
 #define NGX_HTTP_ZSTD_STATIC_MAX_WINDOW  (8 * 1024 * 1024)
 
+/*
+ * Probe read size under directio: O_DIRECT requires buffer, offset and
+ * length aligned to the device's logical block size. Offset 0 is
+ * aligned by definition; 4 KB covers both 512-byte and 4K-native
+ * devices, and a short read at EOF is permitted, so this works for
+ * files smaller than the probe too.
+ */
+#define NGX_HTTP_ZSTD_STATIC_DIO_PROBE   4096
+
 
 typedef struct {
     ngx_uint_t  enable;
@@ -276,23 +285,18 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * offset. Every modern POSIX target has it; this guard is
      * essentially a build-time tripwire.
      *
-     * Skipped when the file was opened with O_DIRECT (of.is_directio, set by
-     * ngx_open_cached_file when "directio <size>" is configured and the file
-     * meets the threshold). An O_DIRECT read requires the buffer, offset and
-     * length all aligned to the device block size; this deliberately tiny,
-     * unaligned 4-byte pread would fail with EINVAL on every request, wrongly
-     * declining the .zst and spamming NGX_LOG_CRIT. The probe is only a
-     * best-effort corruption guard, so forgoing it under directio is the
-     * correct trade — the file is still served, just without the sanity check.
+     * When the file was opened with O_DIRECT (of.is_directio, set by
+     * ngx_open_cached_file when "directio <size>" is configured and the
+     * file meets the threshold), the read must be block-aligned, so the
+     * probe uses one NGX_HTTP_ZSTD_STATIC_DIO_PROBE-sized pread into an
+     * aligned pool buffer instead of the small stack read. The window
+     * check in particular must not be skipped under directio: oversized
+     * declared windows are a systematic build-pipeline product, not
+     * rare corruption, and every browser rejects them. If even the
+     * aligned read fails (exotic device geometry), the file is served
+     * unvalidated — matching the historical directio behaviour — rather
+     * than declining valid files.
      */
-    if (!of.is_directio) {
-    if (of.size < 4) {
-        ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "zstd static: \"%s\" too small to be a zstd frame "
-                      "(%O bytes)", path.data, of.size);
-        return NGX_DECLINED;
-    }
-
     {
         /*
          * 18 bytes covers the largest possible frame header prefix this
@@ -302,12 +306,43 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
          * files return fewer bytes; each parse path checks it got what
          * that frame layout requires.
          */
-        u_char    hdr[18];
-        ssize_t   n;
-        uint32_t  mw;
+        u_char     hdrbuf[18];
+        u_char    *hdr;
+        size_t     want;
+        ssize_t    n;
+        uint32_t   mw;
 
-        n = pread(of.fd, hdr, sizeof(hdr), 0);
+        if (of.size < 4) {
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "zstd static: \"%s\" too small to be a zstd frame "
+                          "(%O bytes)", path.data, of.size);
+            return NGX_DECLINED;
+        }
+
+        if (of.is_directio) {
+            hdr = ngx_pmemalign(r->pool, NGX_HTTP_ZSTD_STATIC_DIO_PROBE,
+                                NGX_HTTP_ZSTD_STATIC_DIO_PROBE);
+            if (hdr == NULL) {
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
+
+            want = NGX_HTTP_ZSTD_STATIC_DIO_PROBE;
+
+        } else {
+            hdr = hdrbuf;
+            want = sizeof(hdrbuf);
+        }
+
+        n = pread(of.fd, hdr, want, 0);
         if (n < 4) {
+            if (of.is_directio) {
+                ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
+                               "zstd static: aligned probe on directio "
+                               "file \"%s\" returned %z, serving "
+                               "unvalidated", path.data, n);
+                goto probe_done;
+            }
+
             ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
                           "zstd static: pread(\"%s\", frame header) "
                           "returned %z", path.data, n);
@@ -413,11 +448,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                 return NGX_DECLINED;
             }
         }
-    }
-    } else {
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
-                       "zstd static: skipping magic probe on directio "
-                       "file \"%s\" (O_DIRECT alignment)", path.data);
+
+    probe_done: ;
     }
 #endif /* NGX_HAVE_PREAD */
 

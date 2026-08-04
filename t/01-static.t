@@ -758,7 +758,10 @@ Accept-Encoding: gzip, zstd
 big-window stream body
 --- error_code: 200
 --- error_log
+big.js.zst
 declares a 134217728-byte decompression window
+above the 8 MB limit browsers enforce for Content-Encoding: zstd
+recompress with a window log <= 23
 
 
 
@@ -787,4 +790,40 @@ Accept-Encoding: gzip, zstd
 big-window single-segment body
 --- error_code: 200
 --- error_log
+single.js.zst
 declares a 20971520-byte decompression window
+above the 8 MB limit browsers enforce for Content-Encoding: zstd
+recompress with a window log <= 23
+
+
+
+=== TEST 33: the window check runs under directio too
+# The probe historically skipped O_DIRECT files (unaligned preads fail
+# EINVAL — see #75); it now uses an aligned read so validation still
+# runs. The .zst is padded past the "directio 512" threshold so the
+# open really is O_DIRECT, and the oversized declared window must be
+# declined the same as TEST 31. Verified fail-first: on the
+# directio-skip build this file is served as Content-Encoding: zstd and
+# every assertion here fails.
+--- config
+    location /bw/ {
+        zstd_static on;
+        directio 512;
+        root html;
+    }
+--- user_files eval
+">>> bw/dio.js\nbig-window directio body\n>>> bw/dio.js.zst\n"
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x88)
+. ("\0" x 1018)
+--- request
+GET /bw/dio.js
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+! Content-Encoding
+--- response_body
+big-window directio body
+--- error_code: 200
+--- error_log
+dio.js.zst
+declares a 134217728-byte decompression window
