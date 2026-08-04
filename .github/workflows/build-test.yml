@@ -1191,6 +1191,17 @@ jobs:
           rm -rf "$gnupghome"
 
       - name: Configure & build nginx with --coverage instrumentation
+        env:
+          # Coverage measures THIS module's code. With libcrypto detected,
+          # dictionary hashing goes through EVP and the portable SHA-256 —
+          # ours, and the larger body of code — would count as ~100
+          # uncovered lines, breaking the floor for the wrong reason.
+          # Building with detection disabled keeps the portable
+          # implementation measured (as before the EVP change) and
+          # preprocesses the EVP wrapper out of the measurement entirely.
+          # The EVP path's behaviour is still covered: the mainline build
+          # asserts detection and its suites run against it.
+          NGX_ZSTD_NO_LIBCRYPTO: 1
         run: |
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
           cd "nginx-${NGINX_VERSION}"
