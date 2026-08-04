@@ -41,9 +41,9 @@ our $bad_b64  = encode_base64("\x01" x 32, "");
 # hash as hex, and a deliberately different well-formed hash. Supplying
 # the wrong one and negotiating against IT pins that the declared value
 # is the negotiation key. (It does NOT prove the hashing pass was
-# skipped — the branch overwrites dict->hash either way; that evidence
-# is the zero user-time benchmark, and call-count instrumentation is
-# tracked in issue #100.)
+# skipped — the branch overwrites dict->hash either way; the skip is
+# pinned by the $zstd_dcz_dicts_hashed asserts in TESTs 21-23, closing
+# issue #100's first item.)
 our $dict_hex = unpack("H*", sha256($dict_raw));
 our $odd_hex  = "01" x 32;
 our $odd_b64  = encode_base64("\x01" x 32, "");
@@ -527,3 +527,62 @@ GET /t
 non-hex character
 --- no_error_log
 [alert]
+
+
+
+=== TEST 21: supplied hash skips the load-time hashing pass entirely
+# THE instrumentation test (issue #100 item 1): $zstd_dcz_dicts_hashed
+# counts ngx_http_zstd_sha256() calls from the dictionary loader this
+# config cycle. With a supplied hash it must be ZERO — restoring the
+# unconditional hash call in front of the have_hash branch (the
+# regression the negotiation tests cannot see) makes this "1" and fails
+# here.
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::dict_hex;
+        default_type text/plain;
+        return 200 \"hashed=\$zstd_dcz_dicts_hashed\n\";
+    }"
+--- request
+GET /t
+--- response_body
+hashed=0
+--- no_error_log
+[error]
+
+
+
+=== TEST 22: without a supplied hash the loader hashes the file once
+# Positive control for TEST 21: the counter is not stuck at zero.
+--- config
+    location /t {
+        zstd on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "hashed=$zstd_dcz_dicts_hashed\n";
+    }
+--- request
+GET /t
+--- response_body
+hashed=1
+--- no_error_log
+[error]
+
+
+
+=== TEST 23: mixed supplied and computed entries count only the computed one
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::dict_hex;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/test;
+        default_type text/plain;
+        return 200 \"hashed=\$zstd_dcz_dicts_hashed\n\";
+    }"
+--- request
+GET /t
+--- response_body
+hashed=1
+--- no_error_log
+[error]

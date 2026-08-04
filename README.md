@@ -43,6 +43,7 @@ This is a hardened fork: every push/PR is exercised against **nginx mainline**, 
   * [$zstd_ratio](#zstd_ratio)
   * [$zstd_bytes_in](#zstd_bytes_in)
   * [$zstd_bytes_out](#zstd_bytes_out)
+  * [$zstd_dcz_dicts_hashed](#zstd_dcz_dicts_hashed)
 * [Compatibility](#compatibility)
 * [Testing & CI](#testing--ci)
 * [Benchmarks](#benchmarks)
@@ -892,6 +893,24 @@ Together these expose the **absolute** transfer saving, where
 log_format zstd '$request in=$zstd_bytes_in out=$zstd_bytes_out '
                 'ratio=$zstd_ratio';
 ```
+
+## $zstd_dcz_dicts_hashed
+
+How many dcz dictionaries were SHA-256-hashed at config load in the
+current configuration cycle. `0` means every registered
+[`zstd_dcz_dict_file`](#zstd_dcz_dict_file) entry carried a supplied
+hash and the load-time hashing pass was skipped entirely; without
+supplied hashes it equals the dictionary count. Constant for the
+lifetime of the configuration (reset on reload), so one probe request
+answers "did my deploy tooling's hashes actually take effect?":
+
+```nginx
+add_header X-Dcz-Dicts-Hashed $zstd_dcz_dicts_hashed;
+```
+
+The regression suite asserts on this variable — the supplied-hash fast
+path is otherwise unobservable from outside, since negotiation behaves
+identically whether the hash was supplied or computed.
 
 ---
 

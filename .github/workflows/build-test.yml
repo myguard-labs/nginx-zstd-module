@@ -161,6 +161,16 @@ jobs:
           shellcheck --severity=error "$GITHUB_WORKSPACE"/tools/*.sh
           echo "✓ shellcheck complete (no error-severity findings)"
 
+      - name: SHA-256 unit fixture (portable vectors + EVP failure injection)
+        run: |
+          # Issue #100 item 3: the EVP-to-portable fallback has no runtime
+          # coverage in the nginx-level jobs (mainline runs EVP success,
+          # the sanitizer/coverage builds preprocess the wrapper out).
+          # This fixture compiles ngx_http_zstd_sha256.h against shim
+          # headers with an injectable fake EVP_Digest — needs only a C
+          # compiler.
+          bash "$GITHUB_WORKSPACE"/tools/test_sha256_unit.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the

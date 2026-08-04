@@ -151,6 +151,26 @@ static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt  ngx_http_next_body_filter;
 
 static ngx_str_t  ngx_http_zstd_ratio = ngx_string("zstd_ratio");
+
+static ngx_str_t  ngx_http_zstd_dcz_dicts_hashed_name =
+    ngx_string("zstd_dcz_dicts_hashed");
+
+/*
+ * Load-time SHA-256 computations over dcz dictionaries in the CURRENT
+ * config cycle — incremented next to the one ngx_http_zstd_sha256()
+ * call in the zstd_dcz_dict_file handler, reset at preconfiguration
+ * (once per config parse, before any directive runs, so reloads report
+ * the fresh cycle, not a lifetime total).
+ *
+ * Exposed as $zstd_dcz_dicts_hashed for two audiences: operators
+ * checking that supplied hashes actually took effect (the value is 0
+ * when every dictionary carried one), and the regression suite, which
+ * asserts exactly that — the supplied-hash fast path is otherwise
+ * unobservable from outside, since the branch fills dict->hash either
+ * way (a lesson from review: negotiation tests cannot detect the fast
+ * path silently ceasing to be one).
+ */
+static ngx_uint_t  ngx_http_zstd_dcz_dicts_hashed;
 static ngx_str_t  ngx_http_zstd_bytes_in = ngx_string("zstd_bytes_in");
 static ngx_str_t  ngx_http_zstd_bytes_out = ngx_string("zstd_bytes_out");
 
@@ -207,6 +227,8 @@ static void *ngx_http_zstd_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
 static ngx_int_t ngx_http_zstd_add_variables(ngx_conf_t *cf);
+static ngx_int_t ngx_http_zstd_dcz_dicts_hashed_variable(
+    ngx_http_request_t *r, ngx_http_variable_value_t *vv, uintptr_t data);
 static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data);
 static ngx_int_t ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
@@ -2249,6 +2271,48 @@ ngx_http_zstd_add_variables(ngx_conf_t *cf)
     v->get_handler = ngx_http_zstd_bytes_variable;
     v->data = offsetof(ngx_http_zstd_ctx_t, bytes_out);
 
+    v = ngx_http_add_variable(cf, &ngx_http_zstd_dcz_dicts_hashed_name, 0);
+    if (v == NULL) {
+        return NGX_ERROR;
+    }
+
+    v->get_handler = ngx_http_zstd_dcz_dicts_hashed_variable;
+
+    /*
+     * Preconfiguration runs once per config parse, before any
+     * zstd_dcz_dict_file directive — the right moment to zero the
+     * per-cycle hash counter (see its definition).
+     */
+    ngx_http_zstd_dcz_dicts_hashed = 0;
+
+    return NGX_OK;
+}
+
+
+/*
+ * $zstd_dcz_dicts_hashed — how many dcz dictionaries were SHA-256'd at
+ * config load this cycle. 0 means every registered dictionary carried a
+ * supplied hash (the fast path); the dictionary count itself when none
+ * did. Constant for the lifetime of the configuration.
+ */
+static ngx_int_t
+ngx_http_zstd_dcz_dicts_hashed_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *vv, uintptr_t data)
+{
+    (void) data;
+
+    vv->data = ngx_pnalloc(r->pool, NGX_INT_T_LEN);
+    if (vv->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    vv->len = ngx_sprintf(vv->data, "%ui", ngx_http_zstd_dcz_dicts_hashed)
+              - vv->data;
+
+    vv->valid = 1;
+    vv->no_cacheable = 0;
+    vv->not_found = 0;
+
     return NGX_OK;
 }
 
@@ -2538,6 +2602,7 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     } else {
         ngx_http_zstd_sha256(dict->bytes.data, size, dict->hash);
+        ngx_http_zstd_dcz_dicts_hashed++;
     }
 
     /*
