@@ -16,6 +16,29 @@
 #include "../ngx_http_zstd_sha256.h"
 
 
+/*
+ * The ONLY sanctioned way to hash a dcz dictionary at config load: the
+ * $zstd_dcz_dicts_hashed accounting is inseparable from the operation.
+ * An increment sitting beside a call site counts that line running, not
+ * a dictionary being hashed — a restored unconditional bare call in
+ * front of the supplied-hash branch slid past the counter tests
+ * untouched (review of #103, demonstrated on a planted build). The bare
+ * identifier is poisoned below, so reintroducing a direct call is a
+ * compile error rather than a silent under-count.
+ */
+static ngx_inline void
+ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
+    u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN], ngx_uint_t *hashed)
+{
+    ngx_http_zstd_sha256(data, len, digest);
+    (*hashed)++;
+}
+
+#if defined(__GNUC__)
+#pragma GCC poison ngx_http_zstd_sha256
+#endif
+
+
 #define NGX_HTTP_ZSTD_MAX_DICT_SIZE  (10 * 1024 * 1024)  /* 10 MB limit */
 
 /*
@@ -40,6 +63,18 @@ typedef struct {
     ngx_str_t                    dict_file;
     ngx_flag_t                   dict_unsafe;   /* explicit opt-in for the
                                                  * non-RFC-9842 dict mode; S1/RFC1 */
+
+    /*
+     * Load-time SHA-256 computations over dcz dictionaries in THIS
+     * configuration ($zstd_dcz_dicts_hashed). Cycle-owned on purpose:
+     * a process-global static is reset and incremented while parsing a
+     * CANDIDATE config, so a rejected reload would leave the refused
+     * config's count behind for respawned workers to report (review of
+     * #103, reproduced live). Here a rejected cycle takes its count
+     * down with its pool, and the variable handler reads the request's
+     * active cycle's conf. pcalloc zeroes it — no reset hook needed.
+     */
+    ngx_uint_t                   dcz_dicts_hashed;
 } ngx_http_zstd_main_conf_t;
 
 
@@ -152,25 +187,17 @@ static ngx_http_output_body_filter_pt  ngx_http_next_body_filter;
 
 static ngx_str_t  ngx_http_zstd_ratio = ngx_string("zstd_ratio");
 
+/*
+ * $zstd_dcz_dicts_hashed serves two audiences: operators checking that
+ * supplied hashes actually took effect (the value is 0 when every
+ * dictionary carried one), and the regression suite, which asserts
+ * exactly that — the supplied-hash fast path is otherwise unobservable
+ * from outside, since the branch fills dict->hash either way. The count
+ * itself lives in ngx_http_zstd_main_conf_t (see there for why), fed by
+ * ngx_http_zstd_dcz_dict_hash() (see there for why).
+ */
 static ngx_str_t  ngx_http_zstd_dcz_dicts_hashed_name =
     ngx_string("zstd_dcz_dicts_hashed");
-
-/*
- * Load-time SHA-256 computations over dcz dictionaries in the CURRENT
- * config cycle — incremented next to the one ngx_http_zstd_sha256()
- * call in the zstd_dcz_dict_file handler, reset at preconfiguration
- * (once per config parse, before any directive runs, so reloads report
- * the fresh cycle, not a lifetime total).
- *
- * Exposed as $zstd_dcz_dicts_hashed for two audiences: operators
- * checking that supplied hashes actually took effect (the value is 0
- * when every dictionary carried one), and the regression suite, which
- * asserts exactly that — the supplied-hash fast path is otherwise
- * unobservable from outside, since the branch fills dict->hash either
- * way (a lesson from review: negotiation tests cannot detect the fast
- * path silently ceasing to be one).
- */
-static ngx_uint_t  ngx_http_zstd_dcz_dicts_hashed;
 static ngx_str_t  ngx_http_zstd_bytes_in = ngx_string("zstd_bytes_in");
 static ngx_str_t  ngx_http_zstd_bytes_out = ngx_string("zstd_bytes_out");
 
@@ -2278,35 +2305,34 @@ ngx_http_zstd_add_variables(ngx_conf_t *cf)
 
     v->get_handler = ngx_http_zstd_dcz_dicts_hashed_variable;
 
-    /*
-     * Preconfiguration runs once per config parse, before any
-     * zstd_dcz_dict_file directive — the right moment to zero the
-     * per-cycle hash counter (see its definition).
-     */
-    ngx_http_zstd_dcz_dicts_hashed = 0;
-
     return NGX_OK;
 }
 
 
 /*
  * $zstd_dcz_dicts_hashed — how many dcz dictionaries were SHA-256'd at
- * config load this cycle. 0 means every registered dictionary carried a
- * supplied hash (the fast path); the dictionary count itself when none
- * did. Constant for the lifetime of the configuration.
+ * config load in the request's ACTIVE configuration. 0 means every
+ * registered dictionary carried a supplied hash (the fast path); the
+ * dictionary count itself when none did. Constant for the lifetime of
+ * the configuration; reads the cycle-owned main conf, so a rejected
+ * reload cannot leak a refused config's count into this value.
  */
 static ngx_int_t
 ngx_http_zstd_dcz_dicts_hashed_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data)
 {
+    ngx_http_zstd_main_conf_t  *zmcf;
+
     (void) data;
+
+    zmcf = ngx_http_get_module_main_conf(r, ngx_http_zstd_filter_module);
 
     vv->data = ngx_pnalloc(r->pool, NGX_INT_T_LEN);
     if (vv->data == NULL) {
         return NGX_ERROR;
     }
 
-    vv->len = ngx_sprintf(vv->data, "%ui", ngx_http_zstd_dcz_dicts_hashed)
+    vv->len = ngx_sprintf(vv->data, "%ui", zmcf->dcz_dicts_hashed)
               - vv->data;
 
     vv->valid = 1;
@@ -2443,6 +2469,7 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     u_char                     hash[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN];
     ngx_file_info_t            info;
     ngx_http_zstd_dcz_dict_t  *dict, *dicts;
+    ngx_http_zstd_main_conf_t *zmcf;
 
     (void) cmd;
 
@@ -2601,8 +2628,10 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         ngx_memcpy(dict->hash, hash, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
 
     } else {
-        ngx_http_zstd_sha256(dict->bytes.data, size, dict->hash);
-        ngx_http_zstd_dcz_dicts_hashed++;
+        zmcf = ngx_http_conf_get_module_main_conf(cf,
+                                                  ngx_http_zstd_filter_module);
+        ngx_http_zstd_dcz_dict_hash(dict->bytes.data, size, dict->hash,
+                                    &zmcf->dcz_dicts_hashed);
     }
 
     /*

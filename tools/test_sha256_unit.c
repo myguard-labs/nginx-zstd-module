@@ -214,6 +214,28 @@ main(void)
         check(name, strcmp(hexdigest, vectors[i].hex) == 0, hexdigest);
     }
 
+    /* Remainder 55 mod 64 — the one residue the other totals (0, 3,
+       56, 32 mod 64) never reach, and chunked updates cannot change a
+       total's residue. It pins final()'s padding boundary exactly:
+       55 content bytes + the 0x80 pad byte fill block_len to 56, the
+       largest value that must still fit the 8-byte length in the same
+       block ("block_len > 56" spills; mutating it to ">= 56" corrupts
+       precisely this residue and nothing else in this file — review
+       planted that mutation and the prior vectors all survived). */
+    {
+        u_char  a55[55];
+
+        static const char  a55_hex[] =
+            "9f4390f8d30c2dd92ec9f095b65e2b9a"
+            "e9b0a925a5258e241c9f1e910f734318";
+
+        memset(a55, 'a', sizeof(a55));
+        ngx_http_zstd_sha256(a55, sizeof(a55), digest);
+        to_hex(digest, hexdigest);
+        check("padding-boundary vector (55 x 'a', remainder 55 mod 64)",
+              strcmp(hexdigest, a55_hex) == 0, hexdigest);
+    }
+
     /* The million-'a' vector, fed in 1000-byte updates: exercises the
        full-block fast path and the length accounting at scale. */
     {
