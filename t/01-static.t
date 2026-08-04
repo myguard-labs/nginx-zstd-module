@@ -804,7 +804,10 @@ recompress with a window log <= 23
 # open really is O_DIRECT, and the oversized declared window must be
 # declined the same as TEST 31. Verified fail-first: on the
 # directio-skip build this file is served as Content-Encoding: zstd and
-# every assertion here fails.
+# every assertion here fails. The "aligned probe" debug line is the
+# positive witness that is_directio was really set for this request —
+# without it the block would also pass vacuously through the stack-read
+# path on filesystems where O_DIRECT does not take.
 --- config
     location /bw/ {
         zstd_static on;
@@ -827,3 +830,70 @@ big-window directio body
 --- error_log
 dio.js.zst
 declares a 134217728-byte decompression window
+aligned probe on directio file
+
+
+
+=== TEST 34: the directio probe honors directio_alignment above the 4 KB floor
+# Review: the probe geometry must follow the operator's declared
+# alignment (the core copy filter honours clcf->directio_alignment the
+# same way) — a hardcoded 4 KB read fails EINVAL on storage configured
+# above that, and a failed validation read now DECLINES rather than
+# serving unvalidated. With 16 KB declared, the witness line must show
+# a 16384-byte probe and the oversized window must still be declined.
+--- config
+    location /bw/ {
+        zstd_static on;
+        directio 512;
+        directio_alignment 16k;
+        root html;
+    }
+--- user_files eval
+">>> bw/dioal.js\nbig-window directio alignment body\n>>> bw/dioal.js.zst\n"
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x88)
+. ("\0" x 1018)
+--- request
+GET /bw/dioal.js
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+! Content-Encoding
+--- response_body
+big-window directio alignment body
+--- error_code: 200
+--- error_log
+dioal.js.zst
+declares a 134217728-byte decompression window
+16384-byte aligned probe on directio file
+
+
+
+=== TEST 35: concatenated frames are validated on the leading frame only
+# Contract pin for the documented scope (review): a valid small first
+# frame followed by an oversized second frame is SERVED — a regular
+# frame's header does not declare its compressed length, so the probe
+# cannot walk the sequence without decoding block chains. The README
+# scopes the guarantee to the leading frame and points at
+# `zstd -t --memory=8MB` as the complete pre-deploy check; this block
+# exists so any future change to that scope is a deliberate one.
+# First frame: 1 KB window, one raw last-block containing "hi\n".
+# Second frame: the 128 MB-window header from TEST 31.
+--- config
+    location /bw/ {
+        zstd_static on;
+        root html;
+    }
+--- user_files eval
+">>> bw/concat.js\nconcat origin body\n>>> bw/concat.js.zst\n"
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x19, 0x00, 0x00)
+. "hi\n"
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x88, 0x00, 0x00, 0x00)
+--- request
+GET /bw/concat.js
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+Content-Encoding: zstd
+--- error_code: 200
+--- no_error_log
+decompression window

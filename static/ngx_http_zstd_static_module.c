@@ -39,11 +39,13 @@
 #define NGX_HTTP_ZSTD_STATIC_MAX_WINDOW  (8 * 1024 * 1024)
 
 /*
- * Probe read size under directio: O_DIRECT requires buffer, offset and
- * length aligned to the device's logical block size. Offset 0 is
- * aligned by definition; 4 KB covers both 512-byte and 4K-native
- * devices, and a short read at EOF is permitted, so this works for
- * files smaller than the probe too.
+ * FLOOR for the probe read size under directio: O_DIRECT requires
+ * buffer, offset and length aligned to the device's logical block
+ * size. Offset 0 is aligned by definition; 4 KB covers 512-byte and
+ * 4K-native devices, and the effective size is raised to the
+ * operator's directio_alignment when that is larger (the same
+ * geometry the core copy filter honours). A short read at EOF is
+ * permitted, so files smaller than the probe work too.
  */
 #define NGX_HTTP_ZSTD_STATIC_DIO_PROBE   4096
 
@@ -267,7 +269,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * served with `Content-Encoding: zstd` and the client would get an
      * undecodable body — a confusing outage class that nginx's built-in
      * gzip_static also doesn't defend against. The probe is cheap (one
-     * pread(2) of 4 bytes at offset 0; pread is offset-explicit so it
+     * pread(2) of the frame-header prefix at offset 0 — 18 bytes, or one
+     * aligned block under directio; pread is offset-explicit so it
      * never moves the open_file_cache's shared fd position — using
      * plain read(2) would do exactly that and corrupt subsequent
      * requests serving the same cached fd). On mismatch we decline, so
@@ -288,14 +291,17 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * When the file was opened with O_DIRECT (of.is_directio, set by
      * ngx_open_cached_file when "directio <size>" is configured and the
      * file meets the threshold), the read must be block-aligned, so the
-     * probe uses one NGX_HTTP_ZSTD_STATIC_DIO_PROBE-sized pread into an
-     * aligned pool buffer instead of the small stack read. The window
-     * check in particular must not be skipped under directio: oversized
-     * declared windows are a systematic build-pipeline product, not
-     * rare corruption, and every browser rejects them. If even the
-     * aligned read fails (exotic device geometry), the file is served
-     * unvalidated — matching the historical directio behaviour — rather
-     * than declining valid files.
+     * probe preads one block of max(NGX_HTTP_ZSTD_STATIC_DIO_PROBE,
+     * directio_alignment) bytes into an equally-aligned pool buffer —
+     * honoring the operator's declared geometry the same way the core
+     * copy filter does. The window check in particular must not be
+     * skipped under directio: oversized declared windows are a
+     * systematic build-pipeline product, not rare corruption, and every
+     * browser rejects them. If the aligned read STILL fails, the file
+     * is DECLINED, not served: for a validation read, falling back to
+     * another encoding is safer than certifying a file we could not
+     * inspect, and the error log tells the operator which knob
+     * (directio_alignment) disagrees with the device.
      */
     {
         /*
@@ -320,13 +326,15 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         }
 
         if (of.is_directio) {
-            hdr = ngx_pmemalign(r->pool, NGX_HTTP_ZSTD_STATIC_DIO_PROBE,
-                                NGX_HTTP_ZSTD_STATIC_DIO_PROBE);
+            want = NGX_HTTP_ZSTD_STATIC_DIO_PROBE;
+            if ((size_t) clcf->directio_alignment > want) {
+                want = (size_t) clcf->directio_alignment;
+            }
+
+            hdr = ngx_pmemalign(r->pool, want, want);
             if (hdr == NULL) {
                 return NGX_HTTP_INTERNAL_SERVER_ERROR;
             }
-
-            want = NGX_HTTP_ZSTD_STATIC_DIO_PROBE;
 
         } else {
             hdr = hdrbuf;
@@ -336,17 +344,25 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         n = pread(of.fd, hdr, want, 0);
         if (n < 4) {
             if (of.is_directio) {
-                ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
-                               "zstd static: aligned probe on directio "
-                               "file \"%s\" returned %z, serving "
-                               "unvalidated", path.data, n);
-                goto probe_done;
+                ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                              "zstd static: %uz-byte aligned probe on "
+                              "directio file \"%s\" returned %z — "
+                              "declining; check directio_alignment "
+                              "against the device geometry",
+                              want, path.data, n);
+                return NGX_DECLINED;
             }
 
             ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
                           "zstd static: pread(\"%s\", frame header) "
                           "returned %z", path.data, n);
             return NGX_DECLINED;
+        }
+
+        if (of.is_directio) {
+            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
+                           "zstd static: %uz-byte aligned probe on "
+                           "directio file \"%s\"", want, path.data);
         }
 
         mw = ((uint32_t) hdr[0])
@@ -376,8 +392,15 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
          * the site working (the zstd filter, gzip_static or identity
          * takes over) and puts the actionable cause in the error log.
          *
-         * A skippable leading frame is exempt: the real frame header
-         * sits after a variable-length skip we will not chase here.
+         * The check covers the LEADING frame only. A skippable leading
+         * frame is exempt (the real header sits after a variable-length
+         * skip), and in a concatenation of regular frames only the
+         * first is inspected: a regular frame's header does not declare
+         * its compressed length, so walking the sequence would mean
+         * decoding every block header in every frame — unbounded I/O
+         * for a serve-time guard. Multi-frame .zst web assets are
+         * pathological (no common tooling emits them); the README
+         * documents the leading-frame scope.
          */
         if (mw == ZSTD_MAGICNUMBER) {
             uint64_t    window;
@@ -448,8 +471,6 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                 return NGX_DECLINED;
             }
         }
-
-    probe_done: ;
     }
 #endif /* NGX_HAVE_PREAD */
 
