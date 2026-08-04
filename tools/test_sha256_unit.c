@@ -28,6 +28,9 @@
 
 static int failures = 0;
 
+/* TAP-style assertion: print ok/FAIL for `name` and count failures for
+   the process exit code; `detail` (may be NULL) is appended to
+   failures to aid diagnosis. */
 static void
 check(const char *name, int cond, const char *detail)
 {
@@ -39,6 +42,8 @@ check(const char *name, int cond, const char *detail)
     }
 }
 
+/* Render a 32-byte digest as 64 lowercase hex characters plus NUL, for
+   comparison against the published vector strings. */
 static void
 to_hex(const u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN], char out[65])
 {
@@ -67,12 +72,16 @@ to_hex(const u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN], char out[65])
 static int  fake_evp_mode;
 static int  fake_evp_calls;
 
+/* Fake EVP_sha256(): an opaque non-NULL token — the wrapper under test
+   only passes it through, never dereferences it. */
 const EVP_MD *
 EVP_sha256(void)
 {
     return (const EVP_MD *) "fake-sha256";
 }
 
+/* Fake EVP_Digest(): behaves per fake_evp_mode (see above) and counts
+   invocations so the tests can assert the wrapper consulted EVP. */
 int
 EVP_Digest(const void *data, size_t count, unsigned char *md,
     unsigned int *size, const EVP_MD *type, void *impl)
@@ -102,6 +111,8 @@ EVP_Digest(const void *data, size_t count, unsigned char *md,
     }
 }
 
+/* EVP-fallback build: drive the wrapper through the three scripted EVP
+   behaviours and assert the digest that comes out of each. */
 int
 main(void)
 {
@@ -176,6 +187,8 @@ static const sha256_vector_t  vectors[] = {
       "a33ce45964ff2167f6ecedd419db06c1" },
 };
 
+/* Portable build: the local SHA-256 against the published vectors,
+   then incremental-vs-one-shot equivalence at block-boundary splits. */
 int
 main(void)
 {
