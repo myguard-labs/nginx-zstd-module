@@ -829,7 +829,7 @@ jobs:
       - name: Run filter module tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
           perl t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee t/filter-tests.log
@@ -839,7 +839,7 @@ jobs:
       - name: Run config-load warning tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn-${{ github.run_id }}-${{ github.job }}"
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
@@ -853,7 +853,7 @@ jobs:
       - name: Run static module tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
           cd "$GITHUB_WORKSPACE"
@@ -864,7 +864,7 @@ jobs:
       - name: Run dcz negotiation tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-dcz"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-dcz-${{ github.run_id }}-${{ github.job }}"
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
@@ -1091,11 +1091,11 @@ jobs:
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
           rm -f /tmp/asan-zstd.*
           cd "$GITHUB_WORKSPACE"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-asan"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-asan-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           perl t/00-filter.t > t/filter-asan.log 2>&1 || true
           touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
-          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           perl t/01-static.t > t/static-asan.log 2>&1 || true
           # Gate strictly on sanitizer reports attributable to this module.
@@ -1238,7 +1238,7 @@ jobs:
       - name: Run filter module tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
           prove t/00-filter.t
@@ -1246,7 +1246,7 @@ jobs:
       - name: Run config-load warning tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn-${{ github.run_id }}-${{ github.job }}"
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
@@ -1255,7 +1255,7 @@ jobs:
       - name: Run static module tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
           cd "$GITHUB_WORKSPACE"
@@ -1264,7 +1264,7 @@ jobs:
       - name: Run dcz negotiation tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-dcz"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-dcz-${{ github.run_id }}-${{ github.job }}"
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
