@@ -4,7 +4,17 @@
 # declared, so the static/dynamic/pkg-config probe sequence lives in one place
 # instead of being duplicated (and silently drifting) between filter/config and
 # static/config. Exports:
-#   ngx_zstd_opt_I — compiler include flags for <zstd.h>
+#   ngx_zstd_opt_I — compiler include FLAGS for <zstd.h> (feature probes
+#                    and other flag contexts only)
+#   ngx_zstd_incs  — bare include DIRECTORY for ngx_module_incs: nginx's
+#                    auto/make prefixes every whitespace token of a
+#                    module's incs with the compiler's include option, so
+#                    flags placed there come out mangled ("-I -I/path
+#                    -I -DFOO"). gcc swallows that silently (the second
+#                    token becomes a bogus directory argument) and falls
+#                    back to system headers — masking version-mismatched
+#                    builds — while MSVC fails loudly with C1083, which
+#                    is how this was found.
 #   ngx_zstd_opt_L — linker flags for libzstd
 #
 # The link flags flow ONLY through each module's ngx_module_libs (see
@@ -31,6 +41,7 @@ ngx_feature_libs=
 ngx_feature_run=no
 
 ngx_zstd_opt_I=
+ngx_zstd_incs=
 ngx_zstd_opt_L=
 
 if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
@@ -52,8 +63,12 @@ if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
         ngx_zstd_static_archive="libzstd.a"
     fi
 
-    # we try the static library first
+    # we try the static library first. The define rides CFLAGS (a flag
+    # context); the module compiles fine without it, but keeping it
+    # preserves the historical compile environment for these builds.
     ngx_zstd_opt_I="-I$ZSTD_INC -DZSTD_STATIC_LINKING_ONLY"
+    ngx_zstd_incs="$ZSTD_INC"
+    CFLAGS="$CFLAGS -DZSTD_STATIC_LINKING_ONLY"
     ngx_zstd_opt_L="$ZSTD_LIB/$ngx_zstd_static_archive"
     SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
     CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
@@ -122,6 +137,10 @@ else
         if [ -n "$ngx_pkgconf" ] && $ngx_pkgconf --exists libzstd 2>/dev/null; then
             ngx_feature="ZStandard library via pkg-config"
             ngx_zstd_opt_I="$($ngx_pkgconf --cflags libzstd)"
+            # bare directories for ngx_module_incs (usually empty: a
+            # system libzstd needs no -I at all)
+            ngx_zstd_incs="$($ngx_pkgconf --cflags-only-I libzstd \
+                             | sed -e 's/-I *//g')"
             ngx_zstd_opt_L="$($ngx_pkgconf --libs libzstd)"
 
             SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
