@@ -13,8 +13,6 @@ env:
   NGINX_VERSION: ""
 
 on:
-  push:
-    branches: [master, main, dev]
   pull_request:
     branches: [master, main]
   workflow_dispatch: {}

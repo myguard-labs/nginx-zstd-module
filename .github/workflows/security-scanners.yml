@@ -12,8 +12,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
-  push:
-    branches: [master, main, dev]
   pull_request:
     branches: [master, main]
   workflow_dispatch: {}

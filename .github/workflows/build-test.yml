@@ -23,8 +23,6 @@ env:
   # drops an old tarball.
 
 on:
-  push:
-    branches: [master, main, dev]
   pull_request:
     branches: [master, main]
   schedule:
