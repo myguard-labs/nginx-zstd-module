@@ -45,6 +45,23 @@ ngx_zstd_incs=
 ngx_zstd_opt_L=
 
 if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
+
+    if [ "$NGX_CC_NAME" = "msvc" ] && command -v cygpath > /dev/null 2>&1; then
+        # cl is a native Windows program: it reads an MSYS-style
+        # /c/users/... path as \c\users\... on the current drive and
+        # fails with C1083, and the MSYS shell does not rewrite paths
+        # that nmake passes to cl out of the generated Makefile.
+        # Normalize absolute POSIX spellings to the mixed C:/... form
+        # so ZSTD_INC/ZSTD_LIB work however the operator typed them
+        # (relative paths are left alone — both toolchains take those).
+        case "$ZSTD_INC" in
+            /*) ZSTD_INC=`cygpath -m "$ZSTD_INC"` ;;
+        esac
+        case "$ZSTD_LIB" in
+            /*) ZSTD_LIB=`cygpath -m "$ZSTD_LIB"` ;;
+        esac
+    fi
+
     ngx_feature="ZStandard static library in $ZSTD_INC and $ZSTD_LIB"
     ngx_feature_path=$ZSTD_INC
 
