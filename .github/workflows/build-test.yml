@@ -1163,6 +1163,8 @@ jobs:
       NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
       # Own Test::Nginx listen port — see the tests job for why.
       TEST_NGINX_SERVER_PORT: "2034"
+      # See ci-deep.yml:117 for why this must be 20, not the ~2s Test::Nginx::Socket default.
+      TEST_NGINX_TIMEOUT: "20"
 
     steps:
       - name: Checkout module
@@ -1233,14 +1235,40 @@ jobs:
           cpanm -l ~/perl5 --notest Test::Nginx::Socket
           echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
 
-      - name: Run TAP suite (drives filter/static/conf-warn paths)
+      - name: Run filter module tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter"
+          mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
-          # 01-static.t asserts on a fixed ETag derived from fixture mtime;
-          # pin it or every run gets a fresh checkout mtime and fails.
+          prove t/00-filter.t
+
+      - name: Run config-load warning tests
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn"
+          rm -rf "$TEST_NGINX_SERVROOT"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          cd "$GITHUB_WORKSPACE"
+          prove t/02-conf-warn.t
+
+      - name: Run static module tests
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static"
+          mkdir -p "$TEST_NGINX_SERVROOT"
           touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
-          prove t/*.t
+          cd "$GITHUB_WORKSPACE"
+          prove t/01-static.t
+
+      - name: Run dcz negotiation tests
+        run: |
+          export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-dcz"
+          rm -rf "$TEST_NGINX_SERVROOT"
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          cd "$GITHUB_WORKSPACE"
+          prove t/03-dcz.t
 
       - name: Run correctness/regression tool suite (drives filter edge cases)
         run: |
