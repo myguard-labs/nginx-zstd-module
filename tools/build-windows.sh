@@ -69,14 +69,22 @@ SHA_NASM=f504227b2f529e658d41629075f0503b38d67d790af345f34eba4af60c6a5998
 VER_ZSTD=1.5.7
 SHA_ZSTD=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 
-# Module refs: overridable so a fix branch can be tested before it
-# lands. The defaults assume the MSVC support commits are on master.
+# Module refs — pinned by full commit id like everything else, bumped
+# deliberately. Overridable so a fix branch can be tested before it
+# lands.
+#
+# Bootstrap exception: this script ships INSIDE nginx-zstd-module, and
+# its MSVC support cannot be pinned to an upstream commit until the PR
+# carrying both lands (upstream squash-merges, so pre-merge fork ids
+# never enter upstream history). Until then the default is the master
+# branch — correct from the moment the PR merges — and testing the PR
+# branch itself is:  REF_ZSTD_MODULE=msvc-build ./build-windows.sh
 REPO_ZSTD_MODULE=${REPO_ZSTD_MODULE:-https://github.com/myguard-labs/nginx-zstd-module.git}
 REF_ZSTD_MODULE=${REF_ZSTD_MODULE:-master}
 REPO_BROTLI=${REPO_BROTLI:-https://github.com/mreiden/ngx_brotli.git}
-REF_BROTLI=${REF_BROTLI:-master}
+REF_BROTLI=${REF_BROTLI:-a7705082d191df904f25fe82188c4dd87e16ff8d}
 REPO_HEADERS_MORE=${REPO_HEADERS_MORE:-https://github.com/openresty/headers-more-nginx-module.git}
-REF_HEADERS_MORE=${REF_HEADERS_MORE:-master}
+REF_HEADERS_MORE=${REF_HEADERS_MORE:-53b0d98d1d57033b90491fd6a3b485ca536edfa7}
 
 ########################################################################
 
@@ -103,11 +111,17 @@ fetch() { # url sha [paths...]
 
 # Clone at a pinned ref, applying the script's bundled patches and any
 # workspace-local ones from patches/<name>/*.patch, idempotently.
+# Submodules are synced AFTER the switch so nested pins (e.g.
+# ngx_brotli/deps/brotli) follow the checked-out module commit, not
+# whatever the clone's default branch pinned.
 clone_module() { # dest repo ref
     local dest=$1 repo=$2 ref=$3 p d
     [ -d "$dest" ] || git clone --recurse-submodules "$repo" "$dest"
+    git -C "$dest" fetch --quiet origin 2>/dev/null || true
     git -C "$dest" switch --detach "$ref" 2>/dev/null \
         || git -C "$dest" switch "$ref"
+    git -C "$dest" submodule sync --recursive --quiet 2>/dev/null || true
+    git -C "$dest" submodule update --init --recursive
     for d in "$SCRIPT_DIR/patches/$dest" "$DIR_PROJECT/patches/$dest"; do
         for p in "$d"/*.patch; do
             [ -f "$p" ] || continue

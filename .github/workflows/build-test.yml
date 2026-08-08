@@ -539,8 +539,10 @@ jobs:
             'pid logs/nginx.pid; error_log logs/error.log; events {}' \
             'http { zstd on; zstd_target_cblock_size 16k; }' \
             > /tmp/hdr-witness/w.conf
+          # No "|| true": the witness config must VALIDATE, not merely
+          # warn — nginx -t's exit status survives the tee via pipefail.
           ./objs/nginx -t -p /tmp/hdr-witness -c w.conf 2>&1 \
-            | tee /tmp/hdr-witness/out || true
+            | tee /tmp/hdr-witness/out
           grep -q "without ZSTD_c_targetCBlockSize support" /tmp/hdr-witness/out
           echo "✓ compiled against the private libzstd 1.4.x headers"
 
