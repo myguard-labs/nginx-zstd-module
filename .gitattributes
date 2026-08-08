@@ -26,3 +26,7 @@ t/suite/* -text
 # CI-only stub module for the linkage-isolation job; keep it out of
 # release tarballs (git archive).
 /tools/ci-linkcheck-module export-ignore
+
+# Patches are applied with git apply against LF checkouts; CRLF
+# smudging would make every context line mismatch.
+tools/patches/** text eol=lf

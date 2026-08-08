@@ -81,35 +81,43 @@ REF_HEADERS_MORE=${REF_HEADERS_MORE:-master}
 ########################################################################
 
 # The build workspace is wherever the script is RUN from, not where it
-# lives — so a repo checkout can drive a build elsewhere. Local patches
-# for the cloned modules go in $DIR_PROJECT/patches/<clone-dir>/*.patch.
+# lives — so a repo checkout can drive a build elsewhere. Patches for
+# the cloned modules are applied from the script's own patches/
+# directory (bundled: the headers-more MSVC include-order fix, without
+# which that module cannot build under the win32 precompiled header)
+# and additionally from $DIR_PROJECT/patches/<clone-dir>/*.patch for
+# local ones. A standalone copy of this script needs the bundled
+# patches directory alongside it (or WITH_HEADERS_MORE=0).
 DIR_PROJECT=$(pwd)
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
-# Download + verify + extract one pinned tarball.
-fetch() { # url sha
+# Download + verify + extract one pinned tarball. Extra args narrow
+# the extraction to specific archive members.
+fetch() { # url sha [paths...]
     local url=$1 sha=$2 file=${1##*/}
+    shift 2
     [ -f "$file" ] || curl -fsSL -o "$file" "$url"
     echo "$sha  $file" | sha256sum -c - > /dev/null
-    tar xzf "$file"
+    tar xzf "$file" "$@"
 }
 
-# Clone at a pinned ref, applying any local patches from
-# patches/<name>/*.patch (e.g. headers-more needs a small Windows fix
-# that upstream has not merged; drop it there and it is applied
-# idempotently).
+# Clone at a pinned ref, applying the script's bundled patches and any
+# workspace-local ones from patches/<name>/*.patch, idempotently.
 clone_module() { # dest repo ref
-    local dest=$1 repo=$2 ref=$3 p
+    local dest=$1 repo=$2 ref=$3 p d
     [ -d "$dest" ] || git clone --recurse-submodules "$repo" "$dest"
     git -C "$dest" switch --detach "$ref" 2>/dev/null \
         || git -C "$dest" switch "$ref"
-    for p in "$DIR_PROJECT/patches/$dest"/*.patch; do
-        [ -f "$p" ] || continue
-        if git -C "$dest" apply --check "$p" 2>/dev/null; then
-            git -C "$dest" apply "$p"
-        elif ! git -C "$dest" apply --reverse --check "$p" 2>/dev/null; then
-            echo "ERROR: $p neither applies nor is already applied" >&2
-            exit 1
-        fi
+    for d in "$SCRIPT_DIR/patches/$dest" "$DIR_PROJECT/patches/$dest"; do
+        for p in "$d"/*.patch; do
+            [ -f "$p" ] || continue
+            if git -C "$dest" apply --check "$p" 2>/dev/null; then
+                git -C "$dest" apply "$p"
+            elif ! git -C "$dest" apply --reverse --check "$p" 2>/dev/null; then
+                echo "ERROR: $p neither applies nor is already applied" >&2
+                exit 1
+            fi
+        done
     done
 }
 
@@ -148,14 +156,23 @@ if [ ! -x "nasm-$VER_NASM/nasm" ] && [ ! -x "nasm-$VER_NASM/nasm.exe" ]; then
 fi
 
 # libzstd, built static with the static CRT (nginx's cl build is /MT;
-# CMake's default /MD would conflict at link).
-if [ "$WITH_ZSTD" = 1 ] && [ ! -d "zstd-$VER_ZSTD" ]; then
-    fetch "https://github.com/facebook/zstd/releases/download/v$VER_ZSTD/zstd-$VER_ZSTD.tar.gz" "$SHA_ZSTD"
-    cmake -B "zstd-$VER_ZSTD/out" -S "zstd-$VER_ZSTD/build/cmake" \
-        -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release \
-        -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_PROGRAMS=OFF \
-        -DZSTD_BUILD_TESTS=OFF -DZSTD_USE_STATIC_RUNTIME=ON
-    cmake --build "zstd-$VER_ZSTD/out"
+# CMake's default /MD would conflict at link). Extract only lib/ and
+# build/: the tarball's tests/ tree contains symlinks MSYS tar cannot
+# create, which would abort the whole extraction — and this build
+# needs neither tests nor programs. Guarded on a marker file, not the
+# directory, so a previously aborted extraction self-heals.
+if [ "$WITH_ZSTD" = 1 ]; then
+    if [ ! -f "zstd-$VER_ZSTD/build/cmake/CMakeLists.txt" ]; then
+        fetch "https://github.com/facebook/zstd/releases/download/v$VER_ZSTD/zstd-$VER_ZSTD.tar.gz" "$SHA_ZSTD" \
+            "zstd-$VER_ZSTD/lib" "zstd-$VER_ZSTD/build"
+    fi
+    if [ ! -f "zstd-$VER_ZSTD/out/lib/zstd_static.lib" ]; then
+        cmake -B "zstd-$VER_ZSTD/out" -S "zstd-$VER_ZSTD/build/cmake" \
+            -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release \
+            -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_PROGRAMS=OFF \
+            -DZSTD_BUILD_TESTS=OFF -DZSTD_USE_STATIC_RUNTIME=ON
+        cmake --build "zstd-$VER_ZSTD/out"
+    fi
 fi
 
 cd "nginx-$VER_NGINX"
@@ -211,6 +228,10 @@ configure_args=(
     --http-scgi-temp-path=temp/scgi_temp
     --http-uwsgi-temp-path=temp/uwsgi_temp
     --with-cc-opt=-DFD_SETSIZE=1024
+    # nginx.org's Windows binary ships with debug logging compiled in;
+    # it costs a few hundred kB — the real size lever is the -opt:ref
+    # dead-code elimination added below.
+    --with-debug
     --with-pcre="objs/lib/pcre2-$VER_PCRE2"
     --with-zlib="objs/lib/zlib-$VER_ZLIB"
     --with-openssl="objs/lib/openssl-$VER_OPENSSL"
