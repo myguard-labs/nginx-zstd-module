@@ -70,17 +70,15 @@ VER_ZSTD=1.5.7
 SHA_ZSTD=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 
 # Module refs — pinned by full commit id like everything else, bumped
-# deliberately. Overridable so a fix branch can be tested before it
-# lands.
-#
-# Bootstrap exception: this script ships INSIDE nginx-zstd-module, and
-# its MSVC support cannot be pinned to an upstream commit until the PR
-# carrying both lands (upstream squash-merges, so pre-merge fork ids
-# never enter upstream history). Until then the default is the master
-# branch — correct from the moment the PR merges — and testing the PR
-# branch itself is:  REF_ZSTD_MODULE=msvc-build ./build-windows.sh
+# deliberately (a floating branch here once handed a tester a module
+# checkout without the MSVC support and a mysterious configure
+# failure). Overridable so a fix branch can be tested before it lands:
+#   REPO_ZSTD_MODULE=<fork url> REF_ZSTD_MODULE=<branch> (fresh clone
+#   required when switching repos — the existing clone's origin wins).
+# The zstd-module pin is the squash commit that brought the MSVC
+# support this script depends on.
 REPO_ZSTD_MODULE=${REPO_ZSTD_MODULE:-https://github.com/myguard-labs/nginx-zstd-module.git}
-REF_ZSTD_MODULE=${REF_ZSTD_MODULE:-master}
+REF_ZSTD_MODULE=${REF_ZSTD_MODULE:-37cf9ac6b58284ae2da95620f4905930d1277b54}
 REPO_BROTLI=${REPO_BROTLI:-https://github.com/mreiden/ngx_brotli.git}
 REF_BROTLI=${REF_BROTLI:-a7705082d191df904f25fe82188c4dd87e16ff8d}
 REPO_HEADERS_MORE=${REPO_HEADERS_MORE:-https://github.com/openresty/headers-more-nginx-module.git}
