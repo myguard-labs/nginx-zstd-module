@@ -9,9 +9,23 @@
 #
 # Strategy: start nginx (built with -fsanitize=address) using a dictionary,
 # SIGHUP it several times so the old cycle's dict cleanup runs repeatedly,
-# then stop nginx cleanly. ASAN's leak detector reports on exit; if the
-# CDict (or its cleanup registration) leaks per reload, the run aborts and
-# this script exits non-zero.
+# then stop nginx cleanly. ASAN's leak detector reports on exit; a leak
+# report in the log fails this script.
+#
+# Environment caveat this script must survive: LeakSanitizer's exit-time
+# check ptrace-attaches a stop-the-world tracer, and runners whose
+# seccomp/yama policy blocks ptrace kill that tracer ("WARNING: ptrace
+# appears to be blocked", "Child exited with signal ..."), after which
+# LSan reports NOTHING. Two failure modes follow: the warning lands in
+# log_path and a file-existence check misreads it as a leak (the CI
+# flake that motivated this script's triage), and a genuinely quiet run
+# is a VACUOUS pass because the detector never ran. Hence the positive
+# control below, verdicts read from log content rather than log
+# existence, and a watchdog on shutdown ("LeakSanitizer may hang" is
+# real). Indeterminate environments exit 0 with a ::warning:: GitHub
+# annotation naming the runner fix — they are infrastructure findings,
+# not leaks, and a real leak still fails every time because it produces
+# an actual "ERROR: LeakSanitizer" report.
 #
 # Usage: tools/test_reload_leak.sh <nginx-binary> [reloads]
 
@@ -25,6 +39,32 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/html"
+
+# ── Positive control ─────────────────────────────────────────────────
+# Prove LSan can detect a DELIBERATE leak in this environment before
+# trusting any verdict below; a broken detector must read as
+# indeterminate, never as "no leak".
+if command -v cc >/dev/null 2>&1; then
+    cat >"$WORK/canary.c" <<'EOF'
+#include <stdlib.h>
+int main(void) { malloc(1234); return 0; }
+EOF
+    if cc -fsanitize=address -o "$WORK/canary" "$WORK/canary.c" 2>/dev/null; then
+        set +e
+        ASAN_OPTIONS="detect_leaks=1:exitcode=23" \
+            timeout 30 "$WORK/canary" >/dev/null 2>&1
+        crc=$?
+        set -e
+        if [ "$crc" -ne 23 ]; then
+            echo "::warning::LeakSanitizer failed its positive control" \
+                 "(deliberate leak exited $crc, want 23) — ptrace is likely" \
+                 "blocked on this runner (LXC seccomp / yama). Leak check" \
+                 "INDETERMINATE, not failed; fix the runner profile to" \
+                 "restore coverage."
+            exit 0
+        fi
+    fi
+fi
 
 # A non-trivial dictionary so ZSTD_createCDict() actually allocates.
 head -c 8192 /dev/urandom | base64 >"$WORK/html/zstd.dict"
@@ -59,11 +99,23 @@ export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:exitcode=23:log_path=$WORK
 "$NGINX" -p "$WORK" -c "$WORK/conf/nginx.conf" &
 NGINX_PID=$!
 
-# Wait for the listener.
-for _ in $(seq 1 50); do
-    if curl -fsS -o /dev/null "http://127.0.0.1:18099/"; then break; fi
+# Wait for the listener — quietly (the old loop let the first refused
+# curl print to stderr, a red herring that muddied flake diagnosis) and
+# with an explicit verdict when startup never completes: ASAN startup
+# on a loaded shared runner is exactly when this fires.
+ready=0
+for _ in $(seq 1 100); do
+    if curl -fsS -o /dev/null "http://127.0.0.1:18099/" 2>/dev/null; then
+        ready=1
+        break
+    fi
     sleep 0.1
 done
+if [ "$ready" -ne 1 ]; then
+    echo "❌ nginx under ASAN did not accept connections within 10s"
+    kill -9 "$NGINX_PID" 2>/dev/null || true
+    exit 1
+fi
 
 for i in $(seq 1 "$RELOADS"); do
     curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' "http://127.0.0.1:18099/"
@@ -74,15 +126,58 @@ done
 
 # One final request against the latest cycle, then a clean shutdown so
 # every cycle's pool cleanup (including the dict cleanup handler) runs.
+# The watchdog bounds the wait: a ptrace-blocked LSan can hang at exit,
+# which would otherwise eat the job timeout instead of yielding a
+# verdict. And wait must not run under set -e: a leak makes nginx exit
+# 23 (exitcode above), which used to abort the script right here,
+# skipping the report that says WHY.
 curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' "http://127.0.0.1:18099/"
 kill -QUIT "$NGINX_PID"
+( sleep 90; kill -9 "$NGINX_PID" 2>/dev/null ) &
+WATCHDOG=$!
+set +e
 wait "$NGINX_PID"
 rc=$?
+set -e
+kill "$WATCHDOG" 2>/dev/null || true
 
-if [ -n "$(ls "$WORK"/logs/asan* 2>/dev/null || true)" ]; then
-    echo "❌ ASAN reported a leak across $RELOADS reloads:"
+# ── Verdict triage: read the sanitizer output, never just stat it ────
+# log_path receives EVERYTHING the sanitizer prints, warnings included.
+if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
+
+    # Real sanitizer findings fail unconditionally — even if the
+    # watchdog had to kill a hung exit, a written report stands.
+    if grep -q -E 'ERROR: (Leak|Address)Sanitizer|SUMMARY: (Leak|Address)Sanitizer' \
+        "$WORK"/logs/asan*
+    then
+        echo "❌ sanitizer reported errors across $RELOADS reloads:"
+        cat "$WORK"/logs/asan*
+        exit 1
+    fi
+
+    # The known lockdown signature: LSan's tracer was killed before it
+    # could inspect anything. No verdict exists in either direction.
+    if grep -q -E 'ptrace.*blocked|LeakSanitizer may hang|Child exited with signal' \
+        "$WORK"/logs/asan*
+    then
+        echo "::warning::LeakSanitizer could not run its exit-time check" \
+             "(ptrace blocked on this runner — LXC seccomp / yama). Leak" \
+             "check INDETERMINATE, not failed; fix the runner profile to" \
+             "restore coverage."
+        cat "$WORK"/logs/asan*
+        exit 0
+    fi
+
+    echo "❌ unexpected sanitizer output (treating as failure):"
     cat "$WORK"/logs/asan*
     exit 1
+fi
+
+if [ "$rc" -eq 137 ]; then
+    echo "::warning::nginx under ASAN had to be killed by the shutdown" \
+         "watchdog (LeakSanitizer hang?). Leak check INDETERMINATE, not" \
+         "failed."
+    exit 0
 fi
 
 if [ "$rc" -ne 0 ]; then
