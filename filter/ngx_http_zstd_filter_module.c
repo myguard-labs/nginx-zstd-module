@@ -2237,8 +2237,16 @@ close:
     if (rc == NGX_CONF_OK && conf->enable) {
         ngx_http_core_loc_conf_t  *clcf;
 
+        /*
+         * Quiet when the compression_vary filter module is loaded: it
+         * emits Vary: Accept-Encoding from r->gzip_vary without needing
+         * "gzip_vary on", so the advice below would be wrong there. See
+         * ngx_http_zstd_vary_handled_externally() for the contract.
+         */
         clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-        if (clcf != NULL && !clcf->gzip_vary) {
+        if (clcf != NULL && !clcf->gzip_vary
+            && !ngx_http_zstd_vary_handled_externally(cf))
+        {
             ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
                                "zstd is enabled but \"gzip_vary\" is off; "
                                "add \"gzip_vary on\" to emit "

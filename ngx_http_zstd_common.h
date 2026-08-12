@@ -424,4 +424,46 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
 }
 
 
+/*
+ * ngx_http_zstd_vary_handled_externally()
+ *
+ * True when a module named "ngx_http_compression_vary_filter_module"
+ * (HanadaLee's Vary-flattening filter) is loaded, statically or via
+ * load_module. That module documents itself as "used instead of the
+ * gzip_vary directive": it keys on r->gzip_vary alone and injects
+ * Accept-Encoding into its single merged Vary header regardless of
+ * clcf->gzip_vary — verified empirically against all four
+ * gzip_vary x compression_vary quadrants. With it loaded, "gzip_vary
+ * off" is a valid configuration rather than a caching hazard, so the
+ * config-load warnings that ask for "gzip_vary on" must stay quiet.
+ *
+ * The suppression is only as correct as that module's documented
+ * flag-only contract; if it ever starts requiring clcf->gzip_vary,
+ * this check (and its ngx_brotli sibling) must be revisited.
+ *
+ * Called at merge_loc_conf time: every load_module directive has been
+ * processed by then (core conf parses before the http block), so
+ * cf->cycle->modules is complete for both linkage styles.
+ *
+ * ngx_inline for the same reason as ngx_http_zstd_ok() above: this
+ * header is included by TUs that never call it (the fuzz harness),
+ * and a plain `static` definition trips -Werror=unused-function there.
+ */
+static ngx_inline ngx_uint_t
+ngx_http_zstd_vary_handled_externally(ngx_conf_t *cf)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; cf->cycle->modules[i]; i++) {
+        if (ngx_strcmp(cf->cycle->modules[i]->name,
+                       "ngx_http_compression_vary_filter_module") == 0)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
 #endif /* NGX_HTTP_ZSTD_COMMON_H */

@@ -23,9 +23,11 @@ fuzz/fuzz.dict -text
 # the on-disk size and fails every identity-response assertion.
 t/suite/* -text
 
-# CI-only stub module for the linkage-isolation job; keep it out of
-# release tarballs (git archive).
+# CI-only stub modules (linkage-isolation job, vary-suppression witness);
+# keep them out of release tarballs (git archive). The vary stub claims a
+# real third-party module's name and must never ship.
 /tools/ci-linkcheck-module export-ignore
+/tools/ci-compression-vary-stub export-ignore
 
 # Patches are applied with git apply against LF checkouts; CRLF
 # smudging would make every context line mismatch.

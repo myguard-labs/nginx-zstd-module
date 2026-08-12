@@ -610,7 +610,11 @@ jobs:
           gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
           rm -rf "$gnupghome"
 
-      - name: Configure with zstd + stub as dynamic modules, build modules
+      - name: Configure with zstd + stubs as dynamic modules, build
+        # Full build (not just `make modules`): the vary-suppression
+        # witness below runs `nginx -t`, which needs the binary. The
+        # linkage assertions still read objs/Makefile and the .so files,
+        # both of which this produces.
         run: |
           set -euo pipefail
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
@@ -619,8 +623,9 @@ jobs:
             --with-compat \
             --add-dynamic-module="$GITHUB_WORKSPACE" \
             --add-dynamic-module="$GITHUB_WORKSPACE/tools/ci-linkcheck-module" \
+            --add-dynamic-module="$GITHUB_WORKSPACE/tools/ci-compression-vary-stub" \
             > /dev/null
-          make -j"$(nproc)" modules
+          make -j"$(nproc)"
 
       - name: Assert linkage isolation (both directions)
         run: |
@@ -712,6 +717,60 @@ jobs:
             exit 1
           fi
           echo "✓ readelf agrees on both"
+
+      - name: Assert gzip_vary warning suppression witness (both directions)
+        # The gzip_vary-off config-load warnings are suppressed when a
+        # module named ngx_http_compression_vary_filter_module is loaded
+        # (it emits Vary: Accept-Encoding from r->gzip_vary without
+        # needing "gzip_vary on" — see ngx_http_zstd_common.h). Loading
+        # the CI stub that claims that name via load_module is the
+        # hardest detection case (dynamic, not static linkage), and the
+        # warn-direction control keeps the quiet-direction grep from
+        # passing vacuously if the warning text ever changes.
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+
+          mkdir -p wprefix/logs
+          cat > wprefix/warn.conf <<EOF
+          load_module $PWD/objs/ngx_http_zstd_filter_module.so;
+          load_module $PWD/objs/ngx_http_zstd_static_module.so;
+          pid warn.pid;
+          events {}
+          http {
+              server {
+                  listen 127.0.0.1:8080;
+                  location / {
+                      zstd on;
+                      zstd_static on;
+                      root html;
+                  }
+              }
+          }
+          EOF
+
+          # Identical config plus the stub that claims the
+          # compression_vary module's name.
+          { echo "load_module $PWD/objs/ngx_http_compression_vary_filter_module.so;"
+            cat wprefix/warn.conf; } > wprefix/quiet.conf
+
+          # Control direction: without the stub, both modules must warn.
+          out=$(objs/nginx -p "$PWD/wprefix" -c warn.conf -t 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'test is successful'
+          echo "$out" | grep -q 'zstd is enabled but "gzip_vary" is off'
+          echo "$out" | grep -q 'zstd_static is enabled but "gzip_vary" is off'
+          echo "✓ both warnings fire without the stub"
+
+          # Witness direction: with the stub loaded, both must go quiet.
+          out=$(objs/nginx -p "$PWD/wprefix" -c quiet.conf -t 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'test is successful'
+          if echo "$out" | grep -q '"gzip_vary" is off'; then
+            echo "✗ warning not suppressed with compression_vary stub loaded"
+            exit 1
+          fi
+          echo "✓ both warnings suppressed with the stub loaded"
 
   # ── ASAN + UBSAN build — catches the lifetime/UB bugs in this module's
   #    history (per-request ctx, terminal-frame). Uses valgrind.suppress'd

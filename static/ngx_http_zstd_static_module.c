@@ -600,8 +600,16 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
      * the response incorrectly. See C5.
      */
     if (conf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
+        /*
+         * As in the filter module: stay quiet when the compression_vary
+         * filter module is loaded — it emits Vary: Accept-Encoding from
+         * r->gzip_vary without needing "gzip_vary on". See
+         * ngx_http_zstd_vary_handled_externally() for the contract.
+         */
         clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-        if (clcf != NULL && !clcf->gzip_vary) {
+        if (clcf != NULL && !clcf->gzip_vary
+            && !ngx_http_zstd_vary_handled_externally(cf))
+        {
             ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
                                "zstd_static is enabled but "
                                "\"gzip_vary\" is off; add \"gzip_vary "

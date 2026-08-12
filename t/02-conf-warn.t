@@ -268,3 +268,89 @@ invalid number
 "zstd_comp_level" directive is duplicate
 --- no_error_log
 [alert]
+
+
+
+=== TEST 12: zstd on without gzip_vary warns at config load
+# Whether the response is zstd or identity depends on Accept-Encoding;
+# without Vary a shared cache can serve the compressed variant to a
+# client that cannot decode it. The check has lived in merge_loc_conf
+# since the Vary work but never had a test pinning it — the brotli
+# sibling's TEST 12a predates this one.
+--- config
+    location /gv {
+        zstd on;
+        zstd_min_length 1;
+        default_type text/plain;
+        return 200 "gzip_vary warning fixture body, long enough\n";
+    }
+--- request
+GET /gv
+--- more_headers
+Accept-Encoding: zstd
+--- error_log
+zstd is enabled but "gzip_vary" is off
+--- no_error_log
+[error]
+
+
+
+=== TEST 13: zstd on WITH gzip_vary does not warn
+# The complementary half: a correctly paired configuration must load
+# silently, so the warning cannot become noise on valid configs.
+--- config
+    location /gv {
+        zstd on;
+        zstd_min_length 1;
+        gzip_vary on;
+        default_type text/plain;
+        return 200 "gzip_vary warning fixture body, long enough\n";
+    }
+--- request
+GET /gv
+--- more_headers
+Accept-Encoding: zstd
+--- no_error_log eval
+[qr/"gzip_vary" is off/, qr/\[error\]/]
+
+
+
+=== TEST 14: zstd_static on without gzip_vary warns at config load
+# Same hazard as TEST 12 through the static module's own merge-time
+# check. No .zst fixture is needed: the warning is a config-load
+# statement about the location, not about any request — the request
+# below just keeps the block well-formed (identity fallback, no .zst).
+--- config
+    location /st/ {
+        zstd_static on;
+        root html;
+    }
+--- user_files
+>>> st/plain.txt
+static warn fixture
+--- request
+GET /st/plain.txt
+--- error_log
+zstd_static is enabled but "gzip_vary" is off
+--- no_error_log
+[error]
+
+
+
+=== TEST 15: zstd_static always does not warn without gzip_vary
+# "always" ignores Accept-Encoding, never sets r->gzip_vary, and the
+# response carries no Vary — asking for gzip_vary would describe the
+# response incorrectly, so the warning must stay quiet (see the C5
+# comment at the check).
+--- config
+    location /st/ {
+        zstd_static always;
+        root html;
+    }
+--- user_files
+>>> st/plain.txt
+static warn fixture
+--- request
+GET /st/plain.txt
+--- no_error_log eval
+[qr/zstd_static is enabled but/, qr/\[error\]/]
