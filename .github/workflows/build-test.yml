@@ -757,18 +757,32 @@ jobs:
           { echo "load_module $PWD/objs/ngx_http_compression_vary_filter_module.so;"
             cat wprefix/warn.conf; } > wprefix/quiet.conf
 
-          # Control direction: without the stub, both modules must warn.
+          # Cardinality, not just presence: one location per module in
+          # the fixture means each expected line must appear EXACTLY
+          # once — a duplicate emission (e.g. postconfiguration running
+          # twice) is a bug grep -q would wave through.
+          expect_one() {
+            local n
+            n=$(echo "$out" | grep -cF "$1" || true)
+            if [ "$n" -ne 1 ]; then
+              echo "✗ expected exactly one \"$1\" line, got $n"
+              exit 1
+            fi
+          }
+
+          # Control direction: without the stub, each module must warn
+          # once for the single affected location.
           out=$(objs/nginx -p "$PWD/wprefix" -c warn.conf -t 2>&1)
           echo "$out"
           echo "$out" | grep -q 'test is successful'
-          echo "$out" | grep -q 'zstd is enabled but "gzip_vary" is off'
-          echo "$out" | grep -q 'zstd_static is enabled but "gzip_vary" is off'
-          echo "✓ both warnings fire without the stub"
+          expect_one 'zstd is enabled but "gzip_vary" is off'
+          expect_one 'zstd_static is enabled but "gzip_vary" is off'
+          echo "✓ both warnings fire exactly once without the stub"
 
           # Witness direction: with the stub loaded, the per-location
-          # lines must vanish and exactly the two per-module summaries
-          # must appear (the summary also mutation-checks the counter:
-          # a broken count changes "in 1 location(s)").
+          # lines must vanish and each per-module summary must appear
+          # exactly once (the count in the message also mutation-checks
+          # the counter: a broken count changes "in 1 location(s)").
           out=$(objs/nginx -p "$PWD/wprefix" -c quiet.conf -t 2>&1)
           echo "$out"
           echo "$out" | grep -q 'test is successful'
@@ -776,9 +790,9 @@ jobs:
             echo "✗ per-location warning not suppressed with stub loaded"
             exit 1
           fi
-          echo "$out" | grep -q 'zstd is enabled with "gzip_vary" off in 1 location'
-          echo "$out" | grep -q 'zstd_static is enabled with "gzip_vary" off in 1 location'
-          echo "✓ per-location warnings suppressed, summary warnings present"
+          expect_one 'zstd is enabled with "gzip_vary" off in 1 location'
+          expect_one 'zstd_static is enabled with "gzip_vary" off in 1 location'
+          echo "✓ per-location warnings suppressed, one summary each"
 
   # ── Interop against the REAL compression_vary module — the stub above
   #    proves name detection; this proves the semantic contract the
@@ -896,8 +910,14 @@ jobs:
             echo "✗ per-location warning fired despite the real module"
             exit 1
           fi
-          echo "$out" | grep -q 'zstd is enabled with "gzip_vary" off in 2 location'
-          echo "✓ suppression + summary behave against the real module"
+          # Exactly one summary — presence alone would miss duplicate
+          # emission.
+          n=$(echo "$out" | grep -cF 'zstd is enabled with "gzip_vary" off in 2 location' || true)
+          if [ "$n" -ne 1 ]; then
+            echo "✗ expected exactly one summary warning, got $n"
+            exit 1
+          fi
+          echo "✓ suppression + one summary against the real module"
 
       - name: Assert runtime Vary contract (compression_vary on and off)
         run: |
