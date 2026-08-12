@@ -1,10 +1,11 @@
 /*
  * CI-only stub module. Registers under the exact name
  * "ngx_http_compression_vary_filter_module" so the CI witness can assert
- * that the gzip_vary-off config-load warnings are suppressed when a
- * module by that name is loaded (ngx_http_zstd_vary_handled_externally()
- * in ngx_http_zstd_common.h matches on the module name alone) and still
- * fire when it is absent. No directives, no handlers, no behaviour.
+ * that the per-location gzip_vary-off warnings collapse into a summary
+ * warning when a module by that name is loaded
+ * (ngx_http_zstd_vary_handled_externally() in ngx_http_zstd_common.h
+ * matches on the module name alone) and still fire per location when it
+ * is absent. No directives, no handlers, no behaviour.
  *
  * Never ship or install this: it claims the name of HanadaLee's real
  * ngx_http_compression_vary_filter_module, and loading both would fail

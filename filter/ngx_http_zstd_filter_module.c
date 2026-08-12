@@ -75,6 +75,14 @@ typedef struct {
      * active cycle's conf. pcalloc zeroes it — no reset hook needed.
      */
     ngx_uint_t                   dcz_dicts_hashed;
+
+    /*
+     * Locations where the gzip_vary-off warning was withheld because a
+     * compression_vary module is loaded (see merge_loc_conf). Counted
+     * per cycle for the same reason as above, and reported as one
+     * summary warning from postconfiguration instead of per location.
+     */
+    ngx_uint_t                   vary_warn_suppressed;
 } ngx_http_zstd_main_conf_t;
 
 
@@ -2235,24 +2243,36 @@ close:
     }
 
     if (rc == NGX_CONF_OK && conf->enable) {
-        ngx_http_core_loc_conf_t  *clcf;
+        ngx_http_core_loc_conf_t   *clcf;
+        ngx_http_zstd_main_conf_t  *zmcf;
 
         /*
-         * Quiet when the compression_vary filter module is loaded: it
-         * emits Vary: Accept-Encoding from r->gzip_vary without needing
-         * "gzip_vary on", so the advice below would be wrong there. See
-         * ngx_http_zstd_vary_handled_externally() for the contract.
+         * The advice below is wrong when the compression_vary filter
+         * module is loaded — it emits Vary: Accept-Encoding from
+         * r->gzip_vary without needing "gzip_vary on" — but its
+         * presence alone cannot prove it is ENABLED for this location
+         * (see ngx_http_zstd_vary_handled_externally()). So withhold
+         * the per-location warning and count it; postconfiguration
+         * reports one summary warning instead of N noisy ones.
          */
         clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-        if (clcf != NULL && !clcf->gzip_vary
-            && !ngx_http_zstd_vary_handled_externally(cf))
-        {
-            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
-                               "zstd is enabled but \"gzip_vary\" is off; "
-                               "add \"gzip_vary on\" to emit "
-                               "\"Vary: Accept-Encoding\" so proxies and "
-                               "CDNs cache compressed and uncompressed "
-                               "responses separately");
+        if (clcf != NULL && !clcf->gzip_vary) {
+
+            if (ngx_http_zstd_vary_handled_externally(cf)) {
+                zmcf = ngx_http_conf_get_module_main_conf(cf,
+                                               ngx_http_zstd_filter_module);
+                if (zmcf != NULL) {
+                    zmcf->vary_warn_suppressed++;
+                }
+
+            } else {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                                   "zstd is enabled but \"gzip_vary\" is "
+                                   "off; add \"gzip_vary on\" to emit "
+                                   "\"Vary: Accept-Encoding\" so proxies "
+                                   "and CDNs cache compressed and "
+                                   "uncompressed responses separately");
+            }
         }
     }
 
@@ -2263,7 +2283,31 @@ close:
 static ngx_int_t
 ngx_http_zstd_filter_init(ngx_conf_t *cf)
 {
-    (void)cf;
+    ngx_http_zstd_main_conf_t  *zmcf;
+
+    /*
+     * The per-location gzip_vary-off warnings withheld in
+     * merge_loc_conf, folded into one line. Still a warning rather
+     * than silence: "compression_vary" defaults to off in that module,
+     * so its presence does not prove the Vary header is actually
+     * emitted for these locations — and one module cannot read
+     * another's merged configuration to check (private conf struct,
+     * and merge order between unrelated modules is unspecified).
+     * Postconfiguration runs after every merge, so the count is final.
+     */
+    zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
+    if (zmcf != NULL && zmcf->vary_warn_suppressed) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "zstd is enabled with \"gzip_vary\" off in %ui "
+                           "location(s); the per-location warnings are "
+                           "suppressed because "
+                           "ngx_http_compression_vary_filter_module is "
+                           "loaded, but its \"compression_vary\" directive "
+                           "defaults to off; verify \"compression_vary "
+                           "on\" covers those locations so "
+                           "\"Vary: Accept-Encoding\" is emitted",
+                           zmcf->vary_warn_suppressed);
+    }
 
     ngx_http_next_header_filter = ngx_http_top_header_filter;
     ngx_http_top_header_filter = ngx_http_zstd_header_filter;

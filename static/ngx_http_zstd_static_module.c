@@ -55,6 +55,19 @@ typedef struct {
 } ngx_http_zstd_static_conf_t;
 
 
+typedef struct {
+    /*
+     * Locations where the gzip_vary-off warning was withheld because a
+     * compression_vary module is loaded (see merge_loc_conf). Counted
+     * per cycle — a rejected reload takes its count down with its pool
+     * (the #103 lesson) — and reported as one summary warning from
+     * postconfiguration instead of per location. Mirrors the filter
+     * module's counter.
+     */
+    ngx_uint_t  vary_warn_suppressed;
+} ngx_http_zstd_static_main_conf_t;
+
+
 static ngx_conf_enum_t  ngx_http_zstd_static[] = {
     { ngx_string("off"), NGX_HTTP_ZSTD_STATIC_OFF },
     { ngx_string("on"), NGX_HTTP_ZSTD_STATIC_ON },
@@ -77,6 +90,7 @@ static ngx_command_t  ngx_http_zstd_static_commands[] = {
 
 
 static ngx_int_t ngx_http_zstd_static_handler(ngx_http_request_t *r);
+static void * ngx_http_zstd_static_create_main_conf(ngx_conf_t *cf);
 static void * ngx_http_zstd_static_create_loc_conf(ngx_conf_t *cf);
 static char * ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
@@ -87,7 +101,7 @@ static ngx_http_module_t  ngx_http_zstd_static_module_ctx = {
     NULL,                                     /* preconfiguration */
     ngx_http_zstd_static_init,                /* postconfiguration */
 
-    NULL,                                     /* create main configuration */
+    ngx_http_zstd_static_create_main_conf,    /* create main configuration */
     NULL,                                     /* init main configuration */
 
     NULL,                                     /* create server configuration */
@@ -559,6 +573,14 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 
 
 static void *
+ngx_http_zstd_static_create_main_conf(ngx_conf_t *cf)
+{
+    /* pcalloc zeroes vary_warn_suppressed — no reset hook needed */
+    return ngx_pcalloc(cf->pool, sizeof(ngx_http_zstd_static_main_conf_t));
+}
+
+
+static void *
 ngx_http_zstd_static_create_loc_conf(ngx_conf_t *cf)
 {
     ngx_http_zstd_static_conf_t  *conf;
@@ -601,21 +623,34 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
      */
     if (conf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
         /*
-         * As in the filter module: stay quiet when the compression_vary
-         * filter module is loaded — it emits Vary: Accept-Encoding from
-         * r->gzip_vary without needing "gzip_vary on". See
-         * ngx_http_zstd_vary_handled_externally() for the contract.
+         * As in the filter module: when the compression_vary filter
+         * module is loaded — it emits Vary: Accept-Encoding from
+         * r->gzip_vary without needing "gzip_vary on" — withhold the
+         * per-location warning and count it instead; presence alone
+         * cannot prove it is enabled here (see
+         * ngx_http_zstd_vary_handled_externally()), so
+         * postconfiguration reports one summary warning.
          */
         clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-        if (clcf != NULL && !clcf->gzip_vary
-            && !ngx_http_zstd_vary_handled_externally(cf))
-        {
-            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
-                               "zstd_static is enabled but "
-                               "\"gzip_vary\" is off; add \"gzip_vary "
-                               "on\" to emit \"Vary: Accept-Encoding\" "
-                               "so proxies and CDNs cache compressed "
-                               "and uncompressed responses separately");
+        if (clcf != NULL && !clcf->gzip_vary) {
+
+            if (ngx_http_zstd_vary_handled_externally(cf)) {
+                ngx_http_zstd_static_main_conf_t  *zsmcf;
+
+                zsmcf = ngx_http_conf_get_module_main_conf(cf,
+                                               ngx_http_zstd_static_module);
+                if (zsmcf != NULL) {
+                    zsmcf->vary_warn_suppressed++;
+                }
+
+            } else {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                                   "zstd_static is enabled but "
+                                   "\"gzip_vary\" is off; add \"gzip_vary "
+                                   "on\" to emit \"Vary: Accept-Encoding\" "
+                                   "so proxies and CDNs cache compressed "
+                                   "and uncompressed responses separately");
+            }
         }
     }
 
@@ -626,8 +661,31 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 static ngx_int_t
 ngx_http_zstd_static_init(ngx_conf_t *cf)
 {
-    ngx_http_handler_pt        *h;
-    ngx_http_core_main_conf_t  *cmcf;
+    ngx_http_handler_pt               *h;
+    ngx_http_core_main_conf_t         *cmcf;
+    ngx_http_zstd_static_main_conf_t  *zsmcf;
+
+    /*
+     * The per-location gzip_vary-off warnings withheld in
+     * merge_loc_conf, folded into one line — see the filter module's
+     * postconfiguration for why this stays a warning rather than
+     * going silent (compression_vary defaults to off, and another
+     * module's merged conf cannot be read to check).
+     */
+    zsmcf = ngx_http_conf_get_module_main_conf(cf,
+                                               ngx_http_zstd_static_module);
+    if (zsmcf != NULL && zsmcf->vary_warn_suppressed) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "zstd_static is enabled with \"gzip_vary\" off "
+                           "in %ui location(s); the per-location warnings "
+                           "are suppressed because "
+                           "ngx_http_compression_vary_filter_module is "
+                           "loaded, but its \"compression_vary\" directive "
+                           "defaults to off; verify \"compression_vary "
+                           "on\" covers those locations so "
+                           "\"Vary: Accept-Encoding\" is emitted",
+                           zsmcf->vary_warn_suppressed);
+    }
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 

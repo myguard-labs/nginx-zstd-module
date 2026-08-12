@@ -719,14 +719,17 @@ jobs:
           echo "✓ readelf agrees on both"
 
       - name: Assert gzip_vary warning suppression witness (both directions)
-        # The gzip_vary-off config-load warnings are suppressed when a
-        # module named ngx_http_compression_vary_filter_module is loaded
-        # (it emits Vary: Accept-Encoding from r->gzip_vary without
-        # needing "gzip_vary on" — see ngx_http_zstd_common.h). Loading
-        # the CI stub that claims that name via load_module is the
-        # hardest detection case (dynamic, not static linkage), and the
-        # warn-direction control keeps the quiet-direction grep from
-        # passing vacuously if the warning text ever changes.
+        # When a module named ngx_http_compression_vary_filter_module is
+        # loaded, the per-location gzip_vary-off warnings collapse into
+        # one summary warning per module — never full silence, because
+        # that module's compression_vary directive defaults to off and
+        # its effective value cannot be read from here (see
+        # ngx_http_zstd_common.h). Loading the CI stub that claims that
+        # name via load_module is the hardest detection case (dynamic,
+        # not static linkage); the warn-direction control keeps the
+        # quiet-direction greps from passing vacuously if the warning
+        # text ever changes. The cvary-interop job repeats this against
+        # the real third-party module and adds runtime Vary checks.
         run: |
           set -euo pipefail
           cd "nginx-${NGINX_VERSION}"
@@ -762,15 +765,169 @@ jobs:
           echo "$out" | grep -q 'zstd_static is enabled but "gzip_vary" is off'
           echo "✓ both warnings fire without the stub"
 
-          # Witness direction: with the stub loaded, both must go quiet.
+          # Witness direction: with the stub loaded, the per-location
+          # lines must vanish and exactly the two per-module summaries
+          # must appear (the summary also mutation-checks the counter:
+          # a broken count changes "in 1 location(s)").
           out=$(objs/nginx -p "$PWD/wprefix" -c quiet.conf -t 2>&1)
           echo "$out"
           echo "$out" | grep -q 'test is successful'
-          if echo "$out" | grep -q '"gzip_vary" is off'; then
-            echo "✗ warning not suppressed with compression_vary stub loaded"
+          if echo "$out" | grep -q 'is enabled but "gzip_vary" is off'; then
+            echo "✗ per-location warning not suppressed with stub loaded"
             exit 1
           fi
-          echo "✓ both warnings suppressed with the stub loaded"
+          echo "$out" | grep -q 'zstd is enabled with "gzip_vary" off in 1 location'
+          echo "$out" | grep -q 'zstd_static is enabled with "gzip_vary" off in 1 location'
+          echo "✓ per-location warnings suppressed, summary warnings present"
+
+  # ── Interop against the REAL compression_vary module — the stub above
+  #    proves name detection; this proves the semantic contract the
+  #    summary warning describes: with compression_vary on, exactly one
+  #    Vary: Accept-Encoding is emitted from r->gzip_vary alone; with it
+  #    off (its default), no Vary appears — the residual risk the
+  #    summary warning exists for. ─────────────────────────────────────
+  cvary-interop:
+    name: compression_vary interop (real module)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: resolve
+    env:
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
+      # HanadaLee/ngx_http_compression_vary_filter_module, pinned by
+      # commit like every other external input. Bumping the pin is the
+      # moment to re-read that module's r->gzip_vary handling — the
+      # warning suppression banks on its documented contract.
+      CVARY_COMMIT: 018810484d6554c5b9278749a8939697e9501f59
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libzstd-dev \
+            libpcre2-dev zlib1g-dev wget curl
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        run: |
+          set -euo pipefail
+          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
+            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
+          rm -rf "$gnupghome"
+
+      - name: Clone compression_vary module at the pin
+        run: |
+          set -euo pipefail
+          git clone \
+            https://github.com/HanadaLee/ngx_http_compression_vary_filter_module.git \
+            cvary
+          git -C cvary switch --detach "$CVARY_COMMIT"
+
+      - name: Configure & build nginx with both modules
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat \
+            --add-module="$GITHUB_WORKSPACE" \
+            --add-module="$GITHUB_WORKSPACE/cvary" \
+            > /dev/null
+          make -j"$(nproc)"
+
+      - name: Assert config-load behaviour against the real module
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+
+          mkdir -p iprefix/logs
+          cat > iprefix/interop.conf <<EOF
+          pid run.pid;
+          error_log logs/error.log warn;
+          events {}
+          http {
+              access_log off;
+              default_type text/plain;
+              server {
+                  listen 127.0.0.1:18994;
+                  location /on/ {
+                      zstd on;
+                      zstd_min_length 1;
+                      gzip_vary off;
+                      compression_vary on;
+                      return 200 "interop fixture: compression_vary on, body long enough\n";
+                  }
+                  location /off/ {
+                      zstd on;
+                      zstd_min_length 1;
+                      gzip_vary off;
+                      compression_vary off;
+                      return 200 "interop fixture: compression_vary off, body long enough\n";
+                  }
+              }
+          }
+          EOF
+
+          out=$(objs/nginx -p "$PWD/iprefix" -c interop.conf -t 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'test is successful'
+          if echo "$out" | grep -q 'is enabled but "gzip_vary" is off'; then
+            echo "✗ per-location warning fired despite the real module"
+            exit 1
+          fi
+          echo "$out" | grep -q 'zstd is enabled with "gzip_vary" off in 2 location'
+          echo "✓ suppression + summary behave against the real module"
+
+      - name: Assert runtime Vary contract (compression_vary on and off)
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+
+          objs/nginx -p "$PWD/iprefix" -c interop.conf
+          trap 'objs/nginx -p "$PWD/iprefix" -c interop.conf -s stop' EXIT
+          sleep 0.5
+
+          hdr_on=$(curl -s -D - -o /dev/null -H "Accept-Encoding: zstd" \
+            http://127.0.0.1:18994/on/x)
+          echo "$hdr_on"
+          echo "$hdr_on" | grep -qi '^content-encoding: zstd'
+          n=$(echo "$hdr_on" | grep -ci '^vary: accept-encoding' || true)
+          if [ "$n" -ne 1 ]; then
+            echo "✗ expected exactly one Vary: Accept-Encoding with compression_vary on, got $n"
+            exit 1
+          fi
+          echo "✓ compression_vary on → single Vary: Accept-Encoding, gzip_vary not needed"
+
+          hdr_off=$(curl -s -D - -o /dev/null -H "Accept-Encoding: zstd" \
+            http://127.0.0.1:18994/off/x)
+          echo "$hdr_off"
+          echo "$hdr_off" | grep -qi '^content-encoding: zstd'
+          if echo "$hdr_off" | grep -qi '^vary:'; then
+            echo "✗ expected NO Vary with compression_vary off (its default)"
+            exit 1
+          fi
+          echo "✓ compression_vary off → no Vary: the exact risk the summary warning names"
 
   # ── ASAN + UBSAN build — catches the lifetime/UB bugs in this module's
   #    history (per-request ctx, terminal-frame). Uses valgrind.suppress'd

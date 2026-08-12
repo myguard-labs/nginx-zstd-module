@@ -429,17 +429,23 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
  *
  * True when a module named "ngx_http_compression_vary_filter_module"
  * (HanadaLee's Vary-flattening filter) is loaded, statically or via
- * load_module. That module documents itself as "used instead of the
- * gzip_vary directive": it keys on r->gzip_vary alone and injects
- * Accept-Encoding into its single merged Vary header regardless of
- * clcf->gzip_vary — verified empirically against all four
- * gzip_vary x compression_vary quadrants. With it loaded, "gzip_vary
- * off" is a valid configuration rather than a caching hazard, so the
- * config-load warnings that ask for "gzip_vary on" must stay quiet.
+ * load_module. When its "compression_vary" directive is on, that
+ * module emits Vary: Accept-Encoding keyed on r->gzip_vary alone,
+ * regardless of clcf->gzip_vary — replacing the "gzip_vary" directive
+ * (verified empirically against all four gzip_vary x compression_vary
+ * quadrants; its author explicitly recommends "gzip_vary off" when
+ * "compression_vary on" is used). With it loaded, "gzip_vary off" is
+ * plausibly deliberate rather than a caching hazard.
  *
- * The suppression is only as correct as that module's documented
- * flag-only contract; if it ever starts requiring clcf->gzip_vary,
- * this check (and its ngx_brotli sibling) must be revisited.
+ * PRESENCE IS NOT PROOF, though: "compression_vary" itself defaults
+ * to off, and this module cannot verify the effective value — the
+ * conf struct is private to that module, and merge order between
+ * unrelated modules follows their position in cycle->modules, so its
+ * merged values may not even exist yet when ours merge. Callers
+ * therefore must not silence the gzip_vary-off warning outright on
+ * this check; they withhold the per-location lines and emit one
+ * summary warning from postconfiguration that tells the operator
+ * exactly what to verify.
  *
  * Called at merge_loc_conf time: every load_module directive has been
  * processed by then (core conf parses before the http block), so
