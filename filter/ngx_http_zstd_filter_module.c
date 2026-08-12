@@ -2243,8 +2243,7 @@ close:
     }
 
     if (rc == NGX_CONF_OK && conf->enable) {
-        ngx_http_core_loc_conf_t   *clcf;
-        ngx_http_zstd_main_conf_t  *zmcf;
+        ngx_http_core_loc_conf_t  *clcf;
 
         /*
          * The advice below is wrong when the compression_vary filter
