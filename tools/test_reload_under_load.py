@@ -277,10 +277,14 @@ http {{
                 # (incl. the CDict cleanup handler from 2c538e0).
                 os.kill(master_pid, signal.SIGQUIT)
                 try:
-                    proc.wait(timeout=10)
+                    # 30s, not 10/5: gcov-instrumented nginx flushing
+                    # .gcda at exit on a loaded runner can outlive a
+                    # tight reap budget; teardown runs after the
+                    # verdict, so patience costs nothing when healthy.
+                    proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=30)
 
                 el = logs / "error.log"
                 logtext = (el.read_text("utf-8", "replace")
@@ -315,10 +319,10 @@ http {{
                 if proc.poll() is None:
                     proc.terminate()
                     try:
-                        proc.wait(timeout=5)
+                        proc.wait(timeout=30)
                     except subprocess.TimeoutExpired:
                         proc.kill()
-                        proc.wait(timeout=5)
+                        proc.wait(timeout=30)
         finally:
             backend.shutdown()
             backend.server_close()

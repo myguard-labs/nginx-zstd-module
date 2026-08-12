@@ -334,10 +334,14 @@ http {{
             finally:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5)
+                    # 30s, not 5: gcov-instrumented nginx flushing
+                    # .gcda at exit on a loaded runner can outlive a
+                    # tight reap budget; teardown runs after the
+                    # verdict, so patience costs nothing when healthy.
+                    proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=30)
         finally:
             backend.shutdown()
             backend.server_close()
