@@ -181,10 +181,14 @@ def main() -> int:
         finally:
             process.terminate()
             try:
-                process.wait(timeout=5)
+                # 30s, not 5: gcov-instrumented nginx flushing .gcda
+                # at exit on a loaded runner can outlive a tight reap
+                # budget; teardown runs after the verdict, so patience
+                # costs nothing when healthy.
+                process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait(timeout=5)
+                process.wait(timeout=30)
 
             output = process.stdout.read() if process.stdout is not None else ""
             error_log = test_encoding.read_if_exists(logs_dir / "error.log")
