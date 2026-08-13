@@ -412,7 +412,7 @@ def main() -> int:
                 ),
             ]
             for name, case_headers in fallback_cases:
-                headers, body = fetch(args.port, case_headers)
+                headers, _body = fetch(args.port, case_headers)
                 check(
                     f"fallback: {name} -> zstd",
                     content_encoding(headers) == "zstd",
@@ -434,7 +434,15 @@ def main() -> int:
 
         finally:
             nginx.terminate()
-            nginx.wait(timeout=10)
+            try:
+                # 30s, not 10: gcov-instrumented nginx flushing .gcda
+                # at exit on a loaded runner can outlive a tight reap
+                # budget; teardown runs after the verdict, so patience
+                # costs nothing when healthy.
+                nginx.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                nginx.kill()
+                nginx.wait(timeout=30)
 
     if failures:
         print(f"FAILED: {len(failures)} dcz check(s): {', '.join(failures)}")

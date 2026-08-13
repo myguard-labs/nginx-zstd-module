@@ -276,9 +276,14 @@ http {{
         finally:
             proc.terminate()
             try:
-                proc.wait(timeout=10)
+                # 30s, not 10: gcov-instrumented nginx flushing .gcda
+                # at exit on a loaded runner can outlive a tight reap
+                # budget; teardown runs after the verdict, so patience
+                # costs nothing when healthy.
+                proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=30)
             backend.shutdown()
             err = (logs / "error.log")
             if err.exists():
