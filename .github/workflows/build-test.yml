@@ -240,15 +240,26 @@ jobs:
 
   # ── Build the module against nginx mainline (amd64) ─────────────────────
   build:
-    # Job name is FIXED and must stay that way. It was
+    # Job name must stay VERSION-FREE. It was
     # `Build (${{ matrix.flavor }} ${{ matrix.version }})`, which renamed the
     # check on every nginx mainline release -- so this job could never be a
     # required context: a version-pinned required check stops reporting the
     # day nginx ships a new version and blocks every PR with no obvious
-    # cause. The resolved version is surfaced by the "Report resolved
-    # version" step below and in the job summary instead of the title.
-    # Do NOT put matrix values back in here.
-    name: Build
+    # cause.
+    #
+    # It interpolates `matrix.flavor` and nothing else, and that is load-
+    # bearing in BOTH directions. A matrix job whose name contains no matrix
+    # expression does not keep the bare name: GitHub appends the entire
+    # matrix cell to disambiguate it, so a plain `name: Build` reports as
+    # `Build (nginx, 1.31.3, https://nginx.org/..., nginx-1.31.3)` -- version
+    # back in the check name, plus the url and dir. `flavor` is the only
+    # matrix key stable across nginx releases, so naming it explicitly is
+    # what suppresses the auto-suffix and keeps the name constant.
+    #
+    # The resolved version is surfaced by the "Report resolved version" step
+    # below and in the job summary. Do NOT add `matrix.version` here, and do
+    # NOT strip the expression back to a bare literal.
+    name: Build (${{ matrix.flavor }})
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 30
     needs: resolve
