@@ -196,10 +196,15 @@ def run_server(nginx, conf, root, port, backend_port, zstd_bin,
     finally:
         proc.terminate()
         try:
-            proc.wait(timeout=5)
+            # 30s, not 5: a gcov-instrumented nginx flushing .gcda at
+            # exit on a loaded runner can outlive a tight reap budget
+            # (seen live in CI — the verdict had already passed and the
+            # teardown alone failed the tool). Teardown runs after the
+            # verdict, so patience costs nothing on healthy runs.
+            proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait(timeout=5)
+            proc.wait(timeout=30)
 
 
 def main() -> int:
