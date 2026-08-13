@@ -1479,24 +1479,32 @@ jobs:
           #
           # A ptrace-blocked runner cannot run the exit-time check at all
           # (LXC seccomp / yama on builder02). That is INDETERMINATE, not
-          # clean: warn loudly rather than print a checkmark that would mean
-          # "no leaks" when nothing was actually checked. Same distinction
+          # clean: warn rather than print a checkmark that would mean "no
+          # leaks" when nothing was actually checked. Same distinction
           # tools/test_reload_leak.sh draws.
-          if grep -qE 'ptrace appears to be blocked|LeakSanitizer may hang' \
-               /tmp/lsan-smoke.* 2>/dev/null; then
+          #
+          # Order matters, and the two conditions are NOT mutually exclusive.
+          # log_path writes one file per process, so a run can easily produce
+          # a ptrace warning from one nginx worker and a real leak report from
+          # another -- ptrace works only intermittently on this runner. Test
+          # the leak FIRST: checking ptrace first lets a warning anywhere in
+          # the set short-circuit the verdict and mask a leak elsewhere, which
+          # is the exact defect this whole step exists to fix.
+          if grep -q 'ERROR: LeakSanitizer' /tmp/lsan-smoke.* 2>/dev/null; then
+            echo "❌ unsuppressed leak under the smoke tests:"
+            cat /tmp/lsan-smoke.* 2>/dev/null
+            exit 1
+          elif grep -qE 'ptrace appears to be blocked|LeakSanitizer may hang' \
+                 /tmp/lsan-smoke.* 2>/dev/null; then
             echo "::warning::LeakSanitizer could not run its exit-time check" \
                  "(ptrace blocked on this runner — LXC seccomp / yama). Smoke" \
                  "leak check INDETERMINATE, not clean; fix the runner profile" \
                  "to restore coverage."
-          elif grep -q 'ERROR: LeakSanitizer' /tmp/lsan-smoke.* 2>/dev/null; then
-            echo "❌ unsuppressed leak under the smoke tests:"
-            cat /tmp/lsan-smoke.* 2>/dev/null
-            exit 1
+            echo "⚠ smoke tests passed; leak check INDETERMINATE"
           else
             echo "✓ no unsuppressed leaks under the smoke tests"
+            echo "✓ All smoke tests clean under ASAN+UBSAN"
           fi
-
-          echo "✓ All smoke tests clean under ASAN+UBSAN"
 
       - name: zstd_dict_file reload leak check (CDict lifecycle)
         env:
