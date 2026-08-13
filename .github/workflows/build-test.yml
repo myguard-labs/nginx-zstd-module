@@ -240,7 +240,26 @@ jobs:
 
   # ── Build the module against nginx mainline (amd64) ─────────────────────
   build:
-    name: Build (${{ matrix.flavor }} ${{ matrix.version }})
+    # Job name must stay VERSION-FREE. It was
+    # `Build (${{ matrix.flavor }} ${{ matrix.version }})`, which renamed the
+    # check on every nginx mainline release -- so this job could never be a
+    # required context: a version-pinned required check stops reporting the
+    # day nginx ships a new version and blocks every PR with no obvious
+    # cause.
+    #
+    # It interpolates `matrix.flavor` and nothing else, and that is load-
+    # bearing in BOTH directions. A matrix job whose name contains no matrix
+    # expression does not keep the bare name: GitHub appends the entire
+    # matrix cell to disambiguate it, so a plain `name: Build` reports as
+    # `Build (nginx, 1.31.3, https://nginx.org/..., nginx-1.31.3)` -- version
+    # back in the check name, plus the url and dir. `flavor` is the only
+    # matrix key stable across nginx releases, so naming it explicitly is
+    # what suppresses the auto-suffix and keeps the name constant.
+    #
+    # The resolved version is surfaced by the "Report resolved version" step
+    # below and in the job summary. Do NOT add `matrix.version` here, and do
+    # NOT strip the expression back to a bare literal.
+    name: Build (${{ matrix.flavor }})
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 30
     needs: resolve
@@ -250,6 +269,23 @@ jobs:
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
     steps:
+      # The job title is fixed so the check name stays stable, so the
+      # resolved version has to be visible somewhere -- here and in the job
+      # summary, which is where you look when a build fails and you need to
+      # know which nginx it was.
+      #
+      # Values go through `env:` rather than straight into the `run:` body:
+      # they originate from the resolve job's scrape of nginx.org, so
+      # interpolating them into shell is a template-injection sink (zizmor
+      # flags it). As env vars they are data, never code.
+      - name: Report resolved version
+        env:
+          FLAVOR: ${{ matrix.flavor }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          echo "Building $FLAVOR $VERSION"
+          echo "### Build: $FLAVOR $VERSION" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -1031,10 +1067,13 @@ jobs:
 
   # ── Full test suite — runs against the mainline binary ────────────────────
   tests:
-    # The job-level name: cannot use the `env` context, but the `needs`
-    # context IS available there — so the resolved version shows in the job
-    # title without a hardcoded literal.
-    name: Tests (nginx ${{ needs.resolve.outputs.nginx_version }} mainline)
+    # Job name is FIXED -- see the `build` job for the full reasoning. It was
+    # `Tests (nginx ${{ needs.resolve.outputs.nginx_version }} mainline)`,
+    # which renamed the check on every nginx mainline release and so kept
+    # this job out of the required-checks set. The version is reported by the
+    # "Report resolved version" step below instead. Do NOT put the `needs`
+    # expression back in the title.
+    name: Tests
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     needs: [resolve, build]
@@ -1049,6 +1088,13 @@ jobs:
       TEST_NGINX_SERVER_PORT: "2014"
 
     steps:
+      # Fixed job title -- surface the resolved version here instead.
+      - name: Report resolved version
+        run: |
+          echo "Testing against nginx $NGINX_VERSION mainline"
+          echo "### Tests: nginx $NGINX_VERSION mainline" \
+            >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -1378,11 +1424,30 @@ jobs:
           echo "✓ no ASAN/UBSAN report attributable to the zstd module"
 
       - name: Run smoke tests under ASAN+UBSAN
+        # Leak gating here is NOT free: every harness below starts nginx and
+        # stops it with SIGTERM, and each one accepts -15 as a clean exit
+        # (e.g. tools/test_encoding.py's `returncode not in (0, -15)`). LSan
+        # reports at worker exit and signals a leak through the exit STATUS,
+        # so a leak was invisible twice over -- the harness waved the status
+        # through, and this step never looked at LSan's output at all. Both
+        # halves are fixed here: reports go to files, and the step greps them
+        # after the harnesses run.
+        #
+        # log_path is what makes that possible: without it LSan writes to
+        # stderr, which the harnesses capture and discard. detect_leaks stays
+        # 1 -- the point is to gate on leaks, not to silence them the way the
+        # Perl-suite step above does.
         env:
-          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1:halt_on_error=1:log_path=/tmp/lsan-smoke
+          # ABSOLUTE path: LSan resolves this against the CWD of the process
+          # it fires in -- an nginx worker started by a harness, whose CWD is
+          # not the workspace. A relative path there fails to open and LSan
+          # aborts, so the suppressions must not depend on where nginx ran.
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan.suppress:print_suppressions=0
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
           cd "$GITHUB_WORKSPACE"
+          rm -f /tmp/lsan-smoke.*
           python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18090
           python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18091 --fixture-lines 1900
           python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18092 --concurrent-requests 2
@@ -1407,7 +1472,39 @@ jobs:
           # frame header is hand-assembled — both lifetime/OOB classes.
           python3 tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18089
-          echo "✓ All smoke tests clean under ASAN+UBSAN"
+
+          # Leak verdict. Everything in lsan.suppress is gone by now, so any
+          # surviving "ERROR: LeakSanitizer" is an unsuppressed leak and fails
+          # the job -- which is the coverage this step never had.
+          #
+          # A ptrace-blocked runner cannot run the exit-time check at all
+          # (LXC seccomp / yama on builder02). That is INDETERMINATE, not
+          # clean: warn rather than print a checkmark that would mean "no
+          # leaks" when nothing was actually checked. Same distinction
+          # tools/test_reload_leak.sh draws.
+          #
+          # Order matters, and the two conditions are NOT mutually exclusive.
+          # log_path writes one file per process, so a run can easily produce
+          # a ptrace warning from one nginx worker and a real leak report from
+          # another -- ptrace works only intermittently on this runner. Test
+          # the leak FIRST: checking ptrace first lets a warning anywhere in
+          # the set short-circuit the verdict and mask a leak elsewhere, which
+          # is the exact defect this whole step exists to fix.
+          if grep -q 'ERROR: LeakSanitizer' /tmp/lsan-smoke.* 2>/dev/null; then
+            echo "❌ unsuppressed leak under the smoke tests:"
+            cat /tmp/lsan-smoke.* 2>/dev/null
+            exit 1
+          elif grep -qE 'ptrace appears to be blocked|LeakSanitizer may hang' \
+                 /tmp/lsan-smoke.* 2>/dev/null; then
+            echo "::warning::LeakSanitizer could not run its exit-time check" \
+                 "(ptrace blocked on this runner — LXC seccomp / yama). Smoke" \
+                 "leak check INDETERMINATE, not clean; fix the runner profile" \
+                 "to restore coverage."
+            echo "⚠ smoke tests passed; leak check INDETERMINATE"
+          else
+            echo "✓ no unsuppressed leaks under the smoke tests"
+            echo "✓ All smoke tests clean under ASAN+UBSAN"
+          fi
 
       - name: zstd_dict_file reload leak check (CDict lifecycle)
         env:
