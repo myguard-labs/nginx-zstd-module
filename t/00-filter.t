@@ -1084,10 +1084,14 @@ Content-Encoding: zstd
 --- response_body_filters eval
 sub {
     my $zstd = $_[0];
-    open(my $fh, "|-", "zstd -dq -c >/tmp/zstd_t43.out 2>/dev/null") or return "ERR";
+    require File::Temp;
+    my ($tfh, $tmp) = File::Temp::tempfile("zstd_t43_XXXXXX",
+                                           TMPDIR => 1, UNLINK => 1);
+    close($tfh);
+    open(my $fh, "|-", "zstd -dq -c >$tmp 2>/dev/null") or return "ERR";
     print $fh $zstd; close($fh);
-    open(my $r, "<", "/tmp/zstd_t43.out") or return "ERR";
-    local $/; my $d = <$r>; close($r); unlink "/tmp/zstd_t43.out";
+    open(my $r, "<", $tmp) or return "ERR";
+    local $/; my $d = <$r>; close($r); unlink $tmp;
     return $d;
 }
 --- response_body
@@ -1154,11 +1158,15 @@ Content-Encoding: zstd
 --- response_body_filters eval
 sub {
     my $zstd = $_[0];
-    open(my $fh, "|-", "zstd -dq -c >/tmp/zstd_t44.out 2>/dev/null") or return "ERR-OPEN";
+    require File::Temp;
+    my ($tfh, $tmp) = File::Temp::tempfile("zstd_t44_XXXXXX",
+                                           TMPDIR => 1, UNLINK => 1);
+    close($tfh);
+    open(my $fh, "|-", "zstd -dq -c >$tmp 2>/dev/null") or return "ERR-OPEN";
     print $fh $zstd; close($fh);
     my $rc = $?;
-    open(my $r, "<", "/tmp/zstd_t44.out") or return "ERR-READ";
-    local $/; my $d = <$r>; close($r); unlink "/tmp/zstd_t44.out";
+    open(my $r, "<", $tmp) or return "ERR-READ";
+    local $/; my $d = <$r>; close($r); unlink $tmp;
     return "ERR-DECODE rc=$rc" if $rc != 0;          # premature end -> non-zero
     require Digest::MD5;
     return length($d) . ":" . Digest::MD5::md5_hex($d);
@@ -2414,10 +2422,16 @@ Content-Encoding: zstd
 --- response_body_filters eval
 sub {
     my $zstd = $_[0];
-    open(my $fh, "|-", "zstd -dq -c >/tmp/zstd_t92.out 2>/dev/null") or return "ERR";
+    require File::Temp;
+    my ($tfh, $tmp) = File::Temp::tempfile("zstd_t92_XXXXXX",
+                                           TMPDIR => 1, UNLINK => 1);
+    close($tfh);
+    open(my $fh, "|-", "zstd -dq -c >$tmp 2>/dev/null") or return "ERR";
     print $fh $zstd; close($fh);
-    open(my $r, "<", "/tmp/zstd_t92.out") or return "ERR";
-    local $/; my $d = <$r>; close($r); unlink "/tmp/zstd_t92.out";
+    my $rc = $?;
+    return "ERR-DECODE rc=$rc" if $rc != 0;
+    open(my $r, "<", $tmp) or return "ERR";
+    local $/; my $d = <$r>; close($r); unlink $tmp;
     return $d;
 }
 --- response_body

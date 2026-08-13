@@ -1135,7 +1135,18 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
                    ctx->buffer_out.dst, ctx->buffer_out.pos,
                    ctx->buffer_out.size);
 
-    ctx->in_buf->pos   += ctx->buffer_in.pos  - pos_in;
+    /*
+     * Guard the zero-delta case instead of unconditionally adding: when the
+     * dequeued link is a data-less carrier (last_buf/flush, pos == NULL —
+     * see add_data), buffer_in still describes the previous, fully-drained
+     * buffer, so the delta is provably 0 — but `NULL + 0` is still undefined
+     * pointer arithmetic. gcc's UBSan lets it pass; clang's aborts with
+     * "applying zero offset to null pointer".
+     */
+    if (ctx->buffer_in.pos != pos_in) {
+        ctx->in_buf->pos += ctx->buffer_in.pos - pos_in;
+    }
+
     ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
     ctx->redo = 0;
 
