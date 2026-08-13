@@ -1087,10 +1087,9 @@ sub {
     require File::Temp;
     my ($tfh, $tmp) = File::Temp::tempfile("zstd_t43_XXXXXX",
                                            TMPDIR => 1, UNLINK => 1);
-    close($tfh);
-    open(my $fh, "|-", "zstd -dq -c >$tmp 2>/dev/null") or return "ERR";
-    print $fh $zstd; close($fh);
-    open(my $r, "<", $tmp) or return "ERR";
+    binmode($tfh); print $tfh $zstd; close($tfh);
+    # List-form pipe open: no shell, so the temp path is never re-parsed.
+    open(my $r, "-|", "zstd", "-dqc", $tmp) or do { unlink $tmp; return "ERR" };
     local $/; my $d = <$r>; close($r); unlink $tmp;
     return $d;
 }
@@ -1161,12 +1160,10 @@ sub {
     require File::Temp;
     my ($tfh, $tmp) = File::Temp::tempfile("zstd_t44_XXXXXX",
                                            TMPDIR => 1, UNLINK => 1);
-    close($tfh);
-    open(my $fh, "|-", "zstd -dq -c >$tmp 2>/dev/null") or return "ERR-OPEN";
-    print $fh $zstd; close($fh);
-    my $rc = $?;
-    open(my $r, "<", $tmp) or return "ERR-READ";
-    local $/; my $d = <$r>; close($r); unlink $tmp;
+    binmode($tfh); print $tfh $zstd; close($tfh);
+    # List-form pipe open: no shell, so the temp path is never re-parsed.
+    open(my $r, "-|", "zstd", "-dqc", $tmp) or do { unlink $tmp; return "ERR-OPEN" };
+    local $/; my $d = <$r>; close($r); my $rc = $?; unlink $tmp;
     return "ERR-DECODE rc=$rc" if $rc != 0;          # premature end -> non-zero
     require Digest::MD5;
     return length($d) . ":" . Digest::MD5::md5_hex($d);
@@ -2425,13 +2422,11 @@ sub {
     require File::Temp;
     my ($tfh, $tmp) = File::Temp::tempfile("zstd_t92_XXXXXX",
                                            TMPDIR => 1, UNLINK => 1);
-    close($tfh);
-    open(my $fh, "|-", "zstd -dq -c >$tmp 2>/dev/null") or return "ERR";
-    print $fh $zstd; close($fh);
-    my $rc = $?;
+    binmode($tfh); print $tfh $zstd; close($tfh);
+    # List-form pipe open: no shell, so the temp path is never re-parsed.
+    open(my $r, "-|", "zstd", "-dqc", $tmp) or do { unlink $tmp; return "ERR" };
+    local $/; my $d = <$r>; close($r); my $rc = $?; unlink $tmp;
     return "ERR-DECODE rc=$rc" if $rc != 0;
-    open(my $r, "<", $tmp) or return "ERR";
-    local $/; my $d = <$r>; close($r); unlink $tmp;
     return $d;
 }
 --- response_body
