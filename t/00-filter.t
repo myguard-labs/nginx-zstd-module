@@ -2351,3 +2351,76 @@ zstd: skip, client did not accept zstd encoding
 --- no_error_log
 zstd: compressing response
 [error]
+
+
+=== TEST 92: sub_filter partial-match sync bufs must not reset the CCtx mid-stream
+# Regression for the silent-truncation bug: the body filter inferred
+# "first body data" from ctx->buffer_in.src == NULL, while add_data
+# reloaded buffer_in.src from every incoming buffer. The sub filter
+# emits a data-less sync carrier (pos == NULL, ngx_http_sub_filter
+# line ~516) whenever an in-memory input buffer is entirely absorbed
+# into a cross-buffer match candidate ("looked") and produces no
+# output. Loading that carrier re-armed the first-call check, the next
+# invocation re-ran ZSTD_CCtx_reset(), and everything libzstd had
+# buffered but not yet flushed was silently discarded -- the response
+# still ended as ONE well-formed frame (200 + valid zstd), just with
+# the pre-reset content missing. Seen in production as truncated HTML
+# on sub_filter-rewritten pages fed by a slow chunked upstream.
+#
+# The mock backend streams three chunks with pauses; chunk 2 lies
+# strictly inside the sub_filter FROM pattern, so it is fully absorbed
+# into the match state and triggers the sync carrier. A pre-fix module
+# loses chunk 1 ("EARLY-CONTENT ..."); the fixed module round-trips
+# the whole rewritten body.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        sub_filter 'http://upstream.example' 'https://very-long-replacement-host.example';
+        sub_filter_once off;
+        sub_filter_types text/plain;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/up;
+    }
+    location /up {
+        proxy_http_version 1.1;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_RAND_PORT_1/;
+    }
+--- tcp_listen: $TEST_NGINX_RAND_PORT_1
+--- tcp_no_close
+--- tcp_reply_delay: 100ms
+--- tcp_reply eval
+my $hdr  = "HTTP/1.1 200 OK\r\n"
+         . "Content-Type: text/plain\r\n"
+         . "Transfer-Encoding: chunked\r\n"
+         . "Connection: close\r\n\r\n";
+my $seg1 = "EARLY-CONTENT that must survive the match holdback http://up";
+my $seg2 = "stream.exa";     # entirely inside the FROM pattern: absorbed, no output
+my $seg3 = "mple/path LATE-CONTENT after the match completes\n";
+my $chunk = sub { sprintf("%x\r\n%s\r\n", length($_[0]), $_[0]) };
+[
+    $hdr . $chunk->($seg1),
+    $chunk->($seg2),
+    $chunk->($seg3) . "0\r\n\r\n",
+]
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- response_body_filters eval
+sub {
+    my $zstd = $_[0];
+    open(my $fh, "|-", "zstd -dq -c >/tmp/zstd_t92.out 2>/dev/null") or return "ERR";
+    print $fh $zstd; close($fh);
+    open(my $r, "<", "/tmp/zstd_t92.out") or return "ERR";
+    local $/; my $d = <$r>; close($r); unlink "/tmp/zstd_t92.out";
+    return $d;
+}
+--- response_body
+EARLY-CONTENT that must survive the match holdback https://very-long-replacement-host.example/path LATE-CONTENT after the match completes
+--- no_error_log
+[error]

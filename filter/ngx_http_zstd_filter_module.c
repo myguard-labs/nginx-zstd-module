@@ -175,10 +175,26 @@ typedef struct {
     unsigned                     nomem:1;
 
     /* the 40-byte dcz frame header has been queued on the out chain.
-     * Guarded separately from CCtx init because the init block can run
-     * more than once (a data-less flush call arrives before the first
-     * input sets buffer_in.src) and the prefix must never be duplicated. */
+     * Kept even though cctx_ready below now makes init single-shot: the
+     * prefix must never be duplicated regardless of init bookkeeping. */
     unsigned                     dcz_header_sent:1;
+
+    /*
+     * First-body-data latch for init_cctx. This used to be inferred from
+     * `ctx->buffer_in.src == NULL`, but buffer_in.src is data state, not
+     * lifecycle state: add_data reloads it from every incoming buffer, and
+     * a data-less carrier buffer (ngx_buf_special() — e.g. the sync bufs
+     * the sub filter emits while a match candidate spans input buffers)
+     * has pos == NULL, which re-armed the check. The next invocation then
+     * re-ran ZSTD_CCtx_reset() mid-stream, silently discarding everything
+     * libzstd had buffered but not yet flushed: the response still ended
+     * in ONE well-formed frame (200 + valid zstd), just with the reset-
+     * window content missing. Observed in production as truncated HTML on
+     * sub_filter-rewritten pages fed by a small-buffer upstream (the
+     * dcz_header_sent guard above was an earlier symptom of the same
+     * re-run, without the data-loss diagnosis).
+     */
+    unsigned                     cctx_ready:1;
 
     /* PR #49: Action state machine (COMPRESS, FLUSH, or END) */
     ngx_http_zstd_action_t       action;
@@ -894,24 +910,30 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http zstd filter");
 
-    if (!ctx->last && ctx->buffer_in.src == NULL) {
-        /* First call: configure the reused CCtx for this request. */
+    if (!ctx->cctx_ready) {
+        /*
+         * First call: configure the CCtx for this request. Latched by an
+         * explicit flag — do NOT infer this from buffer_in.src == NULL;
+         * see the cctx_ready comment in ngx_http_zstd_ctx_t.
+         */
         if (ngx_http_zstd_filter_init_cctx(r, ctx) != NGX_OK) {
             goto failed;
         }
 
         /*
          * dcz responses start with the fixed 40-byte frame header (RFC
-         * 9842 §2.2). Queue it ahead of any compressed output; the
-         * dcz_header_sent guard (not the init condition above) makes it
-         * once-only, because this block re-runs if a data-less flush
-         * arrives before the first input sets buffer_in.src.
+         * 9842 §2.2). Queue it ahead of any compressed output. The
+         * dcz_header_sent guard predates cctx_ready (this block used to
+         * re-run when a data-less buffer cleared buffer_in.src); it stays
+         * as an independent invariant on the wire prefix.
          */
         if (ctx->dcz_dict != NULL && !ctx->dcz_header_sent) {
             if (ngx_http_zstd_filter_emit_dcz_header(r, ctx) != NGX_OK) {
                 goto failed;
             }
         }
+
+        ctx->cctx_ready = 1;
     }
 
     if (in) {
@@ -1327,18 +1349,25 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->flush = 1;
     }
 
+    if (ngx_buf_size(ctx->in_buf) == 0) {
+        /*
+         * Data-less buffer (flush/sync/last carrier, or an empty data
+         * buf). Its signal flags were captured above; never load it into
+         * buffer_in. These bufs can carry pos == NULL (ngx_buf_special()),
+         * and installing that as buffer_in.src both hands libzstd a NULL
+         * src and clobbers the pointer other code may treat as state (the
+         * old init_cctx first-call check did — see cctx_ready). If last or
+         * flush was just set, return OK so the compress step runs the
+         * end/flush immediately; otherwise skip to the next link.
+         */
+        return (ctx->last || ctx->flush) ? NGX_OK : NGX_AGAIN;
+    }
+
     ctx->buffer_in.src = ctx->in_buf->pos;
     ctx->buffer_in.pos = 0;
     ctx->buffer_in.size = ngx_buf_size(ctx->in_buf);
 
     ctx->bytes_in += ngx_buf_size(ctx->in_buf);
-
-    if (ctx->buffer_in.size == 0) {
-        /* Empty buffer: only skip to next if there is no pending signal.
-         * If last or flush was just set above, return OK so the compress
-         * step runs the end/flush immediately without a wasted iteration. */
-        return (ctx->last || ctx->flush) ? NGX_OK : NGX_AGAIN;
-    }
 
     return NGX_OK;
 }
