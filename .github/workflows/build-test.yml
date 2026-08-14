@@ -108,8 +108,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y \
             build-essential \
             libpcre2-dev \
             zlib1g-dev \
@@ -298,8 +298,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y \
             build-essential \
             pkg-config \
             libzstd-dev \
@@ -459,8 +459,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y build-essential pkg-config \
             libpcre2-dev zlib1g-dev wget cmake python3 \
             python3-requests zstd
 
@@ -617,8 +617,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y build-essential pkg-config libzstd-dev \
             libpcre2-dev zlib1g-dev wget binutils
 
       - name: Cache nginx source tarball
@@ -857,8 +857,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libzstd-dev \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y build-essential libzstd-dev \
             libpcre2-dev zlib1g-dev wget curl
 
       - name: Cache nginx source tarball
@@ -1005,8 +1005,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y build-essential pkg-config libzstd-dev \
             libpcre2-dev zlib1g-dev wget
 
       - name: Cache nginx source tarball
@@ -1107,8 +1107,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y \
             libperl-dev \
             cpanminus \
             libzstd1 \
@@ -1363,8 +1363,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3 python3-requests zstd libzstd1 \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y python3 python3-requests zstd libzstd1 \
             libperl-dev cpanminus
 
       - name: Download ASAN nginx binary
@@ -1538,8 +1538,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y build-essential pkg-config libzstd-dev \
             libpcre2-dev zlib1g-dev libssl-dev libperl-dev cpanminus \
             python3 python3-requests zstd lcov wget
 

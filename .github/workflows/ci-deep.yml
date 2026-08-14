@@ -83,8 +83,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y \
             build-essential curl libpcre2-dev libzstd-dev pkg-config \
             wget zstd libperl-dev cpanminus
 
@@ -144,8 +144,8 @@ jobs:
 
       - name: Install clang + libFuzzer
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y clang
 
       - name: Select fuzz duration
         env:
@@ -238,8 +238,8 @@ jobs:
           echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y \
             build-essential curl libpcre2-dev libzstd-dev pkg-config \
             valgrind wget zlib1g-dev zstd
       - name: Build debug nginx + zstd module
@@ -290,8 +290,8 @@ jobs:
           echo "NGINX_VERSION=$ver" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y \
             build-essential curl libpcre2-dev libzstd-dev pkg-config \
             valgrind wget zlib1g-dev zstd
       - name: Build debug nginx + zstd module
@@ -335,8 +335,8 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flawfinder clang-tidy python3 python3-pip pipx nginx-dev
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y flawfinder clang-tidy python3 python3-pip pipx nginx-dev
           # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into the
           # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
           # user pip install with --break-system-packages if pipx is unavailable.

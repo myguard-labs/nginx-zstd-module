@@ -43,8 +43,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y \
             build-essential curl libpcre2-dev libzstd-dev pkg-config \
             valgrind wget zlib1g-dev zstd
 

@@ -54,8 +54,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y build-essential pkg-config libzstd-dev \
             libpcre2-dev zlib1g-dev wget
 
       - name: Cache nginx source tarball
