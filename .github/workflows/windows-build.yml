@@ -1,0 +1,219 @@
+---
+# yamllint disable rule:line-length rule:truthy
+name: Windows build
+
+# MSVC and MinGW exercise different nginx win32 build paths. MSVC supports
+# static addons only; MinGW's GNU linker also supports dynamic PE modules.
+
+on:
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'auto/**'
+      - 'filter/**'
+      - 'static/**'
+      - '*.h'
+      - 'config'
+      - 'tools/build-windows.sh'
+      - '.github/workflows/windows-build.yml'
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: 1.31.3
+  NGINX_SHA256: a7657c50811c2d92d9895395e8b873ef60398142c4db21eb647811c38f6dd525
+  PCRE2_VERSION: 10.44
+  PCRE2_SHA256: 86b9cb0aa3bcb7994faa88018292bc704cdbb708e785f7c74352ff6ea7d3175b
+  ZLIB_VERSION: 1.3.1
+  ZLIB_SHA256: 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+
+jobs:
+  msvc:
+    name: MSVC x64 static
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          persist-credentials: false
+
+      - name: Install static libzstd
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install zstd:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg failed with $LASTEXITCODE" }
+          $lib = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static\lib"
+          if (-not (Test-Path "$lib\zstd_static.lib")) {
+            if (-not (Test-Path "$lib\zstd.lib")) { throw "vcpkg zstd archive not found" }
+            Copy-Item "$lib\zstd.lib" "$lib\zstd_static.lib"
+          }
+
+      - name: Fetch and verify sources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sources = @(
+            @{ file = "nginx-$env:NGINX_VERSION.tar.gz"; url = "https://nginx.org/download/nginx-$env:NGINX_VERSION.tar.gz"; sha = $env:NGINX_SHA256 },
+            @{ file = "pcre2-$env:PCRE2_VERSION.tar.gz"; url = "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$env:PCRE2_VERSION/pcre2-$env:PCRE2_VERSION.tar.gz"; sha = $env:PCRE2_SHA256 },
+            @{ file = "zlib-$env:ZLIB_VERSION.tar.gz"; url = "https://zlib.net/zlib-$env:ZLIB_VERSION.tar.gz"; sha = $env:ZLIB_SHA256 }
+          )
+          foreach ($s in $sources) {
+            Invoke-WebRequest -Uri $s.url -OutFile $s.file -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
+            $actual = (Get-FileHash $s.file -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $s.sha) { throw "sha256 mismatch for $($s.file): $actual" }
+            tar -xzf $s.file
+            if ($LASTEXITCODE -ne 0) { throw "tar failed for $($s.file)" }
+          }
+
+      - name: Configure
+        shell: bash
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          set -euo pipefail
+          module_dir=$(cygpath -m "$GITHUB_WORKSPACE")
+          deps_dir=$module_dir
+          zstd_root=$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static")
+          ZSTD_INC="$zstd_root/include" ZSTD_LIB="$zstd_root/lib" \
+            ./configure \
+              --crossbuild=win32 \
+              --with-cc=cl \
+              --with-cc-opt='-MT -DFD_SETSIZE=1024' \
+              --with-pcre="$deps_dir/pcre2-$PCRE2_VERSION" \
+              --with-zlib="$deps_dir/zlib-$ZLIB_VERSION" \
+              --add-module="$module_dir"
+
+      - name: Locate MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $root = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcvars = "$root\VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found" }
+          "VCVARS=$vcvars" >> $env:GITHUB_ENV
+
+      - name: Pre-build PCRE2 and zlib
+        shell: cmd  # zizmor: ignore[misfeature]
+        run: |
+          call "%VCVARS%" || exit /b 1
+          cd pcre2-%PCRE2_VERSION% || exit /b 1
+          copy /y src\config.h.generic src\config.h || exit /b 1
+          copy /y src\pcre2.h.generic src\pcre2.h || exit /b 1
+          copy /y src\pcre2_chartables.c.dist src\pcre2_chartables.c || exit /b 1
+          cl -c -O2 -MT -DHAVE_CONFIG_H -DPCRE2_CODE_UNIT_WIDTH=8 -DPCRE2_STATIC -Isrc ^
+            src\pcre2_auto_possess.c src\pcre2_chartables.c src\pcre2_compile.c ^
+            src\pcre2_config.c src\pcre2_context.c src\pcre2_convert.c ^
+            src\pcre2_dfa_match.c src\pcre2_error.c src\pcre2_extuni.c ^
+            src\pcre2_find_bracket.c src\pcre2_maketables.c src\pcre2_match.c ^
+            src\pcre2_match_data.c src\pcre2_newline.c src\pcre2_ord2utf.c ^
+            src\pcre2_pattern_info.c src\pcre2_script_run.c src\pcre2_serialize.c ^
+            src\pcre2_string_utils.c src\pcre2_study.c src\pcre2_substitute.c ^
+            src\pcre2_substring.c src\pcre2_tables.c src\pcre2_ucd.c ^
+            src\pcre2_valid_utf.c src\pcre2_xclass.c || exit /b 1
+          link -lib -out:pcre2-8.lib *.obj || exit /b 1
+          cd ..\zlib-%ZLIB_VERSION% || exit /b 1
+          cl -c -O2 -MT adler32.c crc32.c deflate.c infback.c inffast.c inflate.c inftrees.c trees.c zutil.c compress.c uncompr.c gzclose.c gzlib.c gzread.c gzwrite.c || exit /b 1
+          link -lib -out:zlib.lib *.obj || exit /b 1
+
+      - name: Build
+        shell: cmd  # zizmor: ignore[misfeature]
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          call "%VCVARS%" || exit /b 1
+          nmake -f objs/Makefile || exit /b 1
+
+      - name: Verify static modules and directives
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $table = Get-Content objs\ngx_modules.c -Raw
+          foreach ($name in 'ngx_http_zstd_filter_module', 'ngx_http_zstd_static_module') {
+            if ($table -notmatch $name) { throw "$name absent from ngx_modules.c" }
+          }
+          New-Item -ItemType Directory -Force conf, logs | Out-Null
+          function Test-Directive([string]$directive, [bool]$valid) {
+            @('events {}', 'http {', "server { listen 8080; $directive }", '}') | Set-Content -Encoding ascii conf/nginx.conf
+            & .\objs\nginx.exe -t -p . -c conf/nginx.conf 2>$null
+            if (($LASTEXITCODE -eq 0) -ne $valid) { throw "unexpected verdict for: $directive" }
+          }
+          Test-Directive 'zstd on; zstd_static on;' $true
+          Test-Directive 'zstd_not_a_directive on;' $false
+          exit 0
+
+  mingw:
+    name: MinGW-w64 x64 dynamic
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pcre2
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-zstd
+
+      - name: Fetch, configure and build
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          fetch() {
+            local url=$1 sha=$2 file=${1##*/}
+            curl -fsSLO --connect-timeout 30 --max-time 120 "$url"
+            printf '%s  %s\n' "$sha" "$file" | sha256sum -c -
+            tar -xzf "$file"
+          }
+          fetch "https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz" "$NGINX_SHA256"
+          fetch "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$PCRE2_VERSION/pcre2-$PCRE2_VERSION.tar.gz" "$PCRE2_SHA256"
+          fetch "https://zlib.net/zlib-$ZLIB_VERSION.tar.gz" "$ZLIB_SHA256"
+          module_dir=$(cygpath -m "$GITHUB_WORKSPACE")
+          cd "nginx-$NGINX_VERSION"
+          ZSTD_INC=/mingw64/include ZSTD_LIB=/mingw64/lib \
+            ./configure \
+              --with-cc=gcc \
+              --with-pcre="../pcre2-$PCRE2_VERSION" \
+              --with-zlib="../zlib-$ZLIB_VERSION" \
+              --add-dynamic-module="$module_dir"
+          make -j2
+
+      - name: Verify dynamic modules and directives
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "nginx-$NGINX_VERSION"
+          test -f objs/ngx_http_zstd_filter_module.so
+          test -f objs/ngx_http_zstd_static_module.so
+          mkdir -p conf logs
+          cat > conf/nginx.conf <<'EOF'
+          load_module objs/ngx_http_zstd_filter_module.so;
+          load_module objs/ngx_http_zstd_static_module.so;
+          events {}
+          http { server { listen 8080; zstd on; zstd_static on; } }
+          EOF
+          ./objs/nginx.exe -t -p . -c conf/nginx.conf
+          sed -i 's/zstd on/zstd_not_a_directive on/' conf/nginx.conf
+          if ./objs/nginx.exe -t -p . -c conf/nginx.conf; then
+            echo 'bogus directive was accepted' >&2
+            exit 1
+          fi

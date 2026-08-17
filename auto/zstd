@@ -101,7 +101,16 @@ if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
     if [ $ngx_found = no ]; then
         # then try the dynamic shared library
         ngx_feature="ZStandard dynamic library in $ZSTD_INC and $ZSTD_LIB"
-        ngx_zstd_opt_L="-L$ZSTD_LIB -lzstd -Wl,-rpath,$ZSTD_LIB"
+        if [ "${NGX_PLATFORM:-}" = win32 ]; then
+            # MinGW produces PE/COFF modules. Its linker has no ELF runtime
+            # search path to encode, and --enable-new-dtags/-rpath are either
+            # rejected or ignored depending on the binutils version. The DLL
+            # must be beside nginx.exe or otherwise on Windows' DLL search
+            # path at runtime.
+            ngx_zstd_opt_L="-L$ZSTD_LIB -lzstd"
+        else
+            ngx_zstd_opt_L="-L$ZSTD_LIB -lzstd -Wl,-rpath,$ZSTD_LIB"
+        fi
 
         SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
         CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
