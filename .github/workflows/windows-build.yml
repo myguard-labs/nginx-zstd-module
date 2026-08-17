@@ -66,7 +66,7 @@ jobs:
           $sources = @(
             @{ file = "nginx-$env:NGINX_VERSION.tar.gz"; url = "https://nginx.org/download/nginx-$env:NGINX_VERSION.tar.gz"; sha = $env:NGINX_SHA256 },
             @{ file = "pcre2-$env:PCRE2_VERSION.tar.gz"; url = "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$env:PCRE2_VERSION/pcre2-$env:PCRE2_VERSION.tar.gz"; sha = $env:PCRE2_SHA256 },
-            @{ file = "zlib-$env:ZLIB_VERSION.tar.gz"; url = "https://zlib.net/zlib-$env:ZLIB_VERSION.tar.gz"; sha = $env:ZLIB_SHA256 }
+            @{ file = "zlib-$env:ZLIB_VERSION.tar.gz"; url = "https://github.com/madler/zlib/releases/download/v$env:ZLIB_VERSION/zlib-$env:ZLIB_VERSION.tar.gz"; sha = $env:ZLIB_SHA256 }
           )
           foreach ($s in $sources) {
             Invoke-WebRequest -Uri $s.url -OutFile $s.file -ConnectionTimeoutSeconds 30 -OperationTimeoutSeconds 60
@@ -186,7 +186,7 @@ jobs:
           }
           fetch "https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz" "$NGINX_SHA256"
           fetch "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$PCRE2_VERSION/pcre2-$PCRE2_VERSION.tar.gz" "$PCRE2_SHA256"
-          fetch "https://zlib.net/zlib-$ZLIB_VERSION.tar.gz" "$ZLIB_SHA256"
+          fetch "https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.gz" "$ZLIB_SHA256"
           module_dir=$(cygpath -m "$GITHUB_WORKSPACE")
           cd "nginx-$NGINX_VERSION"
           ZSTD_INC=/mingw64/include ZSTD_LIB=/mingw64/lib \
