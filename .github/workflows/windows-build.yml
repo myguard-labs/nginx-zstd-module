@@ -15,6 +15,7 @@ on:
       - '*.h'
       - 'config'
       - 'tools/build-windows.sh'
+      - '.github/scripts/configure-msvc.sh'
       - '.github/workflows/windows-build.yml'
   push:
     branches: [master]
@@ -89,20 +90,11 @@ jobs:
       - name: Configure
         # Configure is a bash script, but every compiler probe needs the
         # environment installed by vcvars64.bat in this same cmd process.
-        shell: cmd /d /s /c "call "%VCVARS%" && bash --noprofile --norc -e -o pipefail {0}"  # zizmor: ignore[misfeature]
+        shell: cmd  # zizmor: ignore[misfeature]
         working-directory: nginx-${{ env.NGINX_VERSION }}
         run: |
-          module_dir=$(cygpath -m "$GITHUB_WORKSPACE")
-          deps_dir=$module_dir
-          zstd_root=$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static")
-          ZSTD_INC="$zstd_root/include" ZSTD_LIB="$zstd_root/lib" \
-            ./configure \
-              --crossbuild=win32 \
-              --with-cc=cl \
-              --with-cc-opt='-MT -DFD_SETSIZE=1024' \
-              --with-pcre="$deps_dir/pcre2-$PCRE2_VERSION" \
-              --with-zlib="$deps_dir/zlib-$ZLIB_VERSION" \
-              --add-module="$module_dir"
+          call "%VCVARS%" || exit /b 1
+          bash "%GITHUB_WORKSPACE:\=/%/.github/scripts/configure-msvc.sh" || exit /b 1
 
       - name: Pre-build PCRE2 and zlib
         shell: cmd  # zizmor: ignore[misfeature]
@@ -196,11 +188,10 @@ jobs:
               --with-pcre="../pcre2-$PCRE2_VERSION" \
               --with-zlib="../zlib-$ZLIB_VERSION" \
               --add-dynamic-module="$module_dir"
-          # A parallel all-target build can start the dynamic-module link
-          # before nginx's MinGW import library exists. Build that dependency
-          # explicitly, then parallelize the remaining targets.
-          make -j2 objs/libnginx.a
-          make -j2
+          # A parallel build can start the dynamic-module link before nginx's
+          # MinGW import library exists. The generated makefile does not expose
+          # that library as a separate target, so preserve its declared order.
+          make -j1
 
       - name: Verify dynamic modules and directives
         shell: msys2 {0}
