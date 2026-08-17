@@ -76,11 +76,22 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "tar failed for $($s.file)" }
           }
 
+      - name: Locate MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $root = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcvars = "$root\VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found" }
+          "VCVARS=$vcvars" >> $env:GITHUB_ENV
+
       - name: Configure
-        shell: bash
+        # Configure is a bash script, but every compiler probe needs the
+        # environment installed by vcvars64.bat in this same cmd process.
+        shell: cmd /d /s /c "call "%VCVARS%" && bash --noprofile --norc -e -o pipefail {0}"  # zizmor: ignore[misfeature]
         working-directory: nginx-${{ env.NGINX_VERSION }}
         run: |
-          set -euo pipefail
           module_dir=$(cygpath -m "$GITHUB_WORKSPACE")
           deps_dir=$module_dir
           zstd_root=$(cygpath -m "$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static")
@@ -92,16 +103,6 @@ jobs:
               --with-pcre="$deps_dir/pcre2-$PCRE2_VERSION" \
               --with-zlib="$deps_dir/zlib-$ZLIB_VERSION" \
               --add-module="$module_dir"
-
-      - name: Locate MSVC
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $root = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          $vcvars = "$root\VC\Auxiliary\Build\vcvars64.bat"
-          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found" }
-          "VCVARS=$vcvars" >> $env:GITHUB_ENV
 
       - name: Pre-build PCRE2 and zlib
         shell: cmd  # zizmor: ignore[misfeature]
@@ -195,6 +196,10 @@ jobs:
               --with-pcre="../pcre2-$PCRE2_VERSION" \
               --with-zlib="../zlib-$ZLIB_VERSION" \
               --add-dynamic-module="$module_dir"
+          # A parallel all-target build can start the dynamic-module link
+          # before nginx's MinGW import library exists. Build that dependency
+          # explicitly, then parallelize the remaining targets.
+          make -j2 objs/libnginx.a
           make -j2
 
       - name: Verify dynamic modules and directives
