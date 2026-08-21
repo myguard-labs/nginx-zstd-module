@@ -1,0 +1,17 @@
+---
+id: c-memcpy-sizeof-pointer
+language: c
+severity: warning
+message: >-
+  memcpy/memmove/ngx_memcpy length is sizeof(a pointer), not the pointed-to
+  object — copies only 4/8 bytes (or overreads if the pointer is to a larger
+  buffer). Almost always a bug: use sizeof(*ptr) or the real byte length.
+note: Dismiss only if the intent really is to copy a pointer value.
+rule:
+  any:
+    - pattern: memcpy($DST, $SRC, sizeof($PTR))
+    - pattern: ngx_memcpy($DST, $SRC, sizeof($PTR))
+    - pattern: memmove($DST, $SRC, sizeof($PTR))
+constraints:
+  PTR:
+    kind: identifier
