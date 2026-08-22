@@ -52,7 +52,7 @@ permissions:
 jobs:
   build-flavors:
     name: Build & Test::Nginx (${{ matrix.flavor }} ${{ matrix.version }})
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -144,7 +144,7 @@ jobs:
 
   fuzz:
     name: Fuzz (Accept-Encoding, long)
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 600
     steps:
       - name: Checkout module
@@ -240,7 +240,7 @@ jobs:
 
   memcheck:
     name: Valgrind Memcheck soak
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 240
     steps:
       - name: Checkout module
@@ -300,7 +300,7 @@ jobs:
 
   helgrind:
     name: Valgrind Helgrind soak
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 240
     steps:
       - name: Checkout module
@@ -360,7 +360,7 @@ jobs:
 
   scanners:
     name: Security scanners
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     steps:
       - name: Checkout module

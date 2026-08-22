@@ -105,7 +105,18 @@ APPROVED_SELECTOR = "${{ fromJSON(vars.POOL || '[\"ubuntu-latest\"]') }}"
 # reported by the nginx-cache-turbo-module adoption, 2026-08-10.
 SELF_HOSTED_ALLOWED = True
 
-HOSTED = re.compile(r"ubuntu-(?:latest|[0-9]+\.[0-9]+)")
+# GitHub-hosted runner images. The skeleton only ever needed the Ubuntu arm;
+# this module also builds on Windows (windows-build.yml: MSVC and MinGW), which
+# is a genuinely different platform rather than a pool choice, so its images
+# belong here too. Kept as an explicit image list, NOT a permissive
+# ".*-latest": the whole point of this check is that an unrecognised label is a
+# finding, and a wildcard would wave through a self-hosted pool called
+# "builder-latest".
+#
+# macos-* is listed for completeness; no workflow here uses it today.
+HOSTED = re.compile(
+    r"(?:ubuntu|windows|macos)-(?:latest|[0-9]+(?:\.[0-9]+)?)(?:-arm)?"
+)
 
 # The runtime driver. A job that starts it is a "runtime-bearing" job and owes
 # the port-band declaration checked below.

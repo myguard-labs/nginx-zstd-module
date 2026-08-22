@@ -50,7 +50,7 @@ jobs:
   #    at run time is what keeps CI from 404ing after a release.
   resolve:
     name: Resolve nginx version
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     outputs:
       nginx_version: ${{ steps.v.outputs.nginx_version }}
@@ -78,7 +78,7 @@ jobs:
   # ── Lint & static analysis — no nginx build, fully independent ────────────
   validation:
     name: Validation
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 15
 
     steps:
@@ -268,7 +268,7 @@ jobs:
     # below and in the job summary. Do NOT add `matrix.version` here, and do
     # NOT strip the expression back to a bare literal.
     name: Build (${{ matrix.flavor }})
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     needs: resolve
     strategy:
@@ -453,7 +453,7 @@ jobs:
   #    fallback paths still compile and produce correct compression. ─────
   build-old-libzstd:
     name: Build (libzstd 1.4.x — fallback paths)
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 25
     needs: resolve
 
@@ -627,7 +627,7 @@ jobs:
   #    signs its neighbours up for its libraries). ─────────────────────────
   linkage:
     name: Dynamic-module linkage isolation
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 15
     needs: resolve
     env:
@@ -870,7 +870,7 @@ jobs:
   #    summary warning exists for. ─────────────────────────────────────
   cvary-interop:
     name: compression_vary interop (real module)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 15
     needs: resolve
     env:
@@ -1037,7 +1037,7 @@ jobs:
   #    knowledge; ASAN is faster than valgrind for CI. ───────────────────────
   build-asan:
     name: Build ASAN+UBSAN
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     needs: resolve
 
@@ -1129,7 +1129,7 @@ jobs:
     # "Report resolved version" step below instead. Do NOT put the `needs`
     # expression back in the title.
     name: Tests
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     needs: [resolve, build]
     env:
@@ -1421,7 +1421,7 @@ jobs:
   # ── Smoke tests under ASAN+UBSAN — fails on any memory/UB error ───────────
   tests-asan:
     name: Tests ASAN+UBSAN
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     needs: build-asan
     env:
@@ -1614,7 +1614,7 @@ jobs:
   #    a future change can't silently drop tested surface. ─────────────────
   coverage:
     name: Coverage (gcov/lcov)
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     needs: resolve
     env:
