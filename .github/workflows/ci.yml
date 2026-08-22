@@ -107,7 +107,13 @@ jobs:
       contents: read
 
   security-scanners:
-    name: Security Scanners
+    # Lower-case "scanners" deliberately: this string is half of the check
+    # context ("Security scanners / Security scanners") that ruleset 16557047
+    # requires on master. Step 20's Security Scanners spelling governs the
+    # README badge and CI table, not this job name -- the reference sets no
+    # name: here at all. Renaming it orphans the required context, and the PR
+    # then waits forever on a check that will never report again.
+    name: Security scanners
     uses: ./.github/workflows/security-scanners.yml
     permissions:
       contents: read
