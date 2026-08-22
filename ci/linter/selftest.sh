@@ -291,6 +291,31 @@ fi
 case_ 0 "lint-spelling is dispatched by run-all.sh" \
     bash -c 'ci/linter/run-all.sh --list | grep -q lint-spelling.sh'
 
+# The control above closes the loop for checkers that ARE a ci/linter/lint-*.sh
+# script. Two gates in lint.yml are not: ast-grep and gitleaks live in
+# .pre-commit-config.yaml and are invoked as their own `run:` steps, because
+# run-all.sh discovers checkers by the lint-*.sh glob and can never reach them.
+# That left them structurally unguarded -- delete either step from lint.yml and
+# every control here still passed, which is how they came to be hook-only (and
+# so absent from every PR) until 2026-08-22.
+#
+# Keying on the step NAME rather than the tool binary is deliberate: the name is
+# what the job summary shows, and a step renamed out of this list is a step
+# whose disappearance from the UI nobody would notice either.
+for step in \
+    'ast-grep (structural sinks, gate on promoted rules)' \
+    'gitleaks (whole tracked tree)'
+do
+    if grep -qF -- "- name: $step" .github/workflows/lint.yml; then
+        echo "ok   lint.yml still runs the non-script gate: $step"
+    else
+        echo "FAIL lint.yml no longer runs: $step" >&2
+        echo "       | it is not a ci/linter/lint-*.sh script, so run-all.sh" >&2
+        echo "       | cannot dispatch it and no other control covers it" >&2
+        rc=1
+    fi
+done
+
 # The prompt-steps temp root went with the checker (see below), leaving only
 # $badroot. Its trap is registered here because `trap ... EXIT` REPLACES any
 # earlier EXIT trap rather than adding to it.
