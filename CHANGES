@@ -1,5 +1,23 @@
 Changes with http-zstd
 
+    *) Security: the dcz cross-origin gate could be bypassed by a
+       duplicate request header. Sec-Fetch-Site and Available-Dictionary
+       are not in nginx's known-header table, so nginx chains duplicate
+       occurrences rather than rejecting them, and this module evaluated
+       only the first. A request carrying "Sec-Fetch-Site: same-origin"
+       ahead of the client's real "cross-site" therefore passed the RFC
+       9842 section 8.3 same-origin partitioning check, and the response
+       was compressed against a dictionary that must not be used
+       cross-site. Both headers are now counted and dcz falls back to
+       plain zstd when either appears more than once.
+       Affects only configurations using zstd_dcz_dict_file, which is
+       new in this release and not present in 0.90.8 or earlier, so no
+       released version is vulnerable. Reaching it also requires an
+       intermediary that merges or forwards a client-supplied duplicate
+       header, or a request-smuggling desync; a browser cannot trigger
+       it alone. Found during this release's audit, not reported
+       externally, so no CVE is assigned.
+
     *) Change: the repository adopted the myguard nginx-module skeleton
        standard. CI material moved under ci/ (t/, tests/unit/, tools/,
        fuzz/, linter/), the module sources moved to src/, and .github/
