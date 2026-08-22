@@ -87,8 +87,10 @@
  * Extend: add a CASE() function and one line in main().
  */
 
-#include "ngx_shim.h"
-#include "generated_parser.inc"
+/* Path-relative so any analyser parses this TU without -I flags: an
+ * unparsed TU is silently skipped, which reads as clean. */
+#include "../../fuzz/ngx_shim.h"
+#include "../../fuzz/generated_parser.inc"
 
 #include <stdio.h>
 #include <string.h>

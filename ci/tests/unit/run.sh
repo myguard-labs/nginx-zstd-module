@@ -53,11 +53,10 @@ fi
 
 # Regenerate the extracted parser slice so this binary always links the
 # shipped src/ngx_http_zstd_common.h, never a stale copy.
-# Static analysers need the same include path this script compiles with:
-#   clang-tidy ci/tests/unit/test_accept_encoding.c -- -Ici/fuzz -Ici/tests/unit -Isrc
-# Without -Ici/fuzz the "ngx_shim.h" include fails, clang-tidy reports a
-# compiler error and SKIPS the TU -- which review-lint.sh correctly reports as
-# a coverage gap, not a clean result.
+# test_accept_encoding.c includes ci/fuzz/ headers by RELATIVE path, so a static
+# analyser invoked from anywhere parses it without -I flags. That is deliberate:
+# an analyser that cannot resolve an include skips the whole TU and reports no
+# findings, which is indistinguishable from a clean result.
 bash "$FUZZ_DIR/extract_parser.sh"
 
 CC="${CC:-cc}"
