@@ -279,7 +279,7 @@ jobs:
     name: Build (${{ matrix.flavor }})
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
-    needs: resolve
+    needs: [resolve, validation]
     strategy:
       fail-fast: false
       # nginx mainline, assembled by the resolve job.
@@ -672,7 +672,7 @@ jobs:
     name: Dynamic-module linkage isolation
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 15
-    needs: resolve
+    needs: [resolve, validation]
     env:
       NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
 
@@ -915,7 +915,7 @@ jobs:
     name: compression_vary interop (real module)
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 15
-    needs: resolve
+    needs: [resolve, validation]
     env:
       NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
       # HanadaLee/ngx_http_compression_vary_filter_module, pinned by
@@ -1082,7 +1082,7 @@ jobs:
     name: Build ASAN+UBSAN
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
-    needs: resolve
+    needs: [resolve, validation]
 
     env:
       # Resolved mainline nginx — feeds the cache keys, download and the
@@ -1710,7 +1710,7 @@ jobs:
     name: Coverage (gcov/lcov)
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 20
-    needs: resolve
+    needs: [resolve, validation]
     env:
       NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
       # This job's own Test::Nginx port band -- see ci/tools/max-port.sh.
