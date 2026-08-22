@@ -426,16 +426,32 @@ a ~1% figure would have meant nginx core was in the denominator.
 
 ### 5. Valgrind / helgrind
 
-**Memcheck: NOT trustworthy as a gate — see `issues.md`.** `valgrind.suppress`
-is the generic circulated nginx file: all 28 blocks are unedited
-`<insert_a_suppression_name_here>` placeholders and the set names
-`ngx_http_lua_*` and `drizzle_state_connect`, symbols this module never links.
-Several blocks suppress bare `fun:malloc` / `fun:memcpy` under short stacks, so
-it can mask this module's own errors. It is live config, not dead:
-`ci/tools/soak.sh:71,79` passes it to both tools. Deliberately NOT fixed here —
-deriving a real set needs a genuine memcheck soak, which is phase-7 work.
-Ledgered OPEN with two acceptable fixes, and sent upstream (skeleton PR #41)
-because the skeleton ships the same file to every adopter.
+**Memcheck: was not trustworthy as a gate — FIXED at step 41 (2026-08-22).**
+`valgrind.suppress` was the generic circulated nginx file: all 28 blocks unedited
+`<insert_a_suppression_name_here>` placeholders, naming `ngx_http_lua_*` and
+`drizzle_state_connect`, symbols this module never links. It is live config, not
+dead — `ci/tools/soak.sh:71,79` passes it to both memcheck and helgrind.
+
+The `fun:malloc` / `fun:memcpy` blocks turned out to be **anchored** to full
+nginx call stacks (`ngx_alloc` → `ngx_set_environment` → …) and could not reach
+this module's frames. The real defect was a single block:
+
+    { <insert_a_suppression_name_here>
+      Memcheck:Cond
+      obj:* }
+
+`Memcheck:Cond` + `obj:*` matches an uninitialised-value conditional in any
+object at any depth, muting that whole class — including in
+`ngx_http_zstd_filter_module.so`. Measured on a four-line C program reading one
+uninitialised int: without suppressions valgrind exits 99 with 1 error; with
+that block alone it exits 0 with none. So `Memcheck lite (60s soak)` was green
+by construction for the Cond class, however long it ran.
+
+Fixed by replacing the file with an empty one (option 1 of the two the ledger
+recorded) carrying the derivation rules — suppress nothing, hide nothing.
+Verified that both memcheck and helgrind accept a comment-only suppressions
+file and that the previously-muted error becomes visible again. Sent upstream
+(skeleton PR #41) because the skeleton ships the same file to every adopter.
 
 **Helgrind: NOT applicable, settled with evidence.** The module has no shared
 cross-worker state. Counted over `src/*.c` and `src/*.h`: `ngx_shared_memory_add`
