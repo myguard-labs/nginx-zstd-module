@@ -22,15 +22,17 @@ linked, never a hand copy.
 
 24 checks, all green:
 
-```
+```text
 $ bash ci/tests/unit/run.sh 2>&1 | tail -3
 ok   an unterminated quoted parameter value does not hang the walk and does not fabricate a matching zstd token
 
 24/24 checks passed
 ```
 
-### Mutation pass (all 5 applied to `src/ngx_http_zstd_common.h`, observed,
-### reverted — tree diffed clean against a pre-mutation backup after each)
+### Mutation pass
+
+All 5 applied to `src/ngx_http_zstd_common.h`, observed, reverted — tree
+diffed clean against a pre-mutation backup after each.
 
 1. **Wildcard/explicit precedence flipped** — swapped the order of the two
    `if` blocks at the end of `ngx_http_zstd_coding_weight()` so `star_q` is
@@ -160,21 +162,67 @@ artifact instead).
 Reverted both source and binaries after; `diff` against the pre-mutation
 `.c` backup confirmed clean before committing.
 
-## Step 25 note (out of my 21-26 slice but adjacent, flagged for step 33)
+## Step 25 note
 
-`ci/tools/soak.sh` under Valgrind (`USE_VALGRIND=1`, wired in
-`.github/workflows/valgrind.yml`) runs with **no `--suppressions` file at
-all** — there is no `valgrind.supp` anywhere in this repo, unlike the
-skeleton's `ci/tools/valgrind.supp` (nginx-core process-lifetime leak
-suppressions + two Helgrind entries). This may be a genuinely clean state
-(no false-positive leak noise observed against this module's build), or it
-may mean the memcheck-lite job has never actually gone green against a real
-run and nobody has looked. Did NOT run a local valgrind soak to check —
-that is an explicit long-runner under the worker contract (build + soak).
-**Flag for whoever owns step 25/30**: run `USE_VALGRIND=1 ci/tools/soak.sh
-<nginx-binary> 60 4` once, and if nginx-core noise appears, add a
-target-specific `ci/tools/valgrind.supp` derived from that real run (per the
-skeleton's own instructions on how to build one — never a copy).
+Out of my 21-26 slice, but investigated because it's adjacent to step 24's
+soak evidence and the finding is severe.
+
+**CONFIRMED, not just suspected: `valgrind.suppress` at the repo root is a
+copied, generic file, not one derived from this module.** First pass (during
+step 22) searched for `valgrind.supp` (the skeleton's filename) and found
+nothing, and wrongly concluded no suppression file existed at all. It does
+— `ci/tools/soak.sh` lines 71/79 reference `$(repo root)/valgrind.suppress`
+(note the different name, `.suppress` not `.supp`) — correcting that
+earlier miss here per [[feedback-inference-stated-as-verified-fact]] /
+[[feedback-grep-miss-is-not-proof-of-absence]] (searched the wrong spelling,
+took the miss as proof of absence).
+
+Read the file (218 lines, 28 suppression blocks): **every single block is
+still named `<insert_a_suppression_name_here>`** (the valgrind
+`--gen-suppressions` template placeholder, never filled in), and at least
+two blocks reference symbols that do not exist anywhere in this build —
+`fun:ngx_http_lua_ndk_set_var_get` (this module does not vendor or depend on
+ngx_http_lua_module) and `fun:drizzle_state_connect` (a MySQL/Drizzle
+upstream module, also absent). This is the well-known generic nginx
+valgrind suppression file that circulates online, not a suppression set
+derived from `USE_VALGRIND=1 ci/tools/soak.sh <this module's binary>`. It
+is exactly the "wrong tree" trap this phase's front matter names: a copied
+`valgrind.supp`/`.suppress` can suppress the module's OWN errors, and this
+one's `Memcheck:Leak` / `Memcheck:Cond` blocks are broad enough (bare
+`fun:ngx_alloc` / `fun:memcpy` frames with no caller chain reaching this
+module) that a real leak or uninitialized-read bug inside
+`ngx_http_zstd_*` could plausibly match one of them by accident, silently
+passing the gate.
+
+**Did not patch this.** Fixing it correctly requires a real
+`USE_VALGRIND=1 ci/tools/soak.sh <nginx-binary> 60 4` run against this
+module's own static build, per the file's own header instructions on how a
+suppression must be derived (or the skeleton's `valgrind.supp` header, which
+states the same discipline) — building nginx from source plus a 60s
+Valgrind soak is a build+soak long-runner, explicitly forbidden for a
+worker session to run locally, and blindly deleting or rewriting 28
+suppression entries without that real run risks either reintroducing false
+leak noise (deleting the entries that ARE legitimate nginx-core lifetime
+allocations) or leaving the module under-suppressed against upstream noise
+that then reads as a module regression.
+
+**This is a MUST-FIX finding for whoever runs step 25/30 properly, ranked
+above the codeql.yml/ci-deep.yml items** (those two were checked and are
+already correctly target-scoped — see below): run the real soak, name every
+surviving suppression after the actual nginx-core call chain it matches
+(per the file's own documented convention), delete every block whose
+symbol does not appear in this build's call graph at all (the two
+confirmed above, and any others found the same way), and verify
+`valgrind --suppressions=valgrind.suppress ...`'s `ERROR SUMMARY` line
+shows nonzero suppressed count per surviving block (a suppression matching
+nothing is dead weight, same standard the skeleton's own header states).
+
+**codeql.yml and ci-deep.yml, checked in the same pass, are already
+correct** — no finding: `codeql.yml`'s `paths:` is `filter`, `static`, `*.c`,
+`*.h` with `paths-ignore: nginx-*/**` (module TU only, not copied from the
+skeleton), and `ci-deep.yml`'s matrix names this module's own real
+flavor/version triples (nginx 1.31.2, 1.30.4, angie 1.12.1), not the
+reference's.
 
 ## Step 23 — fuzz target, corpus and dictionary
 
@@ -200,7 +248,7 @@ table) — the tokens are two literal call-site arguments to
 commands below) and replaces a marked block in `fuzz.dict` in place.
 Wired `gen_dict.sh --check` into `ci/linter/lint-c.sh`.
 
-```
+```text
 $ bash ci/fuzz/gen_dict.sh --check
 ✓ fuzz.dict coding tokens match src/*.c call sites: "dcz" "zstd"
 
@@ -238,7 +286,7 @@ is itself a proof-of-clean, not a gap). Seeded one synthetic case,
 step 21's mutation pass (wildcard/explicit precedence swap), which trips
 the fuzz target's own semantic-differential oracle:
 
-```
+```text
 # mutated ngx_http_zstd_coding_weight() (precedence swapped):
 $ ./fuzz_target_mutant /tmp/crash-wildcard-precedence-flip
 ==...== ERROR: libFuzzer: deadly signal
@@ -282,8 +330,12 @@ to confirm the corrected comment matches the real log output.
 
 ## Stopped here
 
-Landed: steps 21, 22, 23, 24. Steps 25-26 not started this session (step
-25's valgrind.supp gap noted above under "Step 25 note" was found while
-doing step 22's adjacent reading, not investigated further — genuinely out
-of my 21-26 core scope until reached properly). See the worker return
-banner for exact scope remaining.
+Landed: steps 21, 22, 23, 24 fully, plus a confirmed (not just suspected)
+step 25 finding on `valgrind.suppress` — read and diagnosed, deliberately
+NOT patched (needs a real soak run, a long-runner). codeql.yml and
+ci-deep.yml (the other two of step 25's "three neighbours") were checked in
+the same pass and are already correct, no finding. Step 26 (coverage.sh +
+`coverage` ci-build.sh mode) not started this session — it needs its own
+build-tree work (a distinct instrumented build, not a flag on `debug`) that
+did not fit in the remaining budget at the standard this phase requires.
+See the worker return banner for exact scope remaining.
