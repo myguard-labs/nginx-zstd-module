@@ -1,16 +1,23 @@
 #!/bin/bash
 # Build and test zstd-nginx-module against nginx or angie.
 #
-#   ci/tools/ci-build.sh [flavor] [version]
+#   ci/tools/ci-build.sh [flavor] [version] [mode]
 #     flavor : nginx (default) | angie
 #     version: source version, e.g. 1.31.2. Omit (or pass "" with flavor=nginx)
 #              to resolve the current mainline release from nginx.org.
+#     mode   : release (default) | coverage
+#              coverage adds --coverage to cc-opt/ld-opt and builds into a
+#              SEPARATE tree (.build/<flavor>-<version>-coverage/) so a
+#              coverage-instrumented .so is never the one a non-coverage job
+#              picks up by cache hit. It is never bolted onto release as a
+#              flag: gcda/gcno files left in a shared tree would poison the
+#              next plain build's cache key without changing the key itself.
 #
-# Built tree persists at .build/<flavor>-<version>/objs/{<flavor>,ngx_http_zstd_*.so}
+# Built tree persists at .build/<flavor>-<version>[-<mode>]/objs/{<flavor>,ngx_http_zstd_*.so}
 # so a caller (a CI job) can find the binary and both dynamic modules after
 # the script exits — unlike the old single-nginx version of this script, which
 # built under /tmp and deleted it on exit. NO_CACHE=1 forces a from-scratch
-# rebuild of a given flavor/version pair.
+# rebuild of a given flavor/version/mode triple.
 #
 # nginx tarballs are verified via PGP against the signer keys VENDORED in
 # ci/tools/keys/ (committed to this repo) — never fetched from nginx.org at CI
@@ -41,11 +48,20 @@ MODULE_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
 FLAVOR="${1:-nginx}"
 VERSION="${2:-}"
+MODE="${3:-release}"
 
 case "$FLAVOR" in
     nginx | angie) ;;
     *)
         echo "ERROR: unsupported flavor: $FLAVOR (want: nginx|angie)" >&2
+        exit 2
+        ;;
+esac
+
+case "$MODE" in
+    release | coverage) ;;
+    *)
+        echo "ERROR: unsupported mode: $MODE (want: release|coverage)" >&2
         exit 2
         ;;
 esac
@@ -97,7 +113,13 @@ case "$FLAVOR" in
         ;;
 esac
 
-SRCDIR="$ROOT/${FLAVOR}-${VERSION}"
+# Coverage gets its own build tree so an instrumented .so is never served by
+# a plain release cache hit -- see the mode note in the file header.
+if [ "$MODE" = "coverage" ]; then
+    SRCDIR="$ROOT/${FLAVOR}-${VERSION}-coverage"
+else
+    SRCDIR="$ROOT/${FLAVOR}-${VERSION}"
+fi
 TARBALL="$ROOT/${DIR}.tar.gz"
 
 echo "=========================================================================="
@@ -105,7 +127,7 @@ echo "  zstd-nginx-module CI Build"
 echo "=========================================================================="
 echo ""
 echo "Module: $ZSTD_MODULE_DIR"
-echo "Flavor: $FLAVOR  Version: $VERSION"
+echo "Flavor: $FLAVOR  Version: $VERSION  Mode: $MODE"
 echo "Build tree: $SRCDIR"
 echo ""
 
@@ -229,6 +251,17 @@ echo ""
 #     zstd_max_cctx_memory is built on; auto/zstd only defines it on the
 #     explicit ZSTD_INC path, not on the pkg-config auto-discovery path this
 #     script takes.
+# Coverage adds --coverage to BOTH cc-opt and ld-opt via the configure
+# argument, not env CC/CFLAGS -- nginx's configure probes the compiler with
+# its own invocations and ignores a bare CC=/CFLAGS= override (same reason
+# ccache has to go through --with-cc-opt rather than env, see step 28).
+CC_OPT="-DZSTD_STATIC_LINKING_ONLY"
+LD_OPT=""
+if [ "$MODE" = "coverage" ]; then
+    CC_OPT="$CC_OPT --coverage -O0"
+    LD_OPT="--coverage"
+fi
+
 ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/"$FLAVOR" \
@@ -239,7 +272,8 @@ echo ""
     --with-http_v2_module \
     --with-http_sub_module \
     --with-http_auth_request_module \
-    --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY" \
+    --with-cc-opt="$CC_OPT" \
+    --with-ld-opt="$LD_OPT" \
     --add-dynamic-module="$ZSTD_MODULE_DIR" \
     2>&1 | tail -5
 

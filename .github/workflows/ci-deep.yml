@@ -90,6 +90,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Install dependencies
         run: |
@@ -107,15 +109,26 @@ jobs:
             wget zstd libperl-dev cpanminus
 
       - name: Build server and dynamic modules
-        run: bash ci/tools/ci-build.sh "${{ matrix.flavor }}" "${{ matrix.version }}"
+        env:
+          # Routed through env: rather than spliced into run: directly --
+          # both values come from this file's own hardcoded matrix.include
+          # (never attacker input), but env: indirection is the pattern
+          # zizmor's template-injection audit checks for regardless of
+          # provenance, and the Discord steps below use the same pattern.
+          MATRIX_FLAVOR: ${{ matrix.flavor }}
+          MATRIX_VERSION: ${{ matrix.version }}
+        run: bash ci/tools/ci-build.sh "$MATRIX_FLAVOR" "$MATRIX_VERSION"
 
       - name: Verify built modules
+        env:
+          MATRIX_FLAVOR: ${{ matrix.flavor }}
+          MATRIX_VERSION: ${{ matrix.version }}
         run: |
-          build=".build/${{ matrix.flavor }}-${{ matrix.version }}/objs"
-          test -f "$build/${{ matrix.flavor }}"
+          build=".build/$MATRIX_FLAVOR-$MATRIX_VERSION/objs"
+          test -f "$build/$MATRIX_FLAVOR"
           test -f "$build/ngx_http_zstd_filter_module.so"
           test -f "$build/ngx_http_zstd_static_module.so"
-          echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/$build/${{ matrix.flavor }}" >> "$GITHUB_ENV"
+          echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/$build/$MATRIX_FLAVOR" >> "$GITHUB_ENV"
 
       - name: Cache Perl modules
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -135,7 +148,9 @@ jobs:
         # band, so each leg verifies its OWN port here rather than the job's
         # shared TEST_BASE_PORT -- checking only the mainline leg's port
         # would leave the stable/angie legs unverified.
-        run: ci/tools/max-port.sh "${{ matrix.port }}" 10
+        env:
+          MATRIX_PORT: ${{ matrix.port }}
+        run: ci/tools/max-port.sh "$MATRIX_PORT" 10
 
       - name: Run ci/t/ (filter + static + conf-warn)
         env:
@@ -150,13 +165,15 @@ jobs:
           # understands TEST_NGINX_PORT) can see this job is wired at all.
           TEST_NGINX_SERVER_PORT: "${{ matrix.port }}"
           TEST_NGINX_PORT: "${{ env.TEST_BASE_PORT }}"
+          MATRIX_FLAVOR: ${{ matrix.flavor }}
+          MATRIX_VERSION: ${{ matrix.version }}
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
           cd "$GITHUB_WORKSPACE"
           # ci/t/01-static.t asserts on fixture mtimes (Last-Modified/If-Modified-Since);
           # pin them to a fixed timestamp, same as build-test.yml's tests job.
           touch -d @1541504307 ci/t/suite/test ci/t/suite/test.zst
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-${{ matrix.flavor }}-${{ matrix.version }}"
+          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-$MATRIX_FLAVOR-$MATRIX_VERSION"
           mkdir -p "$TEST_NGINX_SERVROOT"
           prove -v ci/t/00-filter.t ci/t/02-conf-warn.t
           # 01-static.t serves fixtures via "root ../suite", resolved against
@@ -174,6 +191,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Install clang + libFuzzer
         run: |
@@ -191,8 +210,9 @@ jobs:
       - name: Select fuzz duration
         env:
           RAW_FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds }}
+          GH_EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "$GH_EVENT_NAME" = "workflow_dispatch" ]; then
             case "$RAW_FUZZ_SECONDS" in
               ''|*[!0-9]*)
                 echo "::error::fuzz_seconds must be a non-negative integer, got: $RAW_FUZZ_SECONDS"
@@ -256,12 +276,17 @@ jobs:
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
         run: |
           [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          msg="🔴 $GH_REPO — CI Deep / fuzz FAILED. $GH_SERVER_URL/$GH_REPO/actions/runs/$GH_RUN_ID"
+          payload=$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' "$msg")
           curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
-            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / fuzz FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+            -d "$payload" || true
 
   memcheck:
     name: Valgrind Memcheck soak
@@ -270,6 +295,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - name: Resolve latest mainline nginx
         run: |
           set -euo pipefail
@@ -316,12 +343,17 @@ jobs:
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
         run: |
           [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          msg="🔴 $GH_REPO — CI Deep / memcheck FAILED. $GH_SERVER_URL/$GH_REPO/actions/runs/$GH_RUN_ID"
+          payload=$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' "$msg")
           curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
-            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / memcheck FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+            -d "$payload" || true
 
   helgrind:
     name: Valgrind Helgrind soak
@@ -330,6 +362,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - name: Resolve latest mainline nginx
         run: |
           set -euo pipefail
@@ -376,12 +410,17 @@ jobs:
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
         run: |
           [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          msg="🔴 $GH_REPO — CI Deep / helgrind FAILED. $GH_SERVER_URL/$GH_REPO/actions/runs/$GH_RUN_ID"
+          payload=$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' "$msg")
           curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
             -H "Content-Type: application/json" \
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
-            -d "{\"content\":\"🔴 ${{ github.repository }} — CI Deep / helgrind FAILED. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" || true
+            -d "$payload" || true
 
   scanners:
     name: Security scanners
@@ -390,6 +429,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - name: Install dependencies
         run: |
           # builder02 apt profile: loose timeouts — the box runs jobs
@@ -457,4 +498,66 @@ jobs:
             ${{ github.workspace }}/flawfinder.log
             ${{ github.workspace }}/clang-tidy.log
             ${{ github.workspace }}/semgrep.log
+          retention-days: 14
+
+  # Coverage is a REPORT, never a gate (step 26) -- the cheapest way to move
+  # the number is a test that touches a line and asserts nothing, so a floor
+  # buys the metric and sells the thing it proxied for. Monthly cadence
+  # (this file, never PR-time) because ci/tools/coverage.sh does a full
+  # from-scratch coverage-instrumented build plus the whole ci/t/ suite.
+  coverage:
+    name: Coverage report (src/)
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    env:
+      # This job's own Test::Nginx port band -- see ci/tools/max-port.sh.
+      # Distinct from build-flavors' 19300 (width 64) and build-test.yml's
+      # 19200 so a collision needs three concurrent runners occupied, not
+      # two. coverage.sh runs `prove` internally without a caller-supplied
+      # port, so it takes Test::Nginx's compiled-in default (1984) unless
+      # TEST_NGINX_PORT steers it here.
+      TEST_BASE_PORT: 19330
+      TEST_NGINX_PORT: 19330
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          # builder02 apt profile: loose timeouts — the box runs jobs
+          # concurrently and never talks to the Azure mirror (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libzstd-dev pkg-config \
+            wget zstd libperl-dev cpanminus gcovr
+      - name: Cache Perl modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
+      - name: Install Test::Nginx::Socket
+        run: |
+          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+      - name: Verify test port band
+        # Before the first `prove` inside coverage.sh -- see ci/tools/max-port.sh.
+        run: ci/tools/max-port.sh "$TEST_BASE_PORT"
+      - name: Coverage build + report
+        # No COVERAGE_FAIL_UNDER: this job never fails the workflow on a
+        # coverage number, only on the build/test/gcovr steps themselves
+        # failing outright (a real regression, not a metric).
+        run: bash ci/tools/coverage.sh nginx
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: coverage-report
+          path: .build/coverage-report/
           retention-days: 14
