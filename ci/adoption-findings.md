@@ -339,3 +339,26 @@ the same pass and are already correct, no finding. Step 26 (coverage.sh +
 build-tree work (a distinct instrumented build, not a flag on `debug`) that
 did not fit in the remaining budget at the standard this phase requires.
 See the worker return banner for exact scope remaining.
+
+## Step 27 — the security-scanners gate was proven able to fail (supervisor, 2026-08-22)
+
+Verified rather than assumed, because the whole finding was that this gate
+could not fail before the fix. A `strcpy` into an 8-byte stack buffer appended
+to `src/ngx_http_zstd_filter_module.c`:
+
+    set -o pipefail
+    flawfinder --minlevel=4 --error-level=4 \
+      src/ngx_http_zstd_filter_module.c src/ngx_http_zstd_static_module.c
+    -> exit 1
+
+Restored immediately; `git status src/` clean afterwards.
+
+Before this branch the same probe exited **0**: `--minlevel` only controls what
+is PRINTED, and without `--error-level` flawfinder always exits 0 however much
+it finds. The `| tee flawfinder.log` pipe would also have swallowed the status,
+so `set -o pipefail` on that step is load-bearing, not decoration.
+
+Also re-verified after all of the cycle's workflow edits: `ci.yml` is still the
+only workflow carrying a `pull_request:` trigger. Checked by parsing each
+workflow's `on:` key with a YAML loader, not by grepping for the string --
+`on:` parses as the boolean True in YAML, so a naive grep is not the same test.
