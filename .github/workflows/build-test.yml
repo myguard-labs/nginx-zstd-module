@@ -616,7 +616,7 @@ jobs:
       - name: Smoke test (decode-and-compare) against libzstd 1.4.x
         run: |
           cd "$GITHUB_WORKSPACE"
-          # Re-use the existing decode-and-byte-compare smoke test so
+          # Reuse the existing decode-and-byte-compare smoke test so
           # the fallback paths are not just compiled but actually
           # exercised at run time — compression must produce a
           # byte-exact body when decompressed.

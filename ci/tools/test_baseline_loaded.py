@@ -170,7 +170,7 @@ def main() -> int:
                   "as expected", file=sys.stderr)
             return 1
         r = subprocess.run([args.zstd_bin, "-dq", "-c"], input=on_body,
-                            capture_output=True)
+                            capture_output=True, check=False)
         if r.returncode != 0 or r.stdout != BODY:
             print("FAIL baseline: 'zstd on;' response does not decode "
                   "byte-exact to the origin body", file=sys.stderr)
