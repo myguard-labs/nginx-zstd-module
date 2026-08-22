@@ -71,11 +71,11 @@ Security-relevant CI runs on every change and is reproducible locally:
 ```bash
 # Memory safety
 # (build nginx with -fsanitize=address,undefined, then:)
-python3 tools/test_encoding.py --nginx-binary /path/to/asan-nginx
-bash tools/test_reload_leak.sh /path/to/asan-nginx
+python3 ci/tools/test_encoding.py --nginx-binary /path/to/asan-nginx
+bash ci/tools/test_reload_leak.sh /path/to/asan-nginx
 
 # Fuzz the request parser
-bash fuzz/build.sh && ./fuzz/fuzz_accept_encoding -max_total_time=60 fuzz/corpus/
+bash ci/fuzz/build.sh && ./ci/fuzz/fuzz_accept_encoding -max_total_time=60 ci/fuzz/corpus/
 ```
 
 See [`.github/workflows/`](.github/workflows/) (build-test, codeql,
