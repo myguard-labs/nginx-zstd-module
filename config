@@ -20,4 +20,3 @@ ngx_addon_dir=$_ngx_zstd_root/src
 
 ngx_addon_dir=$_ngx_zstd_root
 ngx_addon_name=ngx_zstd
-

@@ -18,15 +18,12 @@ finding shellcheck could have named in two seconds. Every script is standalone;
 | `lint-ci-ports.sh` | `.github/workflows/` | every port-binding job declares a distinct `TEST_BASE_PORT` band, binds it, and verifies it above the FIRST binding step |
 | `lint-ci-cadence.sh` | `.github/workflows/` | a `workflow_call` member carries no `push:`/`pull_request:` of its own, so it runs once per change rather than twice on two uncancellable concurrency keys (`schedule:` allowed) |
 | `lint-ci-secrets.sh` | `.github/workflows/` | a `workflow_call` member declares the secrets it needs with `required: true`; callers wire them by name and never use `secrets: inherit` |
-| `lint-sync-stamp.sh` | `.github/workflows/`, `.github/scripts/`, `.github/actions/` | every skeleton-shared file carries a current `# sync-sha:` stamp, so an adopter can diff two repos' `--list` output and see exactly what drifted |
 | `lint-docs-drift.sh` | `.github/workflows/`, `README.md` | every workflow documented, every documented workflow exists |
-| `lint-prompt-steps.sh` | `ci/PROMPT.md`, `README.md`, `ci/feedback/`, `ci/tools/`, `ci/linter/` | every `step N` citation names a step `ci/PROMPT.md` defines, and the step sequence has no gap or duplicate |
 | `lint-spelling.sh` | all tracked files | codespell over prose, comments and log strings; vendored trees excluded via `lib.sh` |
 | `run-all.sh` | all of the above | runs every check, reports once |
 | `install-linters.sh` | — | apt-get → pipx → cpan → upstream binary |
 | `lib.sh` | — | sourced helpers (file selection, missing-tool failure) |
 | `workflow_policy.py` | — | the repo-policy checks the `ci-*`/`docs-drift` wrappers call (`runners`, `ports`, `docs`, `cadence`, `secrets`) |
-| `lint-prompt-steps.py` | — | the citation/sequence check `lint-prompt-steps.sh` calls; `PROMPT_STEPS_ROOT` points it at a generated tree for the selftest |
 | `selftest.sh` | — | negative controls for the gate itself; run before the linters in `lint.yml`. Includes the set-equality control: every checker is named in `lint.yml`'s `LINT_ONLY` |
 | `fixtures/policy/` | — | trees the policy checks must go RED on — the known bypasses, the runner-label and step-ordering cases, and the four ways a `secrets:` declaration goes wrong; `clean/` and the `-ok` trees must stay GREEN |
 
@@ -409,3 +406,65 @@ why `lint-c.sh` must be edited in the same commit as that workflow.
   `lint-nginx.sh`.
 - New dependency: add it to `install-linters.sh` **and** to the apt/pip/cpan
   lists above, so a fresh clone is one command from armed.
+
+## Coverage table — file type → linter → rule profile
+
+Derived at skeleton-adoption step 37 (2026-08-22). Every tracked file type is
+listed, with the checker that reaches it and the profile it is gated at. A type
+with no checker carries the reason it needs none — an unexplained blank is a
+gap, not a decision.
+
+| Tracked type | Count | Checker(s) | Rule profile | Gated where |
+|---|---|---|---|---|
+| `src/*.c`, `src/*.h` | 4 | `lint-c`, `lint-nginx`, ast-grep | flawfinder ≥4 · cppcheck warning/perf/portability · semgrep ≥WARNING (`p/c`,`p/security-audit`) · nginx conventions · 11 own + vendored structural rules | `security-scanners.yml` (CI) + pre-commit; **not** `lint.yml` — see § the `c` exclusion |
+| `ci/**/*.[ch]` | 9 | flawfinder, cppcheck, semgrep, ast-grep | same C profiles as `src/`, minus the nginx-convention pass (pool discipline does not apply to harness code) | pre-commit + `lint.yml` (ast-grep) |
+| `*.sh`, `.githooks/*` | 32 | `lint-sh` | shellcheck `-S warning` | `lint.yml` + pre-commit |
+| `*.py` | 17 | `lint-python` | `ruff check` + `ruff format --check` | `lint.yml` + pre-commit |
+| `*.t`, `*.pl`, `*.pm` | 4 | `lint-perl` | `perl -c` + perlcritic ≥4 | `lint.yml` + pre-commit |
+| `.github/workflows/*.yml` | 11 | `lint-yaml`, `lint-ci-{runners,ports,cadence,secrets}`, `lint-docs-drift` | yamllint · actionlint · zizmor `--persona=pedantic` · 5 repo policy checks | `lint.yml` + pre-commit |
+| other `*.yml`, `*.yaml` | 65 | `lint-yaml` | yamllint only (actionlint/zizmor are workflow-scoped) | `lint.yml` + pre-commit |
+| `*.md` | 30 | `lint-spelling`; `README.md` also `lint-docs-drift` | codespell · workflow/README set-equality | `lint.yml` + pre-commit |
+| all tracked prose/comments | — | `lint-spelling` | codespell, vendored trees excluded in `lib.sh` | `lint.yml` + pre-commit |
+| `*.key`, `*.zst`, `*.patch`, `*.dict`, `*.suppress` | 11 | none | binary/fixture/generated data with no syntax a linter can assert; `*.key` are test-only material | — |
+
+### Justified exclusions
+
+- **The `c` checker is absent from `lint.yml`'s `LINT_ONLY`** — flawfinder and
+  semgrep already run over `src/` in `security-scanners.yml` at the *same*
+  thresholds `lint-c.sh` mirrors. Running them twice per PR buys queue time,
+  not coverage. `lint-c.sh` remains the local half of that mirror.
+- **clang-tidy is CI-only.** It needs `ngx_auto_config.h`, i.e. a configured
+  nginx tree, which a local hook cannot assume. A checker that skips itself when
+  the tree is missing is a vacuous gate, so it lives only in
+  `security-scanners.yml`, where the tree is built first.
+
+### Gaps found at step 37 — both closed
+
+1. **Three C files were reached by no checker at all.**
+   `ci/fuzz/fuzz_accept_encoding.c`, `ci/fuzz/ngx_shim.h` and
+   `ci/tests/unit/test_accept_encoding.c` fell outside both the linter
+   selectors (`^src/.*\.[ch]$`) and the pre-commit hook globs, which stopped at
+   `ci/tools/`. The fuzz harness is C that parses attacker-shaped input, so
+   this was the gap worth closing first. The four C hooks now select
+   `^(src|ci)/.*\.[ch]$`; all four pass on the newly covered files.
+2. **ast-grep and gitleaks were hook-only.** Both run from
+   `.pre-commit-config.yaml`, and no workflow runs pre-commit, so a clone that
+   never set `core.hooksPath` bypassed both — exactly the failure mode
+   `lint.yml`'s header says the remote run exists to prevent. `lint.yml` now
+   runs each directly, as its own step, invoked the way the hook invokes it.
+
+   `run-all.sh` still does not reach them: they are not `ci/linter/lint-*.sh`,
+   and the selftest's set-equality control only covers checkers that are. If
+   either step is removed from `lint.yml`, nothing will notice.
+
+### Verifying these two gates
+
+Both were confirmed able to fail, not just to run:
+
+- **ast-grep** — a planted `strcpy()` in `ci/tests/unit/` produced
+  `error[c-unbounded-string-copy]` and the pipeline exited 123.
+- **gitleaks** — use a NON-EXAMPLE secret. AWS's own `AKIAIOSFODNN7EXAMPLE` is
+  allowlisted by the default ruleset and reports "no leaks found", which reads
+  exactly like a broken gate. The probe recipe above the hook in
+  `.pre-commit-config.yaml` produces `leaks found: 1` and exit 1. Note that
+  piping the run into `tail` masks that exit status — check it unpiped.
