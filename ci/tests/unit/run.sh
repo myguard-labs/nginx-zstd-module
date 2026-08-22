@@ -78,4 +78,8 @@ $CC "${OWN_CFLAGS[@]}" -I"$FUZZ_DIR" -c "$DIR/test_accept_encoding.c" \
 $CC "${LINK_EXTRA[@]}" -o "$BIN" "$DIR/test_accept_encoding.o"
 
 echo "==> Running"
-"$BIN"
+# Bounded: a regression in the quoted-string walk can hang the scanner outright
+# (one of the documented mutations does exactly that). Without a local timeout
+# the job burns its whole 15-minute budget and the log never says which layer
+# failed.
+timeout 60s "$BIN"

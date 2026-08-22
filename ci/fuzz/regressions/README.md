@@ -13,7 +13,7 @@ Add a case with:
 cp ci/fuzz/crash-<hash> ci/fuzz/regressions/crash-<hash>-<short-description>
 ```
 
-then `../fuzz_accept_encoding ci/fuzz/regressions/*` must abort before the
+then `ci/fuzz/fuzz_accept_encoding ci/fuzz/regressions/*` must abort before the
 fix and pass after it — verify both, the same as any other regression
 test's negative control.
 

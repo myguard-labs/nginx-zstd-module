@@ -103,9 +103,15 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
 
 def run_one(
     nginx: pathlib.Path, port: int, backend_port: int, zstd_directive: str
-) -> tuple[bool, bytes]:
+) -> tuple[bool, bool, bytes]:
     """Start nginx with (or without) the zstd directive, fetch once,
-    return (is_zstd_encoded, raw_body)."""
+    return (advertised_zstd, payload_is_zstd, raw_body).
+
+    The header and the payload are reported SEPARATELY on purpose. Collapsing
+    them into one boolean makes the default-off case unable to distinguish
+    "no Content-Encoding" from "advertised zstd but sent something else" --
+    the second is a real bug and would read as a pass.
+    """
     with tempfile.TemporaryDirectory(prefix="zstd-baseline-") as td:
         root = pathlib.Path(td)
         logs = root / "logs"
@@ -146,8 +152,9 @@ http {{
             with urllib.request.urlopen(req, timeout=10) as resp:
                 ce = (resp.headers.get("Content-Encoding") or "").lower()
                 blob = resp.read()
-            is_zstd = (ce == "zstd") and blob[:4] == ZSTD_MAGIC
-            return is_zstd, blob
+            advertised = ce == "zstd"
+            payload_is_zstd = blob[:4] == ZSTD_MAGIC
+            return advertised, payload_is_zstd, blob
         finally:
             proc.terminate()
             try:
@@ -169,13 +176,13 @@ def main() -> int:
         wait_port(args.backend_port)
 
         # Case 1: zstd explicitly enabled -> must compress.
-        on_zstd, on_body = run_one(
+        on_adv, on_payload, on_body = run_one(
             nginx,
             args.port,
             args.backend_port,
             "zstd on; zstd_comp_level 3; zstd_min_length 1;",
         )
-        if not on_zstd:
+        if not (on_adv and on_payload):
             print(
                 "FAIL baseline: 'zstd on;' did not produce a "
                 "zstd-encoded response -- the module is not blocking "
@@ -210,12 +217,17 @@ def main() -> int:
         # the check would pass even if `enable`'s default were flipped.
         # (Caught exactly this way during the mutation pass, see
         # ci/adoption-findings.md.)
-        off_zstd, off_body = run_one(nginx, args.off_port, args.backend_port, "")
-        if off_zstd:
+        off_adv, off_payload, off_body = run_one(
+            nginx, args.off_port, args.backend_port, ""
+        )
+        # Either half is a failure on its own. Advertising zstd without a zstd
+        # payload is not "safely off", it is a lie to the client.
+        if off_adv or off_payload:
             print(
                 "FAIL baseline: response was zstd-encoded with NO "
                 "zstd directive present -- compiled-in default is not "
-                "OFF",
+                f"OFF (Content-Encoding: zstd={off_adv}, "
+                f"zstd magic in body={off_payload})",
                 file=sys.stderr,
             )
             return 1

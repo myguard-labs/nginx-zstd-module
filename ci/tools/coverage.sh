@@ -43,9 +43,18 @@ bash "$SCRIPT_DIR/ci-build.sh" "$FLAVOR" "$VERSION" coverage
 # resolved value from the build tree it actually created rather than
 # re-resolving (a second nginx.org scrape could race a release and disagree).
 BUILD_ROOT="${BUILD_ROOT:-$MODULE_DIR/.build}"
-SRCDIR="$(find "$BUILD_ROOT" -maxdepth 1 -type d -name "${FLAVOR}-*-coverage" | sort -V | tail -1)"
+if [ -n "$VERSION" ]; then
+    # An explicit version names exactly one tree. Globbing here instead would
+    # silently report on whatever version sorts highest -- ask for 1.30.4 with a
+    # 1.31.2 tree present and you get a coverage figure for the wrong binary,
+    # which reads as a real measurement.
+    SRCDIR="$BUILD_ROOT/${FLAVOR}-${VERSION}-coverage"
+else
+    SRCDIR="$(find "$BUILD_ROOT" -maxdepth 1 -type d -name "${FLAVOR}-*-coverage" | sort -V | tail -1)"
+fi
 if [ -z "$SRCDIR" ] || [ ! -d "$SRCDIR" ]; then
     echo "ERROR: no coverage build tree found under $BUILD_ROOT" >&2
+    [ -n "$VERSION" ] && echo "       expected: $SRCDIR" >&2
     exit 1
 fi
 echo "Coverage build tree: $SRCDIR"

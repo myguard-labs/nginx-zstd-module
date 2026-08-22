@@ -77,10 +77,25 @@ if [ "${1:-}" = "--check" ]; then
     exit 0
 fi
 
-if [ ! -f "$DICT" ] || ! grep -qF "$START_MARK" "$DICT"; then
-    echo "✗ $DICT missing the '$START_MARK' marker block -- add it once by" \
-        "hand (see the file header) so this script has something to" \
-        "replace in place" >&2
+# BOTH markers, in order. Checking only START is not enough: awk below sets
+# skip=1 at START and only clears it at END, so a dict that lost its END marker
+# has every line after START swallowed and the mv writes the truncation back.
+# A later --check can still pass, because the generated block itself matches.
+if [ ! -f "$DICT" ]; then
+    echo "✗ $DICT does not exist" >&2
+    exit 1
+fi
+start_n="$(grep -cFx "$START_MARK" "$DICT" || true)"
+end_n="$(grep -cFx "$END_MARK" "$DICT" || true)"
+if [ "$start_n" -ne 1 ] || [ "$end_n" -ne 1 ]; then
+    echo "✗ $DICT needs exactly one '$START_MARK' and one '$END_MARK' line" \
+        "(found $start_n and $end_n) -- add the marker block once by hand," \
+        "see the file header" >&2
+    exit 1
+fi
+if [ "$(grep -nFx "$START_MARK" "$DICT" | cut -d: -f1)" -ge \
+     "$(grep -nFx "$END_MARK" "$DICT" | cut -d: -f1)" ]; then
+    echo "✗ $DICT has '$END_MARK' before '$START_MARK'" >&2
     exit 1
 fi
 

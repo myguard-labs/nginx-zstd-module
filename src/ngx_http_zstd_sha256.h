@@ -82,7 +82,8 @@ ngx_http_zstd_sha256_compress(ngx_http_zstd_sha256_t *c, const u_char *p)
     }
 
     for (i = 16; i < 64; i++) {
-        s0 = ngx_http_zstd_rotr(w[i - 15], 7) ^ ngx_http_zstd_rotr(w[i - 15], 18)
+        s0 = ngx_http_zstd_rotr(w[i - 15], 7)
+             ^ ngx_http_zstd_rotr(w[i - 15], 18)
              ^ (w[i - 15] >> 3);
         s1 = ngx_http_zstd_rotr(w[i - 2], 17) ^ ngx_http_zstd_rotr(w[i - 2], 19)
              ^ (w[i - 2] >> 10);

@@ -137,6 +137,26 @@ if [ "$NO_CACHE" = "1" ]; then
     rm -rf "$SRCDIR" "$TARBALL"
 fi
 
+# Input stamp. A build tree is keyed by flavor/version/mode only, but its OBJECTS
+# also depend on the module sources, the config file and this script. On a
+# persistent self-hosted runner the directory outlives all three, so without a
+# stamp a changed src/ silently reuses the old objects and CI reports on a binary
+# that no longer matches the tree. The Actions cache does not save us: a cache
+# MISS still finds the retained local directory.
+STAMP_INPUTS="$(
+    {
+        cat "${BASH_SOURCE[0]}"
+        [ -f "$ZSTD_MODULE_DIR/config" ] && cat "$ZSTD_MODULE_DIR/config"
+        find "$ZSTD_MODULE_DIR/src" -type f \( -name '*.c' -o -name '*.h' \) \
+            -print0 2>/dev/null | sort -z | xargs -0 -r cat
+    } | sha256sum | cut -d" " -f1
+)"
+STAMP_FILE="$SRCDIR/.myguard-build-inputs"
+if [ -d "$SRCDIR" ] && [ "$(cat "$STAMP_FILE" 2>/dev/null || true)" != "$STAMP_INPUTS" ]; then
+    echo "Build inputs changed since this tree was built -- rebuilding from scratch."
+    rm -rf "$SRCDIR"
+fi
+
 echo "=========================================================================="
 echo "Phase 1: Downloading $FLAVOR $VERSION"
 echo "=========================================================================="
@@ -230,6 +250,8 @@ if [ ! -d "$SRCDIR" ]; then
         mv "$ROOT/$DIR" "$SRCDIR"
     fi
 fi
+
+printf '%s\n' "$STAMP_INPUTS" > "$STAMP_FILE"
 
 cd "$SRCDIR"
 

@@ -51,7 +51,7 @@ diffed clean against a pre-mutation backup after each.
    `q=0.05` case instead; it did not, because 2 digits at weight 100 each
    still lands >0 either way. Corrected the code comment in
    `test_accept_encoding.c` to describe the actually-observed failure rather
-   than the originally-assumed one — see [[feedback-inference-stated-as-verified-fact]].)
+   than the originally-assumed one — see "a guess phrased like a command result gets acted on as fact".)
 
 3. **Malformed-weight fallback to q=1** — inserted `if (q < 0) { q = 1000; }`
    before the `if (q >= 0)` block in `ngx_http_zstd_coding_weight()`, so a
@@ -140,7 +140,7 @@ artifact instead).
    line 1919, `ngx_conf_merge_value(conf->enable, prev->enable, 0)` →
    `..., 1)`. Rebuilt (`objs/nginx`, distinct mtime/size verified against
    the pre-mutation binary each time — see
-   [[feedback-stale-binary-fakes-a-hang]]), ran against a build with the
+   "check artifact mtime before trusting a stack trace"), ran against a build with the
    mutation and a build without.
    Unmutated: `2/2 checks passed`, exit 0.
    Mutated: `FAIL baseline: response was zstd-encoded with NO zstd
@@ -173,8 +173,8 @@ step 22) searched for `valgrind.supp` (the skeleton's filename) and found
 nothing, and wrongly concluded no suppression file existed at all. It does
 — `ci/tools/soak.sh` lines 71/79 reference `$(repo root)/valgrind.suppress`
 (note the different name, `.suppress` not `.supp`) — correcting that
-earlier miss here per [[feedback-inference-stated-as-verified-fact]] /
-[[feedback-grep-miss-is-not-proof-of-absence]] (searched the wrong spelling,
+earlier miss here per "a guess phrased like a command result gets acted on as fact" /
+"a grep miss proves the spelling absent, not the gap real" (searched the wrong spelling,
 took the miss as proof of absence).
 
 Read the file (218 lines, 28 suppression blocks): **every single block is

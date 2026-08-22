@@ -61,6 +61,13 @@ esac
 BASE=$((10#$BASE))
 WIDTH=$((10#$WIDTH))
 
+# Port 0 is not a port: bind(0) makes the kernel pick an ephemeral one, so a
+# band based at 0 would sail through this preflight while reserving nothing.
+if [ "$BASE" -lt 1 ]; then
+    echo "ERROR: base port must be at least 1, got $BASE" >&2
+    exit 2
+fi
+
 if [ "$WIDTH" -lt 1 ]; then
     echo "ERROR: width must be at least 1, got $WIDTH" >&2
     exit 2
