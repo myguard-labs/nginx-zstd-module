@@ -12,8 +12,6 @@ env:
   NGINX_VERSION: ""
 
 on:
-  pull_request:
-    branches: [master, main]
   schedule:
     # Monthly, day 1 @ 04:47 UTC (staggered per repo like ci-deep).
     - cron: "47 4 1 * *"

@@ -23,8 +23,6 @@ env:
   # drops an old tarball.
 
 on:
-  pull_request:
-    branches: [master, main]
   schedule:
     # Weekly Monday 04:17 UTC — catches nginx API drift against new releases
     # even when nothing is pushed.
