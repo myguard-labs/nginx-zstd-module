@@ -132,7 +132,7 @@ worker() {
     local wid="$1"
     local paths=(/tiny /medium /large /compressible
         "/bypass" "/bypass?nozstd=1" /dcz)
-    local i=0 ok=0 bad=0
+    local i=0 ok=0 bad=0 dcz_seen=0
     while [ "$(date +%s)" -lt "$END" ]; do
         p=${paths[$((RANDOM % ${#paths[@]}))]}
         # Vary Accept-Encoding incl. clients that do not support zstd.
@@ -142,8 +142,21 @@ worker() {
         # /dcz alternates between a request that negotiates dcz and one that
         # does not, so both the refPrefix path and the plain-zstd fallback
         # out of the same location run under the sanitizer.
+        #
+        # The FIRST iteration always sends the negotiating variant, and
+        # dcz_seen below records that a dcz frame actually came back. Both
+        # the path pick and the alternation are random, so without that the
+        # worker could take a short duration or an unlucky seed and send no
+        # dcz request at all -- and worse, a dcz regression that silently
+        # served plain zstd would decode fine in the 28b52ffd branch and
+        # keep the soak green. Coverage that can quietly stop covering is
+        # the same trap this oracle was extended to close, one level up.
+        dcz_want=0
         hdrs=(-H "Accept-Encoding: $ae")
-        if [ "$p" = "/dcz" ] && [ $((RANDOM % 2)) -eq 0 ]; then
+        if [ "$i" -eq 1 ] || { [ "$p" = "/dcz" ] && [ $((RANDOM % 2)) -eq 0 ]; }
+        then
+            p=/dcz
+            dcz_want=1
             hdrs=(-H "Accept-Encoding: zstd, dcz"
                   -H "Available-Dictionary: :${DICT_B64}:"
                   -H "Sec-Fetch-Site: same-origin")
@@ -172,12 +185,27 @@ worker() {
                 if zstd -dq -D "$WORK/html/dcz-dict" -c "$body" \
                     >/dev/null 2>&1; then
                     ok=$((ok + 1))
+                    dcz_seen=$((dcz_seen + 1))
                 else
                     echo "BAD dcz $p"
                     bad=$((bad + 1))
                 fi
+            elif [ "$dcz_want" -eq 1 ]; then
+                # Asked for dcz with a matching dictionary and a
+                # same-origin fetch, and got something that is neither a
+                # dcz frame nor a zstd frame.
+                echo "BAD dcz $p: negotiated request returned magic $magic"
+                bad=$((bad + 1))
             else
                 ok=$((ok + 1))
+            fi
+
+            # A negotiated request that came back as a plain zstd frame is
+            # a dcz regression, not a pass: the gate silently declined and
+            # the 28b52ffd branch above would otherwise have accepted it.
+            if [ "$dcz_want" -eq 1 ] && [ "$magic" = "28b52ffd" ]; then
+                echo "BAD dcz $p: negotiated request fell back to plain zstd"
+                bad=$((bad + 1))
             fi
         else
             echo "FAIL request $p (curl exit $?)"
@@ -185,7 +213,11 @@ worker() {
         fi
         rm -f "$body"
     done
-    echo "worker $wid: $ok ok, $bad bad/failed"
+    echo "worker $wid: $ok ok, $bad bad/failed, $dcz_seen dcz"
+    if [ "$dcz_seen" -eq 0 ]; then
+        echo "FAIL worker $wid: no dcz response was ever verified"
+        return 1
+    fi
     [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]
 }
 
