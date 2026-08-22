@@ -487,12 +487,16 @@ jobs:
     # build-old-libzstd(135s) = 351s, still under the 370s
     # resolve(6s)->build(212s)->tests(145s) critical path measured on run
     # 32547163515, so this costs no wall-clock while dropping this
-    # workflow's peak from 7 to 6. `!cancelled()` keeps it running when
-    # validation FAILS -- it depends on validation only for the slot, never
-    # for an artifact, and a validation failure must not silently skip a
-    # build-matrix leg.
+    # workflow's peak from 7 to 6. The `if:` keeps it running when validation
+    # FAILS -- it depends on validation only for the slot, never for an
+    # artifact, and a validation failure must not silently skip a build-matrix
+    # leg. It must still SKIP when `resolve` fails: every step below builds
+    # against `needs.resolve.outputs.nginx_version`, which is empty in that
+    # case, so a bare `!cancelled()` would download a bogus tarball instead of
+    # skipping. Hence the explicit resolve success test rather than relying on
+    # default `needs` semantics, which the `if:` overrides for BOTH deps.
     needs: [resolve, validation]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.resolve.result == 'success' }}
 
     env:
       # Resolved mainline nginx (used by the cache keys + download/build steps

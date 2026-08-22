@@ -406,8 +406,12 @@ Vary/no-zstd-client paths, not only on the happy compress path.
 
 `fuzz.dict` is derived from real call sites and gated against drift by
 `gen_dict.sh --check`, which passes: coding tokens `"dcz"` and `"zstd"` match
-`src/*.c`. The parser's table literals are `"*"`, `"identity"`, `"q"` and
-`"zstd"`; all are reachable — the qvalue surface has 5 dedicated dict entries
+the `ngx_http_zstd_coding_weight()` call sites across `src/*.c` **and**
+`src/*.h` (gen_dict.sh:43 globs both — 2 call sites in
+`ngx_http_zstd_filter_module.c`, 2 in `ngx_http_zstd_common.h`, so a
+`.c`-only scan would miss the header's). The parser's table literals are `"*"`,
+`"identity"`, `"q"` and `"zstd"`; all are reachable — the qvalue surface has 5
+dedicated dict entries
 (`";q="`, `"q=0"`, `"q=1"`, `"q=0.0"`, `"q=1.0"`) and 597 of the 9280 corpus
 inputs carry a `q=`. Two regression inputs replay before each fresh run.
 
@@ -471,7 +475,7 @@ not actionlint's.
 **LINT_ONLY still matches the checkers that exist.** Normalized comparison, both
 directions:
 
-```
+```text
 on disk (ci/linter/lint-*.sh): c ci-cadence ci-ports ci-runners ci-secrets
                                docs-drift nginx perl python sh spelling yaml
 in lint.yml LINT_ONLY:         nginx sh python perl yaml spelling ci-runners
@@ -491,7 +495,7 @@ not the exit code.
 
 **Hook timing — OVER the ~2s budget on a C change.** Measured, 3 runs each:
 
-```
+```text
 docs-only staged change:   0.51 / 0.52 / 0.56 s   OK
 real C file staged:        3.59 / 3.59 s          OVER
 ```
@@ -500,7 +504,7 @@ The first C measurement (0.49s) was a false pass: the file was `touch`ed but
 unmodified, so pre-commit skipped its hooks. Forcing a real content change gives
 3.59s. Per-hook breakdown with a C file staged:
 
-```
+```text
 semgrep    2.17s   <- 60% of the total, alone over budget
 cppcheck   0.63s
 flawfinder 0.13s

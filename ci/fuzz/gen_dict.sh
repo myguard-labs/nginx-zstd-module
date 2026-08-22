@@ -7,7 +7,7 @@
 #
 # This module has no single lookup table of coding names -- unlike a
 # trie-walk scanner, the tokens are two literal call-site arguments to
-# ngx_http_zstd_coding_weight(ae, "TOKEN", ...) in src/*.c (currently
+# ngx_http_zstd_coding_weight(ae, "TOKEN", ...) in src/*.c and src/*.h (currently
 # "zstd" and "dcz"). Extract THOSE, rather than hand-copying them, so a
 # third coding name added to a future call site is picked up
 # automatically and a forgotten dictionary update fails --check instead
@@ -47,7 +47,7 @@ mapfile -t TOKENS < <(
 
 if [ "${#TOKENS[@]}" -eq 0 ]; then
     echo "✗ gen_dict: no ngx_http_zstd_coding_weight(...) call sites found" \
-        "in src/*.c -- parser call convention changed? update gen_dict.sh" >&2
+        "in src/*.c or src/*.h -- parser call convention changed? update gen_dict.sh" >&2
     exit 1
 fi
 
@@ -73,7 +73,7 @@ if [ "${1:-}" = "--check" ]; then
         echo "  Run: ci/fuzz/gen_dict.sh" >&2
         exit 1
     fi
-    echo "✓ fuzz.dict coding tokens match src/*.c call sites: ${TOKENS[*]}"
+    echo "✓ fuzz.dict coding tokens match src/*.c + src/*.h call sites: ${TOKENS[*]}"
     exit 0
 fi
 
@@ -108,4 +108,4 @@ awk -v start="$START_MARK" -v end="$END_MARK" -v gen="$GENERATED" '
 ' "$DICT" >"$TMP"
 mv "$TMP" "$DICT"
 
-echo "✓ regenerated fuzz.dict coding tokens from src/*.c: ${TOKENS[*]}"
+echo "✓ regenerated fuzz.dict coding tokens from src/*.c + src/*.h: ${TOKENS[*]}"
