@@ -176,7 +176,7 @@ def fetch(port: int, rid: int, zstd_bin: str) -> tuple[bytes, int]:
         raise RuntimeError(f"rid={rid}: no zstd magic "
                            f"(hex={blob[:8].hex()})")
     r = subprocess.run([zstd_bin, "-dq", "-c"], input=blob,
-                       capture_output=True)
+                       capture_output=True, check=False)
     if r.returncode != 0:
         raise RuntimeError(f"rid={rid}: zstd -d failed (premature "
                            f"end / corrupt): "
@@ -357,6 +357,6 @@ http {{
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise

@@ -108,7 +108,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     fixture_dir: pathlib.Path = pathlib.Path()
 
-    def log_message(self, *a):  # noqa: D401 - silence access log
+    def log_message(self, *a):
         pass
 
     def do_GET(self):
@@ -173,7 +173,7 @@ def zstd_decompress(zstd_bin: str, blob: bytes) -> bytes:
             f"(truncated/aborted response)"
         )
     r = subprocess.run([zstd_bin, "-d", "-q", "-c"], input=blob,
-                       capture_output=True)
+                       capture_output=True, check=False)
     if r.returncode != 0:
         raise RuntimeError(
             "zstd -d failed (premature end / corrupt frame): "
@@ -350,6 +350,6 @@ http {{
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise

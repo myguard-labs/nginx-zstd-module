@@ -81,7 +81,7 @@ def train_dict(zstd_bin: str, work: pathlib.Path) -> pathlib.Path:
     r = subprocess.run(
         [zstd_bin, "--train", *sorted(str(f) for f in samples.iterdir()),
          "-o", str(dict_path), "--maxdict=16384", "-q"],
-        capture_output=True)
+        capture_output=True, check=False)
     if r.returncode != 0 or not dict_path.exists():
         raise RuntimeError("zstd --train failed: "
                            + r.stderr.decode("utf-8", "replace"))
@@ -255,14 +255,14 @@ http {{
 
             # Dictless decode must refuse (frame demands the dict) ...
             r = subprocess.run([args.zstd_bin, "-dq", "-c"], input=blob,
-                               capture_output=True)
+                               capture_output=True, check=False)
             if r.returncode == 0:
                 raise RuntimeError("decoded WITHOUT the dictionary — "
                                    "dict not actually load-bearing")
             # ... and dict-aware decode must round-trip byte-exact.
             r = subprocess.run(
                 [args.zstd_bin, "-dq", "-c", "-D", str(dict_path)],
-                input=blob, capture_output=True)
+                input=blob, capture_output=True, check=False)
             if r.returncode != 0:
                 raise RuntimeError("zstd -d -D failed: "
                                    + r.stderr.decode("utf-8", "replace"))
@@ -295,6 +295,7 @@ http {{
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - top-level guard: any failure in a
+        # test tool is a test failure, and the message is the diagnosis.
         print(f"FAIL: {e}", file=sys.stderr)
         sys.exit(1)

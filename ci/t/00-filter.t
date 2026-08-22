@@ -3,7 +3,9 @@ use File::Basename;
 use lib 'lib';
 
 my $dirname = dirname(__FILE__);
-$ENV{'TEST_NGINX_PERL_PATH'}="$ENV{'PWD'}/$dirname";
+# local: this process is the test run, but perlcritic is right that a bare
+# assignment to %ENV leaks into anything that runs after it.
+local $ENV{'TEST_NGINX_PERL_PATH'} = "$ENV{'PWD'}/$dirname";
 
 my @dynamic_modules;
 if (defined $ENV{'TEST_NGINX_BINARY'}) {

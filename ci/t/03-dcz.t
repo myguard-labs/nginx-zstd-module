@@ -6,7 +6,9 @@ use MIME::Base64 qw(encode_base64);
 use lib 'lib';
 
 my $dirname = dirname(__FILE__);
-$ENV{'TEST_NGINX_PERL_PATH'}="$ENV{'PWD'}/$dirname";
+# local: this process is the test run, but perlcritic is right that a bare
+# assignment to %ENV leaks into anything that runs after it.
+local $ENV{'TEST_NGINX_PERL_PATH'} = "$ENV{'PWD'}/$dirname";
 
 my @dynamic_modules;
 if (defined $ENV{'TEST_NGINX_BINARY'}) {
@@ -32,7 +34,9 @@ my $dict_raw = do {
     local $/;
     open my $fh, '<', "$dirname/suite/dcz-dict" or die "dcz-dict: $!";
     binmode $fh;
-    <$fh>;
+    my $c = <$fh>;
+    close $fh or die "dcz-dict: $!";
+    $c;
 };
 our $dict_b64 = encode_base64(sha256($dict_raw), "");
 our $bad_b64  = encode_base64("\x01" x 32, "");
@@ -59,7 +63,7 @@ my $big_path = File::Spec->catfile(File::Spec->tmpdir(),
     print {$bf} 'A' x (8 * 1024 * 1024 + 17);
     close $bf;
 }
-$ENV{'TEST_NGINX_DCZ_BIGDICT'} = $big_path;
+local $ENV{'TEST_NGINX_DCZ_BIGDICT'} = $big_path;
 END { unlink $big_path if $big_path; }
 
 no_long_string();

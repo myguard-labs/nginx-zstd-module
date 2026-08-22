@@ -49,6 +49,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from typing import ClassVar
 
 CSTREAM_IN = 131072  # ZSTD_CStreamInSize on libzstd 1.5.x — the
                       # historical boundary for this bug class.
@@ -104,7 +105,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     """GET /p/<kind>/<n> -> exactly <n> bytes of <kind>, **chunked,
     no Content-Length**, streamed in small records."""
     protocol_version = "HTTP/1.1"
-    fixtures: dict = {}
+    # ClassVar: deliberately shared by every handler instance -- the server
+    # populates it once before serving, and each request only reads it.
+    fixtures: ClassVar[dict] = {}
 
     def log_message(self, *a):
         pass
@@ -167,7 +170,7 @@ def decode(zstd_bin: str, blob: bytes, enc: str) -> bytes:
             raise RuntimeError("zstd C-E but no zstd magic "
                                f"(hex={blob[:8].hex()})")
         r = subprocess.run([zstd_bin, "-dq", "-c"], input=blob,
-                           capture_output=True)
+                           capture_output=True, check=False)
         if r.returncode != 0:
             raise RuntimeError("zstd -d failed (premature end): "
                                + r.stderr.decode("utf-8", "replace"))
@@ -178,7 +181,7 @@ def decode(zstd_bin: str, blob: bytes, enc: str) -> bytes:
         br = shutil.which("brotli")
         if not br:
             raise RuntimeError("br C-E but no brotli CLI to verify")
-        r = subprocess.run([br, "-dc"], input=blob, capture_output=True)
+        r = subprocess.run([br, "-dc"], input=blob, capture_output=True, check=False)
         if r.returncode != 0:
             raise RuntimeError("brotli -d failed")
         return r.stdout
@@ -393,6 +396,6 @@ http {{
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise

@@ -148,7 +148,7 @@ def one(port: int, rid: int, zstd_bin: str, dict_path: pathlib.Path) -> None:
     # actually corrupt. Omitting -D here previously made this test fail on
     # every run regardless of reload timing (any response, any size).
     r = subprocess.run([zstd_bin, "-dq", "-c", "-D", str(dict_path)],
-                       input=blob, capture_output=True)
+                       input=blob, capture_output=True, check=False)
     if r.returncode != 0:
         raise RuntimeError(f"rid={rid}: zstd -d failed: "
                            + r.stderr.decode("utf-8", "replace"))
@@ -331,6 +331,6 @@ http {{
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise

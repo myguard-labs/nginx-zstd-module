@@ -4,7 +4,6 @@ import pathlib
 import tempfile
 import unittest
 
-
 MODULE_PATH = pathlib.Path(__file__).with_name("test_encoding.py")
 SPEC = importlib.util.spec_from_file_location("test_encoding", MODULE_PATH)
 test_encoding = importlib.util.module_from_spec(SPEC)

@@ -21,3 +21,13 @@
 # Corpus files are byte-exact fuzz inputs and must never be "corrected" --
 # editing one silently changes what the fuzzer replays. lib.sh already excludes
 # ci/fuzz/corpus/, so those need no entry here.
+
+# Token-end index in the Accept-Encoding scanner, paired with the start index
+# two letters earlier in the alphabet. Both are local size_t cursors in
+# ci/fuzz/fuzz_accept_encoding.c, not an abbreviation of "the".
+te
+
+# nginx's own field name on ngx_http_request_t -- the filename extension of the
+# request URI. Spelled without the final "sion" by nginx itself since 0.1, so
+# correcting it would stop the code compiling.
+exten

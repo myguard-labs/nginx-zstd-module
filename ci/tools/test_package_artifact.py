@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 
-
 MODULE_DIR = pathlib.Path(__file__).resolve().parent
 TEST_ENCODING = MODULE_DIR / "test_encoding.py"
 TEST_TERMINAL_FRAME = MODULE_DIR / "test_terminal_frame.py"

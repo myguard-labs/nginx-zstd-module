@@ -217,7 +217,7 @@ def main() -> int:
     if not nginx.exists():
         raise FileNotFoundError(nginx)
 
-    v = subprocess.run([str(nginx), "-V"], capture_output=True, text=True)
+    v = subprocess.run([str(nginx), "-V"], capture_output=True, text=True, check=False)
     if "zstd" not in v.stderr:
         raise RuntimeError("nginx -V shows no zstd module")
     if "--with-debug" not in v.stderr:
@@ -231,7 +231,7 @@ def main() -> int:
     def decode(blob: bytes) -> bytes:
         """Decompress with the zstd CLI; a nonzero exit means truncation."""
         r = subprocess.run([args.zstd_bin, "-d", "-q", "-c"], input=blob,
-                           capture_output=True)
+                           capture_output=True, check=False)
         if r.returncode != 0:
             raise RuntimeError(
                 "zstd decode failed (truncated/corrupt stream): "
@@ -297,7 +297,10 @@ http {{
         # drains a pipe here (deadlock risk on a chatty ASan abort),
         # and on failure the tail is the diagnosis.
         nlog_path = root / "logs" / "nginx-stdout.log"
-        nlog = open(nlog_path, "w", encoding="utf-8")
+        # SIM115 suppressed above: the handle must outlive this block: it is Popen's
+        # stdout for the whole server lifetime. A with-block would close it
+        # while nginx is still writing.
+        nlog = open(nlog_path, "w", encoding="utf-8")  # noqa: SIM115
         proc = subprocess.Popen(
             [str(nginx), "-p", str(root), "-c", str(conf),
              "-g", "daemon off; master_process off;"],

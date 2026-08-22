@@ -4,7 +4,6 @@ import pathlib
 import tempfile
 import unittest
 
-
 MODULE_PATH = pathlib.Path(__file__).with_name("test_package_artifact.py")
 SPEC = importlib.util.spec_from_file_location("test_package_artifact", MODULE_PATH)
 test_package_artifact = importlib.util.module_from_spec(SPEC)
@@ -22,7 +21,9 @@ class DetectPackageLayoutTests(unittest.TestCase):
         snippet = root / "usr" / "share" / flavor / "modules-available" / "mod-http-zstd.conf"
         snippet.parent.mkdir(parents=True)
         snippet.write_text(
-            "\n".join(
+            # FLY002 suppressed below: a list of load_module lines reads better than an
+            # f-string with embedded newlines, and adding a third is one line.
+            "\n".join(  # noqa: FLY002
                 [
                     "load_module modules/ngx_http_zstd_filter_module.so;",
                     "load_module modules/ngx_http_zstd_static_module.so;",

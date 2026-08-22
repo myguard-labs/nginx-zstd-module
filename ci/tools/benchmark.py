@@ -123,11 +123,12 @@ def main() -> int:
     if args.json:
         meta = {
             "zstd_version": subprocess.run(
-                [zstd, "--version"], capture_output=True, text=True
+                [zstd, "--version"], capture_output=True, text=True,
+                check=False,
             ).stdout.strip(),
             "commit": subprocess.run(
                 ["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True
+                capture_output=True, text=True, check=False,
             ).stdout.strip(),
             "repeat": args.repeat,
         }
