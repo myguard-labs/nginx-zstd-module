@@ -25,6 +25,13 @@ on:
   # push/pull_request trigger here: two entry points would run it twice per PR.
   workflow_call: {}
 
+# NOTE on ${{ github.workflow }} in this key: for a workflow reached by
+# workflow_call it evaluates to the CALLER's name ("CI"), not "Lint" -- the
+# whole suite is a single run (verified: one run row per head sha). So that
+# term is identical across every member and distinguishes nothing; the literal
+# "lint-" prefix is what keeps this group distinct from its siblings. Keep the
+# prefix unique per member. Same applies to asan/valgrind/fuzzing/codeql/
+# security-scanners/windows-build/build-test.
 concurrency:
   group: lint-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

@@ -21,63 +21,40 @@ name: CI
 #   asan.yml      soak.sh <nginx> 60 4  (60 seconds at concurrency 4)
 # If any grows an open-ended budget it belongs in ci-deep.yml instead.
 #
-# ── LANES (step 29) ─────────────────────────────────────────────────────────
-# Real runner: builder02, 6 concurrent self-hosted slots (systemctl list-units
-# | grep ci-ephemeral -> ci-ephemeral@{docker-01,docker-02,runner-01..04}).
+# ── LANES ───────────────────────────────────────────────────────────
+# Pool: vars.POOL = ["self-hosted","builder02","lxc"]. A runner must carry ALL
+# THREE labels to match, which as of 2026-08-22 is 12 online runners --
+# builder02-runner-01..04 plus builder03-runner-01..08. Re-derive, never assume:
+#   gh api orgs/myguard-labs/actions/runners --jq '[.runners[]
+#     | select((.labels|map(.name)) as $l
+#       | (["self-hosted","builder02","lxc"]|all(. as $r|$l|index($r))))] | length'
 #
-# Measured from run 32540884342 (2026-08-22, PR "adopt-skeleton-pr1"), re-derive with:
+# THERE IS NO SLOT CONTENTION IN THIS GATE. Peak demand is 11 self-hosted jobs
+# against 12 slots. Measured on run 32599668884 (2026-08-22, PR #140): six jobs
+# started together at 21:28:08-09 and six more at 21:28:59, and NOTHING queued
+# for a slot. Re-derive with:
 #   gh run view <id> -R myguard-labs/nginx-zstd-module --json jobs \
-#     -q '.jobs[] | [.name, .conclusion,
-#                    (((.completedAt|fromdate)-(.startedAt|fromdate))|tostring)+"s",
-#                    .startedAt, .completedAt] | @tsv'
+#     -q '.jobs[] | [.name, .startedAt, .completedAt] | @tsv'
 #
-# Self-hosted-pool jobs and durations (lint = ubuntu-latest hosted,
-# windows-build = windows-latest hosted -- neither takes a builder02 slot,
-# rule 5, not laned):
-#   build-test/resolve            7s   build-test/validation        149s
-#   build-test/build             173s  build-test/build-old-libzstd 148s
-#   build-test/linkage            93s  build-test/cvary-interop      73s
-#   build-test/build-asan         68s  build-test/coverage          243s
-#   build-test/tests             141s  build-test/tests-asan        182s
-#   codeql                       164s  security-scanners            114s
-#   fuzzing                      147s  valgrind                     119s
-#   asan (asan-soak)              68s
+# HISTORY, so the superseded analysis is not rediscovered as news: this comment
+# previously described a 6-slot builder02-only pool and a "peak 11 against 6"
+# contention problem, and TODO.md carried a row calling the fix platform-blocked
+# on GitHub Actions having no job-level needs: across a reusable-workflow-call
+# boundary. That platform limitation is REAL and still true -- but it stopped
+# mattering when builder03's 8 runners joined the pool. The contention it was
+# working around no longer exists. Do not re-litigate lane assignment on the
+# basis of slot scarcity without re-measuring the pool first.
 #
-# RULE 1 (longest job = the budget): resolve(7s)->build(173s)->tests(141s) =
-# 321s is the longest chain in this whole PR gate's self-hosted work; nothing
-# is chained behind it.
+# What the budget actually is now: the critical path is CodeQL at 425s wall
+# (204s analysis + 141s module build + 51s init), and every other job in the
+# gate finishes before it. Nothing is gained by re-laning work that already
+# fits; the only lever on total gate time is CodeQL itself.
 #
-# RULE 2/3 (fewest lanes, four max) -- applied so far, WITHIN build-test.yml
-# only (see limitation below): build-old-libzstd now runs needs:
-# [resolve, validation] with if: ${{ !cancelled() }} instead of needs: resolve
-# alone, so it takes validation's freed slot (t=149s) instead of adding to
-# the t=7s pile-on. That is Lane D: validation(149s) -> build-old-libzstd(148s)
-# = 297s, under the 321s budget. build-test.yml's own peak concurrency after
-# resolve drops from 7 to 6 (== the real slot count) with this one change.
-#
-# RULE 4 (a lane is not a slot; count real slots): even at 6-of-6 inside
-# build-test.yml alone, the OTHER four self-hosted ci.yml members --
-# codeql, security-scanners, fuzzing, valgrind, asan -- start at the SAME
-# t=0 (they have no needs: on build-test.yml and cannot: needs: on a uses:
-# job blocks on that job's ENTIRE called workflow finishing, which would
-# serialize the whole 321s build-test.yml chain behind whichever member
-# went first -- collapsing exactly the parallelism lanes exist to keep).
-# GitHub Actions has no job-level needs: that crosses a reusable-workflow-
-# call boundary, only within one workflow file's own job graph. Real peak
-# here is 11 self-hosted-pool jobs against 6 slots at t=7s (build-test's 6
-# plus codeql/security-scanners/fuzzing/valgrind/asan's 5), sustained for
-# most of each job's ~70-250s runtime -- NOT the brief startup blip rule 4
-# tolerates. This is WORSE than the reference module's own "peak 7 against
-# 6" case it warns against.
-#
-# RULE 3/limitation: closing that gap needs either (a) folding codeql/
-# security-scanners/fuzzing/valgrind/asan's single jobs into build-test.yml's
-# own job graph so real needs: lanes can span all of them, or (b) a second
-# self-hosted pool / more ci-ephemeral slots. Both are decisions beyond one
-# bounded lane-map item -- tracked in memory/labs/http-zstd/TODO.md and
-# ci/skeleton-findings.md with this measurement as the evidence. Do not
-# read "4 lanes" below as solved; it is the safe, verified SUBSET that
-# landed without risking build-test.yml's other ~1800 lines blind.
+# The one ordering constraint worth keeping is inside build-test.yml, where
+# real needs: lanes DO apply: build-old-libzstd runs needs: [resolve,
+# validation] with an explicit needs.resolve.result == 'success' term, because
+# its if: ${{ !cancelled() }} would otherwise override the default skip for
+# every dependency and build against an empty nginx_version.
 #
 # Any lane change rewrites this comment in the same commit.
 
