@@ -54,7 +54,7 @@ jobs:
       - name: Run fuzzer (120s regression)
         run: |
           set -euo pipefail
-          cd fuzz
+          cd ci/fuzz
           set +e
           ./fuzz_accept_encoding \
             -max_total_time=120 \

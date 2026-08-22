@@ -131,19 +131,19 @@ jobs:
 
       - name: Validate tool scripts (syntax only)
         run: |
-          cd "$GITHUB_WORKSPACE/tools"
+          cd "$GITHUB_WORKSPACE/ci/tools"
           bash -n ci-build.sh
           echo "✓ All tool scripts: syntax OK"
 
       - name: Python tool validation
         run: |
-          cd "$GITHUB_WORKSPACE/tools"
+          cd "$GITHUB_WORKSPACE/ci/tools"
           python3 test_encoding.py --help | head -3
           echo "✓ Python tools validated"
 
       - name: Python unit tests (test harness self-checks)
         run: |
-          cd "$GITHUB_WORKSPACE/tools"
+          cd "$GITHUB_WORKSPACE/ci/tools"
           python3 -m unittest -v test_test_encoding test_test_package_artifact
           echo "✓ Python harness unit tests passed"
 

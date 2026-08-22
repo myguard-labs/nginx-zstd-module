@@ -189,7 +189,7 @@ jobs:
       - name: Fuzz
         run: |
           set -euo pipefail
-          cd fuzz
+          cd ci/fuzz
           set +e
           ./fuzz_accept_encoding \
             -max_total_time="$FUZZ_SECS" \
@@ -205,7 +205,7 @@ jobs:
       - name: Minimize + persist corpus
         if: success()
         run: |
-          cd fuzz
+          cd ci/fuzz
           mkdir -p corpus-min
           ./fuzz_accept_encoding -merge=1 corpus-min/ corpus/
           echo "merged: $(find corpus-min -type f | wc -l) units"
