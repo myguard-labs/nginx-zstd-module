@@ -18,9 +18,11 @@ on:
     # Monthly, day 1 @ 04:47 UTC (staggered per repo like ci-deep).
     - cron: "47 4 1 * *"
   workflow_dispatch: {}
+  # Called by ci.yml, the single PR entry point (step 15).
+  workflow_call: {}
 
 concurrency:
-  group: codeql-${{ github.ref }}
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

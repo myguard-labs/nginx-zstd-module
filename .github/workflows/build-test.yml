@@ -30,6 +30,8 @@ on:
     # even when nothing is pushed.
     - cron: "17 4 * * 1"
   workflow_dispatch: {}
+  # Called by ci.yml, the single PR entry point (step 15).
+  workflow_call: {}
 
 # Cancel superseded runs on the same ref instead of piling up runner minutes.
 concurrency:

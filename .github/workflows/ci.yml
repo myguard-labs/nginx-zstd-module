@@ -1,0 +1,74 @@
+---
+name: CI
+
+# The single pull_request entry point. Every gate that runs on a PR is reached
+# through this file and nowhere else, so "what does a PR run?" is answered by
+# reading one job list rather than by grepping eight trigger blocks.
+#
+# Members keep their own workflow_dispatch: so each can still be run alone from
+# the Actions tab, and build-test.yml and codeql.yml keep their schedule: for
+# the cron sweeps that must fire whether or not anyone opens a PR.
+#
+# NOT called from here, on purpose:
+#   ci-deep.yml  the unbounded monthly campaign (600-minute fuzz, 240-minute
+#                valgrind/helgrind). Its verdict lands long after the merge
+#                decision it would inform -- schedule + dispatch only.
+#   bump.yml     the version-bump bot; opens PRs, is not a gate on one.
+#
+# The two long-runners that ARE members are bounded and stay bounded:
+#   fuzzing.yml   -max_total_time=120   (2 minutes)
+#   valgrind.yml  soak.sh <nginx> 60 4  (60 seconds at concurrency 4)
+# If either grows an open-ended budget it belongs in ci-deep.yml instead.
+
+on:
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-orchestrator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build & Test
+    uses: ./.github/workflows/build-test.yml
+    permissions:
+      contents: read
+
+  security-scanners:
+    name: Security scanners
+    uses: ./.github/workflows/security-scanners.yml
+    permissions:
+      contents: read
+
+  codeql:
+    name: CodeQL
+    uses: ./.github/workflows/codeql.yml
+    # A called workflow cannot widen the caller's grant, so security-events
+    # must be handed down here or the SARIF upload fails with a 403 that reads
+    # like a CodeQL fault.
+    permissions:
+      contents: read
+      security-events: write
+
+  fuzzing:
+    name: Fuzzing
+    uses: ./.github/workflows/fuzzing.yml
+    permissions:
+      contents: read
+
+  valgrind:
+    name: Valgrind
+    uses: ./.github/workflows/valgrind.yml
+    permissions:
+      contents: read
+
+  windows-build:
+    name: Windows build
+    uses: ./.github/workflows/windows-build.yml
+    permissions:
+      contents: read
