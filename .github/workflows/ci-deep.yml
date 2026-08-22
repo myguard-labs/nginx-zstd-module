@@ -8,8 +8,13 @@ name: CI Deep
 # multi-flavor build matrix (mainline/stable/angie) plus hours-long fuzzing
 # and full Memcheck/Helgrind soaks that would blow the PR-gate time budget.
 #
+# A manual dispatch can run a SUBSET via the `jobs` input (default `all`);
+# the monthly cron passes no inputs and therefore always runs everything.
+# Use a subset when the full set would monopolise the shared pool for the
+# hours the fuzz and helgrind legs need.
+#
 # Jobs: build-flavors (nginx mainline/stable + angie) · fuzz (14400s/target) ·
-#   memcheck soak · helgrind soak · scanners.
+#   memcheck soak · helgrind soak · scanners · coverage (src/).
 #   * memcheck AND helgrind run under ci/tools/soak.sh, which already passes
 #     --suppressions=valgrind.suppress and --error-exitcode=99 for BOTH tools
 #     (see ci/tools/soak.sh) — the drift-fix baseline for every module.
@@ -41,6 +46,22 @@ on:
         description: "Per-target fuzz duration (seconds)"
         required: false
         default: "3600"
+      jobs:
+        # Which jobs a manual dispatch should run. The full set occupies most
+        # of the shared self-hosted pool for hours (fuzz alone is capped at
+        # 600min), so an on-demand run usually wants a subset -- e.g. after a
+        # suppression-file fix, only the memcheck soak is meaningful. The
+        # scheduled monthly run supplies no inputs, so `all` is the default and
+        # cron behaviour is unchanged.
+        description: "Jobs to run"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - memcheck+coverage
+          - build-flavors
+          - scanners
 
 concurrency:
   group: ci-deep-${{ github.workflow }}-${{ github.ref }}
@@ -52,6 +73,7 @@ permissions:
 jobs:
   build-flavors:
     name: Build & Test::Nginx (${{ matrix.flavor }} ${{ matrix.version }})
+    if: ${{ contains(fromJSON('["all","build-flavors"]'), inputs.jobs || 'all') }}
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     env:
@@ -211,6 +233,7 @@ jobs:
 
   fuzz:
     name: Fuzz (Accept-Encoding, long)
+    if: ${{ (inputs.jobs || 'all') == 'all' }}
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 600
     steps:
@@ -315,6 +338,7 @@ jobs:
 
   memcheck:
     name: Valgrind Memcheck soak
+    if: ${{ contains(fromJSON('["all","memcheck+coverage"]'), inputs.jobs || 'all') }}
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 240
     steps:
@@ -382,6 +406,7 @@ jobs:
 
   helgrind:
     name: Valgrind Helgrind soak
+    if: ${{ (inputs.jobs || 'all') == 'all' }}
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 240
     steps:
@@ -449,6 +474,7 @@ jobs:
 
   scanners:
     name: Security scanners
+    if: ${{ contains(fromJSON('["all","scanners"]'), inputs.jobs || 'all') }}
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     steps:
@@ -532,6 +558,7 @@ jobs:
   # from-scratch coverage-instrumented build plus the whole ci/t/ suite.
   coverage:
     name: Coverage report (src/)
+    if: ${{ contains(fromJSON('["all","memcheck+coverage"]'), inputs.jobs || 'all') }}
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     env:
