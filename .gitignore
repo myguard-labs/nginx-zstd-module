@@ -49,3 +49,8 @@ ci/fuzz/*.profraw
 # curated NN_name seeds under version control.
 ci/fuzz/corpus/*
 !ci/fuzz/corpus/[0-9][0-9]_*
+
+# Unit test build artifacts (source + run.sh IS tracked)
+ci/tests/unit/test_accept_encoding
+ci/tests/unit/*.gcda
+ci/tests/unit/*.gcno
