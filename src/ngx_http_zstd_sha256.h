@@ -196,7 +196,16 @@ ngx_http_zstd_sha256_final(ngx_http_zstd_sha256_t *c,
 
     bits = c->total * 8;
 
-    /* padding: 0x80, zeros, then the 64-bit big-endian bit length */
+    /*
+     * padding: 0x80, zeros, then the 64-bit big-endian bit length.
+     *
+     * The append below is unguarded because update() never returns with a
+     * full block: it compresses and resets block_len to 0 the moment the
+     * block fills, so block_len is in [0, 63] on entry here and writing
+     * block[block_len] stays in bounds. Keep that invariant if update()
+     * is ever restructured -- an entry with block_len == 64 would write
+     * one past the array before the bounds test below runs.
+     */
     c->block[c->block_len++] = 0x80;
 
     if (c->block_len > 56) {

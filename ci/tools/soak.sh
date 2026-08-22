@@ -31,6 +31,18 @@ head -c 200000 /dev/urandom | base64 >"$WORK/html/medium"
 head -c 4000000 /dev/urandom | base64 >"$WORK/html/large"
 printf 'AAAAAAAAAA%.0s' $(seq 1 20000) >"$WORK/html/compressible"
 
+# RFC 9842 dcz dictionary. The soak previously sent only zstd/gzip, so the
+# whole dcz path -- negotiation, ZSTD_CCtx_refPrefix, the 40-byte frame
+# header, dictionary lifetime across requests -- ran under NEITHER sanitizer
+# lane despite being the newest and largest block of code in the module.
+# The dictionary content overlaps the response bodies below so refPrefix has
+# real matches to find rather than compressing a miss.
+printf 'shared-boilerplate compute render %.0s' $(seq 1 200) \
+    >"$WORK/html/dcz-dict"
+DICT_B64="$(openssl dgst -sha256 -binary "$WORK/html/dcz-dict" | base64)"
+printf 'shared-boilerplate compute render %.0s' $(seq 1 400) \
+    >"$WORK/html/dczbody"
+
 cat >"$WORK/conf/nginx.conf" <<EOF
 daemon off;
 master_process on;
@@ -51,6 +63,13 @@ http {
             zstd_max_length 8m;
             zstd_types text/plain;
         }
+        location /dcz {
+            zstd on;
+            zstd_min_length 100;
+            zstd_types text/plain;
+            zstd_dcz_dict_file $WORK/html/dcz-dict;
+            alias $WORK/html/dczbody;
+        }
         location /bypass {
             zstd on;
             zstd_min_length 1;
@@ -61,6 +80,8 @@ http {
     }
 }
 EOF
+
+export DICT_B64
 
 ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:abort_on_error=1:exitcode=42:log_path=$WORK/logs/asan"
 export ASAN_OPTIONS
@@ -110,7 +131,7 @@ fail=0
 worker() {
     local wid="$1"
     local paths=(/tiny /medium /large /compressible
-        "/bypass" "/bypass?nozstd=1")
+        "/bypass" "/bypass?nozstd=1" /dcz)
     local i=0 ok=0 bad=0
     while [ "$(date +%s)" -lt "$END" ]; do
         p=${paths[$((RANDOM % ${#paths[@]}))]}
@@ -118,14 +139,41 @@ worker() {
         ae=$([ $((RANDOM % 4)) -eq 0 ] && echo "gzip" || echo "zstd")
         i=$((i + 1))
         body="$WORK/r.${wid}.${i}"
-        if curl -fsS -H "Accept-Encoding: $ae" \
+        # /dcz alternates between a request that negotiates dcz and one that
+        # does not, so both the refPrefix path and the plain-zstd fallback
+        # out of the same location run under the sanitizer.
+        hdrs=(-H "Accept-Encoding: $ae")
+        if [ "$p" = "/dcz" ] && [ $((RANDOM % 2)) -eq 0 ]; then
+            hdrs=(-H "Accept-Encoding: zstd, dcz"
+                  -H "Available-Dictionary: :${DICT_B64}:"
+                  -H "Sec-Fetch-Site: same-origin")
+        fi
+        if curl -fsS "${hdrs[@]}" \
             "http://127.0.0.1:18222$p" -o "$body" 2>/dev/null; then
             # If it came back zstd-encoded, it must decode cleanly.
-            if head -c4 "$body" | od -An -tx1 | grep -q '28 b5 2f fd'; then
+            #
+            # A dcz response starts with the skippable-frame magic
+            # 5e2a4d18, NOT 28b52ffd, so testing only for the zstd magic
+            # would let every dcz response fall through to the unchecked
+            # else-branch and count as ok without ever being decoded --
+            # a green soak that proves nothing about the path it was
+            # extended to cover. Decode dcz against the same dictionary
+            # the request advertised: that verifies the frame header, the
+            # refPrefix output and the dictionary content all agree.
+            magic="$(head -c4 "$body" | od -An -tx1 | tr -d ' ')"
+            if [ "$magic" = "28b52ffd" ]; then
                 if zstd -dq -c "$body" >/dev/null 2>&1; then
                     ok=$((ok + 1))
                 else
                     echo "BAD zstd $p"
+                    bad=$((bad + 1))
+                fi
+            elif [ "$magic" = "5e2a4d18" ]; then
+                if zstd -dq -D "$WORK/html/dcz-dict" -c "$body" \
+                    >/dev/null 2>&1; then
+                    ok=$((ok + 1))
+                else
+                    echo "BAD dcz $p"
                     bad=$((bad + 1))
                 fi
             else

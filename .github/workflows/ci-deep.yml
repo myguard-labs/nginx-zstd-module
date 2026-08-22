@@ -63,8 +63,20 @@ on:
           - build-flavors
           - scanners
 
+# A long soak is often the ONLY evidence for a finding: fuzz is capped at
+# 600 minutes, memcheck and helgrind at 240. Keying the group on the job
+# selection (and on the run id for the scheduled run) keeps a targeted
+# dispatch -- e.g. `jobs=scanners`, a ~2 minute job, the documented common
+# case above -- from cancelling an in-flight monthly cron run on the same
+# ref and destroying hours of soak with no artifact. Two dispatches of the
+# SAME selection still coalesce, which is the only case where cancelling is
+# the intended behaviour.
 concurrency:
-  group: ci-deep-${{ github.workflow }}-${{ github.ref }}
+  group: >-
+    ci-deep-${{ github.workflow }}-${{ github.ref
+    }}-${{ github.event_name == 'schedule'
+    && format('schedule-{0}', github.run_id)
+    || format('dispatch-{0}', inputs.jobs || 'all') }}
   cancel-in-progress: true
 
 permissions:

@@ -302,7 +302,7 @@ static void ngx_http_zstd_cleanup_cctx(void *data);
 static char *ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_table_elt_t *ngx_http_zstd_find_request_header(
-    ngx_http_request_t *r, const char *name, size_t len);
+    ngx_http_request_t *r, const char *name, size_t len, ngx_uint_t *count);
 static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
     ngx_http_request_t *r, ngx_http_zstd_loc_conf_t *zlcf);
 static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
@@ -730,16 +730,32 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
  * walk — both headers appear at most once and only on dictionary-aware
  * requests, so a hashed lookup buys nothing here.
  */
+/*
+ * Find a request header by name. Neither header this is used for
+ * (Available-Dictionary, Sec-Fetch-Site) appears in nginx's
+ * ngx_http_headers_in table, so neither gets ngx_http_process_unique_
+ * header_line's duplicate rejection: a request may legitimately reach a
+ * module carrying two of them, and a plain first-match lookup would let
+ * whichever line sorts first decide the outcome. Both are single-valued
+ * by their specifications and a browser never sends either twice, so
+ * `*count` reports how many occurrences exist and the dcz caller fails
+ * closed on more than one -- for Sec-Fetch-Site that check is the RFC
+ * 9842 SS8.3 cross-origin partitioning gate, and a proxy that merges or
+ * forwards a client-supplied duplicate, or a request-smuggling desync,
+ * must not be able to turn it off by prepending an agreeable value.
+ */
 static ngx_table_elt_t *
 ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
-    size_t len)
+    size_t len, ngx_uint_t *count)
 {
     ngx_uint_t        i;
     ngx_list_part_t  *part;
-    ngx_table_elt_t  *h;
+    ngx_table_elt_t  *h, *found;
 
     part = &r->headers_in.headers.part;
     h = part->elts;
+    found = NULL;
+    *count = 0;
 
     for (i = 0; ; i++) {
 
@@ -756,11 +772,15 @@ ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
         if (h[i].key.len == len
             && ngx_strncasecmp(h[i].key.data, (u_char *) name, len) == 0)
         {
-            return &h[i];
+            (*count)++;
+
+            if (found == NULL) {
+                found = &h[i];
+            }
         }
     }
 
-    return NULL;
+    return found;
 }
 
 
@@ -794,7 +814,7 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
 {
     u_char                     buf[48];
     ngx_str_t                  b64, decoded;
-    ngx_uint_t                 i;
+    ngx_uint_t                 i, nheaders;
     ngx_table_elt_t           *h, *ae;
     ngx_http_zstd_dcz_dict_t  *dicts;
 
@@ -806,14 +826,30 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
         return NULL;
     }
 
+    /*
+     * Accept-Encoding is in nginx's headers_in table, so duplicate lines
+     * are chained on ae->next rather than rejected. Only the first line's
+     * value is evaluated here -- byte-for-byte what nginx's own gzip
+     * filter does, so this is upstream parity rather than a gap: a client
+     * splitting its codings across two header lines has the second line
+     * ignored and falls back to plain zstd, which is the safe direction.
+     */
     ae = r->headers_in.accept_encoding;
     if (ae == NULL) {
         return NULL;
     }
 
     h = ngx_http_zstd_find_request_header(r, "available-dictionary",
-                                          sizeof("available-dictionary") - 1);
+                                          sizeof("available-dictionary") - 1,
+                                          &nheaders);
     if (h == NULL) {
+        return NULL;
+    }
+
+    if (nheaders > 1) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: skip, %ui Available-Dictionary headers",
+                       nheaders);
         return NULL;
     }
 
@@ -848,7 +884,20 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     }
 
     h = ngx_http_zstd_find_request_header(r, "sec-fetch-site",
-                                          sizeof("sec-fetch-site") - 1);
+                                          sizeof("sec-fetch-site") - 1,
+                                          &nheaders);
+
+    /*
+     * More than one Sec-Fetch-Site is never a browser and cannot be
+     * evaluated: fail closed rather than trust the first line.
+     */
+    if (nheaders > 1) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: skip, %ui Sec-Fetch-Site headers",
+                       nheaders);
+        return NULL;
+    }
+
     if (h != NULL
         && !(h->value.len == sizeof("same-origin") - 1
              && ngx_strncasecmp(h->value.data, (u_char *) "same-origin",
@@ -962,6 +1011,17 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
         ngx_chain_update_chains(r->pool, &ctx->free, &ctx->busy, &cl,
                                 (ngx_buf_tag_t) &ngx_http_zstd_filter_module);
+
+        /*
+         * Same reason as the invalidation after the other
+         * ngx_chain_update_chains() below: the buffer ctx->out_buf points
+         * at may have just been recycled onto the free chain. Reaching
+         * here with a stale non-NULL out_buf is currently unreachable --
+         * it would need get_buf's top guard to fail, which requires a
+         * memzero'd buffer_out -- but that argument spans three functions
+         * and a future edit should not have to re-derive it to stay safe.
+         */
+        ctx->out_buf = NULL;
 
         flush = 0;
         ctx->nomem = 0;

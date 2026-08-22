@@ -590,3 +590,74 @@ GET /t
 hashed=1
 --- no_error_log
 [error]
+
+
+
+=== TEST 24: duplicate Sec-Fetch-Site fails closed
+# The §8.3 cross-origin gate must not be decided by whichever line sorts
+# first. Sec-Fetch-Site is not in nginx's headers_in table, so duplicates
+# are chained rather than rejected and reach the module; a proxy that
+# merges a client-supplied duplicate, or a smuggling desync, could
+# otherwise prepend an agreeable value and switch the gate off. A browser
+# never sends two, so more than one falls back to plain zstd.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: same-origin\nSec-Fetch-Site: cross-site"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 25: duplicate Sec-Fetch-Site fails closed regardless of order
+# The cross-site line first: still plain zstd, so the result does not
+# depend on which duplicate the lookup happens to reach.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: cross-site\nSec-Fetch-Site: same-origin"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 26: duplicate Available-Dictionary fails closed
+# Same reasoning: a single-valued structured field, not deduplicated by
+# nginx. Two of them is not a browser, and picking the first would let a
+# second dictionary hash be smuggled past the operator's expectation.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: same-origin"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
