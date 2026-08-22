@@ -31,6 +31,8 @@ jobs:
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - name: Install dependencies
         run: |
           # builder02 apt profile: loose timeouts — the box runs jobs
@@ -72,8 +74,16 @@ jobs:
           CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
           echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
       - name: flawfinder
+        # Threshold mirrors ci/linter/lint-c.sh exactly: gate at >=4 (below 4
+        # is risky-API grep noise; gating on it trains everyone to
+        # --no-verify). --error-level makes flawfinder itself exit non-zero
+        # at that level -- minlevel alone only controls what gets PRINTED,
+        # so a bare --minlevel=1 with no --error-level never fails this step
+        # regardless of what it finds. Move a threshold here, move it in
+        # lint-c.sh in the SAME commit.
         run: |
-          flawfinder --minlevel=1 \
+          set -o pipefail
+          flawfinder --minlevel=4 --error-level=4 \
             "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c" 2>&1 | tee flawfinder.log
       - name: clang-tidy (cert-*, security.*)
@@ -95,9 +105,19 @@ jobs:
           done
           exit "$status"
       - name: semgrep
+        # Same target and threshold as ci/linter/lint-c.sh: src/ (the module's
+        # real source directory -- filter/ and static/ are a stale legacy
+        # layout this workflow was still pointed at), gate >=WARNING, and
+        # --jobs=1 --metrics=off (step 28: --jobs=1 is a CORRECTNESS flag on
+        # this host's shared RLIMIT_MEMLOCK, not a speed one; --metrics=off
+        # drops the semgrep.dev telemetry POST). `|| true` previously meant
+        # this step could never fail on a real finding.
         run: |
+          set -o pipefail
           semgrep scan --config p/c --config p/security-audit \
-            "$GITHUB_WORKSPACE/filter/" "$GITHUB_WORKSPACE/static/" 2>&1 | tee semgrep.log || true
+            --severity=WARNING --severity=ERROR --error \
+            --jobs=1 --metrics=off \
+            "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
