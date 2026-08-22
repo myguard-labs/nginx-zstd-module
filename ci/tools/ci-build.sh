@@ -253,13 +253,34 @@ echo ""
 #     script takes.
 # Coverage adds --coverage to BOTH cc-opt and ld-opt via the configure
 # argument, not env CC/CFLAGS -- nginx's configure probes the compiler with
-# its own invocations and ignores a bare CC=/CFLAGS= override (same reason
-# ccache has to go through --with-cc-opt rather than env, see step 28).
+# its own invocations (`` `$CC -v ...` ``, unquoted so it also splits on a
+# ccache prefix) and ignores a bare CC=/CFLAGS= override entirely: nothing in
+# configure or the generated Makefile ever reads it.
 CC_OPT="-DZSTD_STATIC_LINKING_ONLY"
 LD_OPT=""
 if [ "$MODE" = "coverage" ]; then
     CC_OPT="$CC_OPT --coverage -O0"
     LD_OPT="--coverage"
+fi
+
+# ccache goes through --with-cc, the one flag configure actually reads for the
+# compiler pathname, not env CC= (same reason as above). CCACHE_COMPILERCHECK
+# content -- not the mtime-based default -- so a compiler reinstalled at the
+# same path with the same version string still hits cache; skipped under
+# coverage, where --coverage recompiles from a clean tree every run anyway and
+# a cache lookup only adds an unproductive stat.
+CC_BIN="gcc"
+if [ "$MODE" != "coverage" ] && command -v ccache >/dev/null 2>&1; then
+    export CCACHE_COMPILERCHECK=content
+    CC_BIN="ccache gcc"
+fi
+
+# mold as the linker, cheapest cache layer of all (no key, no invalidation
+# logic -- just a faster ld). Skipped under coverage: --coverage's own gcov
+# runtime linking has known mold interop gaps, and this script has no ASan
+# mode to skip it for yet (asan.yml builds outside ci-build.sh entirely).
+if [ "$MODE" != "coverage" ] && command -v mold >/dev/null 2>&1; then
+    LD_OPT="$LD_OPT -fuse-ld=mold"
 fi
 
 ./configure \
@@ -272,6 +293,7 @@ fi
     --with-http_v2_module \
     --with-http_sub_module \
     --with-http_auth_request_module \
+    --with-cc="$CC_BIN" \
     --with-cc-opt="$CC_OPT" \
     --with-ld-opt="$LD_OPT" \
     --add-dynamic-module="$ZSTD_MODULE_DIR" \

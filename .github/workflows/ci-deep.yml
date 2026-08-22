@@ -106,9 +106,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential curl libpcre2-dev libzstd-dev pkg-config \
-            wget zstd libperl-dev cpanminus
+            wget zstd libperl-dev cpanminus ccache mold
+
+      - name: Cache ccache objects
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.ccache
+          key: ccache-ci-deep-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('ci/tools/ci-build.sh', 'config', 'src/**') }}
+          restore-keys: |
+            ccache-ci-deep-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-
+            ccache-ci-deep-${{ runner.os }}-
+
+      # Hybrid restore: this runner is self-hosted and persistent, so
+      # .build/ already survives between runs on disk (ci-build.sh's own
+      # "reuse unless NO_CACHE=1" check) -- this is the FALLBACK for when it
+      # does not (ephemeral runner, first run on a fresh box, or the runner
+      # pool changed). Exact-match only, never a restore-keys ladder: a
+      # PARTIAL build-tree hit (some objects rebuilt at a newer source
+      # revision, others stale) is worse than a clean rebuild, since a
+      # mismatched .o silently links into a binary that matches nothing.
+      - name: Cache build tree
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .build/${{ matrix.flavor }}-${{ matrix.version }}
+          key: build-tree-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('ci/tools/ci-build.sh', 'config', 'src/**') }}
 
       - name: Build server and dynamic modules
+        # No CCACHE_DIR override: ccache's own default (~/.ccache) already
+        # matches the "Cache ccache objects" step's path above.
         env:
           # Routed through env: rather than spliced into run: directly --
           # both values come from this file's own hardcoded matrix.include
