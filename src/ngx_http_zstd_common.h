@@ -400,11 +400,12 @@ ngx_http_zstd_accepts(ngx_http_request_t *r)
  * As ngx_http_zstd_accepts(), but additionally latches r->gzip_tested /
  * r->gzip_ok = 0 on a positive result, so a later gzip filter/handler
  * declines and does not double-compress a response we are about to encode as
- * zstd. Only the on-the-fly filter module uses this: it calls ngx_http_zstd_ok()
- * at the point it commits to compressing (Content-Encoding: zstd is set
- * immediately after), so latching gzip off here is always followed by an
- * actual zstd encoding — the latch never strands a response with neither
- * coding. The static module must NOT use this (see ngx_http_zstd_accepts()).
+ * zstd. Only the on-the-fly filter module uses this: it calls
+ * ngx_http_zstd_ok() at the point it commits to compressing
+ * (Content-Encoding: zstd is set immediately after), so latching gzip off
+ * here is always followed by an actual zstd encoding — the latch never
+ * strands a response with neither coding. The static module must NOT use
+ * this (see ngx_http_zstd_accepts()).
  *
  * ngx_inline: only the filter TU calls this; the static TU includes the header
  * but uses ngx_http_zstd_accepts() instead, so a plain `static` definition

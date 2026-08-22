@@ -61,8 +61,8 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
 
 typedef struct {
     ngx_str_t                    dict_file;
-    ngx_flag_t                   dict_unsafe;   /* explicit opt-in for the
-                                                 * non-RFC-9842 dict mode; S1/RFC1 */
+    /* explicit opt-in for the non-RFC-9842 dict mode; S1/RFC1 */
+    ngx_flag_t                   dict_unsafe;
 
     /*
      * Load-time SHA-256 computations over dcz dictionaries in THIS
@@ -107,13 +107,19 @@ typedef struct {
     ngx_int_t                    level;
     ssize_t                      min_length;
     ssize_t                      max_length;
-    ssize_t                      target_cblock_size;  /* Issue #38: ZSTD_c_targetCBlockSize */
-    ngx_int_t                    window_log;          /* ZSTD_c_windowLog: bounds per-request memory */
-    ngx_flag_t                   long_mode;           /* ZSTD_c_enableLongDistanceMatching */
-    ssize_t                      max_cctx_memory;     /* config-load assert: per-request CCtx memory budget */
+    /* Issue #38: ZSTD_c_targetCBlockSize */
+    ssize_t                      target_cblock_size;
+    /* ZSTD_c_windowLog: bounds per-request memory */
+    ngx_int_t                    window_log;
+    /* ZSTD_c_enableLongDistanceMatching */
+    ngx_flag_t                   long_mode;
+    /* config-load assert: per-request CCtx memory budget */
+    ssize_t                      max_cctx_memory;
 
-    ngx_array_t                 *bypass;              /* ngx_http_complex_value_t: per-request bypass */
-    ngx_str_t                    bypass_vary;         /* extra Vary field for header/cookie-driven bypass; see S1 */
+    /* ngx_http_complex_value_t: per-request bypass */
+    ngx_array_t                 *bypass;
+    /* extra Vary field for header/cookie-driven bypass; see S1 */
+    ngx_str_t                    bypass_vary;
 
     ngx_hash_t                   types;
 
@@ -1189,7 +1195,8 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         }
 
     } else if (ctx->action != NGX_HTTP_ZSTD_FILTER_END) {
-        /* Restore to COMPRESS after FLUSH drains (unless transitioning to END) */
+        /* Restore to COMPRESS after FLUSH drains (unless transitioning
+         * to END) */
         ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS;
     }
 

@@ -8,7 +8,8 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include <zstd.h>     /* ZSTD_MAGICNUMBER, ZSTD_MAGIC_SKIPPABLE_* — stable since 0.8.0 */
+/* ZSTD_MAGICNUMBER, ZSTD_MAGIC_SKIPPABLE_* — stable since 0.8.0 */
+#include <zstd.h>
 #include <stdint.h>   /* uint32_t for the magic-number compare */
 
 #if !(NGX_WIN32)
