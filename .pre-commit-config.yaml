@@ -69,7 +69,7 @@
 # Skipped" as probe.pem and "Private key found" as probe.txt. They are excluded
 # per-hook on the three fixers below instead, which is the only reason they were
 # ever in this list.
-exclude: '^fuzz/corpus/|\.traefik-ref/|\.claude/worktrees/|\.build/|(^|/)objs/|(^|/)vendor/|(^|/)node_modules/|(^|/)\.venv/|\.(bin|gz|zip|png|ico|so|o|a)$'
+exclude: '^ci/fuzz/corpus/|\.traefik-ref/|\.claude/worktrees/|\.build/|(^|/)objs/|(^|/)vendor/|(^|/)node_modules/|(^|/)\.venv/|\.(bin|gz|zip|png|ico|so|o|a)$'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -132,7 +132,7 @@ repos:
         name: flawfinder (gate on >=4)
         entry: flawfinder --minlevel=4 --error-level=4 --quiet
         language: system
-        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|tools/.*\.[ch])$'
+        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|ci/tools/.*\.[ch])$'
         pass_filenames: true
 
       # Mirrors the CI "semgrep (gate on >=WARNING)" step, same configs and
@@ -166,7 +166,7 @@ repos:
         entry: semgrep scan --jobs=1 --config p/c --config p/security-audit
                --severity=WARNING --severity=ERROR --error
         language: system
-        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|tools/.*\.[ch])$'
+        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|ci/tools/.*\.[ch])$'
         pass_filenames: true
         require_serial: true
 
@@ -194,7 +194,7 @@ repos:
                --suppress=normalCheckLevelMaxBranches --suppress=unusedFunction
                --suppress=unusedStructMember -I filter -I static -I tools -DNGX_PTR_SIZE=8
         language: system
-        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|tools/.*\.[ch])$'
+        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|ci/tools/.*\.[ch])$'
         pass_filenames: true
 
       # Structural sink sweep: this superrepo's own c-* / nginx-* rules plus
@@ -235,7 +235,7 @@ repos:
                --error=c-format-string
                --error=c-shell-exec
         language: system
-        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|tools/.*\.[ch])$'
+        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|ci/tools/.*\.[ch])$'
         pass_filenames: true
 
       # Python is the runtime TEST HARNESS in these repos, so it carries the
@@ -288,7 +288,7 @@ repos:
         name: ruff (correctness tiers F,B,I,PLE,RET,RUF059)
         entry: ruff check --force-exclude --select F,B,I,PLE,RET,RUF059
         language: system
-        files: '^tools/.*\.py$'
+        files: '^ci/tools/.*\.py$'
         pass_filenames: true
 
       # CI workflows are code that breaks silently; actionlint catches bad if:

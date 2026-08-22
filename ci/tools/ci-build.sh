@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build and test zstd-nginx-module against nginx or angie.
 #
-#   tools/ci-build.sh [flavor] [version]
+#   ci/tools/ci-build.sh [flavor] [version]
 #     flavor : nginx (default) | angie
 #     version: source version, e.g. 1.31.2. Omit (or pass "" with flavor=nginx)
 #              to resolve the current mainline release from nginx.org.
@@ -13,11 +13,11 @@
 # rebuild of a given flavor/version pair.
 #
 # nginx tarballs are verified via PGP against the signer keys VENDORED in
-# tools/keys/ (committed to this repo) — never fetched from nginx.org at CI
+# ci/tools/keys/ (committed to this repo) — never fetched from nginx.org at CI
 # time. Bootstrapping the verification keys from the same origin that serves
 # the tarball+signature gives an origin compromise the ability to substitute
 # all three (audit sha e289021 F3); a key rotation is a reviewed PR that adds
-# a new file under tools/keys/, not a runtime fetch. For a statically-pinned
+# a new file under ci/tools/keys/, not a runtime fetch. For a statically-pinned
 # nginx version (nginx-stable in ci-deep.yml's matrix) the sha256 is ALSO
 # checked against NGINX_SHA256 below, same as angie -- floating mainline
 # (resolved at CI run time, see build-test.yml's `resolve` job) has no static
@@ -33,7 +33,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_DIR="$(dirname "$SCRIPT_DIR")"
+# ci/tools/ -> ci/ -> repo root. TWO levels: this script lived in tools/ at
+# the root until the ci/ move, where one dirname was enough. A single climb
+# now lands in ci/, where the module config and .build/ do not exist, and the
+# build silently configures against the wrong tree.
+MODULE_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
 FLAVOR="${1:-nginx}"
 VERSION="${2:-}"
@@ -129,7 +133,7 @@ fi
 # the pre-fix version of this script).
 if [ "$FLAVOR" = "nginx" ]; then
     # Always fetch over HTTPS and verify the detached PGP signature against
-    # the nginx release-signing keys VENDORED in tools/keys/ (not fetched
+    # the nginx release-signing keys VENDORED in ci/tools/keys/ (not fetched
     # from nginx.org, which also serves the tarball+signature -- see the
     # file header). A plain HTTP download lets a network attacker swap the
     # source that we then configure and compile.

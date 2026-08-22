@@ -148,23 +148,23 @@ jobs:
       # Audit sha e289021 F1/F7 regression coverage: no nginx build needed,
       # so these run here rather than in the build/tests jobs.
       - name: fuzz_seconds dispatch-input validation (F1 regression)
-        run: bash "$GITHUB_WORKSPACE"/tools/test_fuzz_seconds_validation.sh
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_fuzz_seconds_validation.sh
 
       - name: README/SECURITY/CONTRIBUTING vs live workflows (F7 regression)
-        run: bash "$GITHUB_WORKSPACE"/tools/test_docs_ci_drift.sh
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_docs_ci_drift.sh
 
       # Audit sha e289021 F2/F3 regression coverage: exercises ci-build.sh's
       # mv-guard and provenance checks directly (offline cases + one live
       # clean-root angie build).
       - name: ci-build.sh clean-root + provenance regressions (F2/F3)
-        run: bash "$GITHUB_WORKSPACE"/tools/test_ci_build_provenance.sh
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_ci_build_provenance.sh
 
       - name: Shell script linting (shellcheck)
         run: |
           # Gate on error-severity findings (real bugs); style/info noise does
           # not fail CI. The previous blanket "|| true" is dropped so a real
           # error-level finding now fails the job. See audit CI1.
-          shellcheck --severity=error "$GITHUB_WORKSPACE"/tools/*.sh
+          shellcheck --severity=error "$GITHUB_WORKSPACE"/ci/tools/*.sh
           echo "✓ shellcheck complete (no error-severity findings)"
 
       - name: SHA-256 unit fixture (portable vectors + EVP failure injection)
@@ -175,7 +175,7 @@ jobs:
           # This fixture compiles ngx_http_zstd_sha256.h against shim
           # headers with an injectable fake EVP_Digest — needs only a C
           # compiler.
-          bash "$GITHUB_WORKSPACE"/tools/test_sha256_unit.sh
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_sha256_unit.sh
 
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
@@ -209,7 +209,7 @@ jobs:
           cppcheck --enable=warning,performance,portability \
             --error-exitcode=1 \
             --suppress=missingIncludeSystem \
-            --suppressions-list="$GITHUB_WORKSPACE/tools/cppcheck-suppressions.txt" \
+            --suppressions-list="$GITHUB_WORKSPACE/ci/tools/cppcheck-suppressions.txt" \
             "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
             2>&1 | tee cppcheck.log
@@ -357,7 +357,7 @@ jobs:
           gnupghome="$(mktemp -d)"
           export GNUPGHOME="$gnupghome"
           chmod 700 "$gnupghome"
-          for keyfile in tools/keys/*.key; do
+          for keyfile in ci/tools/keys/*.key; do
             gpg --quiet --import "$keyfile" 2>/dev/null
           done
           gpg --quiet --verify "${{ matrix.dir }}.tar.gz.asc" "${{ matrix.dir }}.tar.gz"
@@ -535,7 +535,7 @@ jobs:
           gnupghome="$(mktemp -d)"
           export GNUPGHOME="$gnupghome"
           chmod 700 "$gnupghome"
-          for keyfile in tools/keys/*.key; do
+          for keyfile in ci/tools/keys/*.key; do
             gpg --quiet --import "$keyfile" 2>/dev/null
           done
           gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
@@ -613,13 +613,13 @@ jobs:
           # the fallback paths are not just compiled but actually
           # exercised at run time — compression must produce a
           # byte-exact body when decompressed.
-          python3 tools/test_encoding.py \
+          python3 ci/tools/test_encoding.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18200
           echo "✓ libzstd 1.4.x fallback paths produce correct output"
 
   # ── Dynamic-module linkage isolation — the NGX_LD_OPT regression test.
   #    Builds the zstd modules alongside an unrelated stub dynamic module
-  #    (tools/ci-linkcheck-module) in ONE configure and asserts both
+  #    (ci/tools/ci-linkcheck-module) in ONE configure and asserts both
   #    directions: the zstd .so's DO carry a libzstd DT_NEEDED (positive
   #    control — proves the per-module ngx_module_libs channel works and
   #    that the assertions are not vacuously passing) and the stub does
@@ -672,7 +672,7 @@ jobs:
           gnupghome="$(mktemp -d)"
           export GNUPGHOME="$gnupghome"
           chmod 700 "$gnupghome"
-          for keyfile in tools/keys/*.key; do
+          for keyfile in ci/tools/keys/*.key; do
             gpg --quiet --import "$keyfile" 2>/dev/null
           done
           gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
@@ -690,8 +690,8 @@ jobs:
           ./configure \
             --with-compat \
             --add-dynamic-module="$GITHUB_WORKSPACE" \
-            --add-dynamic-module="$GITHUB_WORKSPACE/tools/ci-linkcheck-module" \
-            --add-dynamic-module="$GITHUB_WORKSPACE/tools/ci-compression-vary-stub" \
+            --add-dynamic-module="$GITHUB_WORKSPACE/ci/tools/ci-linkcheck-module" \
+            --add-dynamic-module="$GITHUB_WORKSPACE/ci/tools/ci-compression-vary-stub" \
             > /dev/null
           make -j"$(nproc)"
 
@@ -927,7 +927,7 @@ jobs:
           gnupghome="$(mktemp -d)"
           export GNUPGHOME="$gnupghome"
           chmod 700 "$gnupghome"
-          for keyfile in tools/keys/*.key; do
+          for keyfile in ci/tools/keys/*.key; do
             gpg --quiet --import "$keyfile" 2>/dev/null
           done
           gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
@@ -1083,7 +1083,7 @@ jobs:
           gnupghome="$(mktemp -d)"
           export GNUPGHOME="$gnupghome"
           chmod 700 "$gnupghome"
-          for keyfile in tools/keys/*.key; do
+          for keyfile in ci/tools/keys/*.key; do
             gpg --quiet --import "$keyfile" 2>/dev/null
           done
           gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
@@ -1210,7 +1210,7 @@ jobs:
           export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
-          perl t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee t/filter-tests.log
+          perl ci/t/00-filter.t 2>&1 | sed 's/^Error:/Err:/' | tee ci/t/filter-tests.log
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Filter tests FAILED"; exit 1; fi
           echo "✓ Filter module: All tests passed"
 
@@ -1224,18 +1224,18 @@ jobs:
           # Startup-time warnings (e.g. zstd_bypass_vary without zstd_bypass)
           # are only observable on the first request cycle, so they live in
           # their own repeat_each(1) file.
-          perl t/02-conf-warn.t 2>&1 | sed 's/^Error:/Err:/' | tee t/conf-warn-tests.log
+          perl ci/t/02-conf-warn.t 2>&1 | sed 's/^Error:/Err:/' | tee ci/t/conf-warn-tests.log
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Config-warning tests FAILED"; exit 1; fi
           echo "✓ Config-load warning tests passed"
 
       - name: Run static module tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/ci/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
-          touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
+          touch -d @1541504307 "$GITHUB_WORKSPACE/ci/t/suite/test" "$GITHUB_WORKSPACE/ci/t/suite/test.zst"
           cd "$GITHUB_WORKSPACE"
-          perl t/01-static.t 2>&1 | sed 's/^Error:/Err:/' | tee t/static-tests.log
+          perl ci/t/01-static.t 2>&1 | sed 's/^Error:/Err:/' | tee ci/t/static-tests.log
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ Static tests FAILED"; exit 1; fi
           echo "✓ Static module: All tests passed"
 
@@ -1246,48 +1246,48 @@ jobs:
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
-          perl t/03-dcz.t 2>&1 | sed 's/^Error:/Err:/' | tee t/dcz-tests.log
+          perl ci/t/03-dcz.t 2>&1 | sed 's/^Error:/Err:/' | tee ci/t/dcz-tests.log
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ dcz tests FAILED"; exit 1; fi
           echo "✓ dcz negotiation tests passed"
 
       - name: Run truncation smoke test
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18080
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18080
           echo "✓ Truncation smoke test passed"
 
       - name: Run Vary smoke test
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" \
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18081 --gzip-vary on --expect-vary
           echo "✓ Vary smoke test passed"
 
       - name: Run boundary-size smoke test
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" \
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18082 --fixture-lines 1900
           echo "✓ Boundary-size smoke test passed"
 
       - name: Run repeated-request smoke test
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" \
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18083 --request-count 2
           echo "✓ Repeated-request smoke test passed"
 
       - name: Run concurrent-request smoke test
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" \
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18084 --concurrent-requests 2
           echo "✓ Concurrent-request smoke test passed"
 
       - name: Run terminal-frame regression test
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 18085
+          python3 ci/tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 18085
           echo "✓ Terminal-frame regression test passed"
 
       - name: Run proxy_buffering-off truncation regression (bug B)
@@ -1299,15 +1299,15 @@ jobs:
           # ZSTD_CStreamInSize buffer-boundary size matrix. Fails on a
           # module that forwards a zero-size buffer ("zero size buf in
           # writer" -> aborted/truncated response).
-          python3 tools/test_proxy_unbuffered_truncation.py \
+          python3 ci/tools/test_proxy_unbuffered_truncation.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18086 --backend-port 18087
           echo "✓ proxy_buffering-off truncation regression passed"
           # Deterministic drivers for the two timing-dependent paths
           # (buffer-cap nomem recovery, content-less flush) that the
           # coverage floor previously measured only when CI load
-          # produced the right races — see tools/test_slow_drain.py.
-          python3 tools/test_slow_drain.py \
+          # produced the right races — see ci/tools/test_slow_drain.py.
+          python3 ci/tools/test_slow_drain.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18100 --backend-port 18101
           echo "✓ slow-drain backpressure + data-less flush passed"
@@ -1325,7 +1325,7 @@ jobs:
           # truncation / zero-size-buf / livelock bug class across the
           # circumstances it has historically recurred in (a step-level
           # timeout makes a CPU-spin livelock a hard FAIL, not a hang).
-          python3 tools/test_compression_matrix.py \
+          python3 ci/tools/test_compression_matrix.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18096 --backend-port 18097
           echo "✓ compression correctness matrix passed"
@@ -1339,7 +1339,7 @@ jobs:
           # but wrong body). Fire many distinct concurrent requests
           # through one worker over reused keepalive connections; each
           # response must decode byte-exact to its OWN origin.
-          python3 tools/test_concurrent_cctx_isolation.py \
+          python3 ci/tools/test_concurrent_cctx_isolation.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18098 --backend-port 18099 \
             --concurrency 16 --rounds 6
@@ -1353,9 +1353,9 @@ jobs:
           # in flight (zstd_dict_file set). Every response — old-cycle,
           # straddling, new-cycle — must still decode byte-exact; master
           # must survive; error log must stay clean. Complements
-          # tools/test_reload_leak.sh (which checks leaks, not response
+          # ci/tools/test_reload_leak.sh (which checks leaks, not response
           # correctness during reload).
-          python3 tools/test_reload_under_load.py \
+          python3 ci/tools/test_reload_under_load.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18100 --backend-port 18101 \
             --reloads 6 --workers 4 --duration 18
@@ -1372,7 +1372,7 @@ jobs:
           # proving ZSTD_c_enableLongDistanceMatching actually reached
           # libzstd and engaged, and the directive neither corrupts nor
           # truncates the stream (the bug-B failure mode).
-          python3 tools/test_zstd_long_ldm.py \
+          python3 ci/tools/test_zstd_long_ldm.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18102 --backend-port 18103
           echo "✓ zstd_long (LDM) directive regression passed"
@@ -1386,7 +1386,7 @@ jobs:
           # window <= 2^15 and reference the trained dictID (audit
           # C2/R1 CDict-path regression); decode requires the dict and
           # round-trips byte-exact.
-          python3 tools/test_window_cap.py \
+          python3 ci/tools/test_window_cap.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18104 --backend-port 18105
           echo "✓ window-cap + dictionary effect test passed"
@@ -1395,12 +1395,12 @@ jobs:
         timeout-minutes: 6
         run: |
           cd "$GITHUB_WORKSPACE"
-          # dcz negotiation matrix plus the wire contract t/03-dcz.t
+          # dcz negotiation matrix plus the wire contract ci/t/03-dcz.t
           # cannot check: the 40-byte frame header (skippable magic +
           # dictionary SHA-256), decode via `zstd -d -D` capped at the
           # RFC's 8 MB client-window guarantee, byte-compare to origin,
           # and proof the dictionary engaged (dcz body < plain zstd).
-          python3 tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" --port 18106
+          python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" --port 18106
           echo "✓ RFC 9842 dcz end-to-end test passed"
 
       - name: Test summary
@@ -1413,9 +1413,9 @@ jobs:
         with:
           name: test-logs
           path: |
-            ${{ github.workspace }}/t/filter-tests.log
-            ${{ github.workspace }}/t/static-tests.log
-            ${{ github.workspace }}/t/dcz-tests.log
+            ${{ github.workspace }}/ci/t/filter-tests.log
+            ${{ github.workspace }}/ci/t/static-tests.log
+            ${{ github.workspace }}/ci/t/dcz-tests.log
           retention-days: 7
 
   # ── Smoke tests under ASAN+UBSAN — fails on any memory/UB error ───────────
@@ -1487,13 +1487,13 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-asan-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
-          perl t/00-filter.t > t/filter-asan.log 2>&1 || true
-          touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
-          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
+          perl ci/t/00-filter.t > ci/t/filter-asan.log 2>&1 || true
+          touch -d @1541504307 "$GITHUB_WORKSPACE/ci/t/suite/test" "$GITHUB_WORKSPACE/ci/t/suite/test.zst"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/ci/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
-          perl t/01-static.t > t/static-asan.log 2>&1 || true
+          perl ci/t/01-static.t > ci/t/static-asan.log 2>&1 || true
           # Gate strictly on sanitizer reports attributable to this module.
-          if cat /tmp/asan-zstd.* t/filter-asan.log t/static-asan.log 2>/dev/null \
+          if cat /tmp/asan-zstd.* ci/t/filter-asan.log ci/t/static-asan.log 2>/dev/null \
                | grep -nE 'ngx_http_zstd' \
                | grep -iE 'runtime error|AddressSanitizer|Sanitizer|overflow|use-after'; then
             echo "❌ sanitizer report attributable to the zstd module:"
@@ -1505,7 +1505,7 @@ jobs:
       - name: Run smoke tests under ASAN+UBSAN
         # Leak gating here is NOT free: every harness below starts nginx and
         # stops it with SIGTERM, and each one accepts -15 as a clean exit
-        # (e.g. tools/test_encoding.py's `returncode not in (0, -15)`). LSan
+        # (e.g. ci/tools/test_encoding.py's `returncode not in (0, -15)`). LSan
         # reports at worker exit and signals a leak through the exit STATUS,
         # so a leak was invisible twice over -- the harness waved the status
         # through, and this step never looked at LSan's output at all. Both
@@ -1527,11 +1527,11 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           rm -f /tmp/lsan-smoke.*
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18090
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18091 --fixture-lines 1900
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18092 --concurrent-requests 2
-          python3 tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 18093
-          python3 tools/test_proxy_unbuffered_truncation.py \
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18090
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18091 --fixture-lines 1900
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 18092 --concurrent-requests 2
+          python3 ci/tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 18093
+          python3 ci/tools/test_proxy_unbuffered_truncation.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18094 --backend-port 18095
           # Backpressure pause/resume under sanitizers: the nomem and
           # empty-flush paths share lifetime history with the
@@ -1543,26 +1543,26 @@ jobs:
           # The tool still forces both paths and byte-checks the
           # streams; the log-witness assertions run in the tests and
           # coverage jobs, whose binaries are not sanitized.
-          python3 tools/test_slow_drain.py \
+          python3 ci/tools/test_slow_drain.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18110 --backend-port 18111 \
             --log-level warn
           # Matrix under ASAN/UBSAN at repeat=1 (252 cells) — the
           # truncation/zero-size-buf/livelock class has UB+lifetime
           # history, so exercise the full circumstance matrix with
           # sanitizers, not just the happy path.
-          python3 tools/test_compression_matrix.py \
+          python3 ci/tools/test_compression_matrix.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18096 \
             --backend-port 18097 --repeat 1
           # CCtx isolation under ASAN/UBSAN: a shared/not-reset context
           # is a lifetime bug — exactly what ASAN is for. Lighter
           # concurrency/rounds since the sanitized binary is slower.
-          python3 tools/test_concurrent_cctx_isolation.py \
+          python3 ci/tools/test_concurrent_cctx_isolation.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18098 \
             --backend-port 18099 --concurrency 8 --rounds 3
           # dcz under ASAN/UBSAN: ZSTD_CCtx_refPrefix references
           # config-pool memory from the request path and the 40-byte
           # frame header is hand-assembled — both lifetime/OOB classes.
-          python3 tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
+          python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18089
 
           # Leak verdict. Everything in lsan.suppress is gone by now, so any
@@ -1573,7 +1573,7 @@ jobs:
           # (LXC seccomp / yama on builder02). That is INDETERMINATE, not
           # clean: warn rather than print a checkmark that would mean "no
           # leaks" when nothing was actually checked. Same distinction
-          # tools/test_reload_leak.sh draws.
+          # ci/tools/test_reload_leak.sh draws.
           #
           # Order matters, and the two conditions are NOT mutually exclusive.
           # log_path writes one file per process, so a run can easily produce
@@ -1604,7 +1604,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
           cd "$GITHUB_WORKSPACE"
-          bash tools/test_reload_leak.sh "$TEST_NGINX_BINARY" 5
+          bash ci/tools/test_reload_leak.sh "$TEST_NGINX_BINARY" 5
 
   # ── gcov coverage — separate --coverage build so the sanitizer/strict
   #    builds above stay unpolluted by instrumentation overhead. Informational
@@ -1662,7 +1662,7 @@ jobs:
           gnupghome="$(mktemp -d)"
           export GNUPGHOME="$gnupghome"
           chmod 700 "$gnupghome"
-          for keyfile in tools/keys/*.key; do
+          for keyfile in ci/tools/keys/*.key; do
             gpg --quiet --import "$keyfile" 2>/dev/null
           done
           gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
@@ -1707,7 +1707,7 @@ jobs:
           export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-filter-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
-          prove t/00-filter.t
+          prove ci/t/00-filter.t
 
       - name: Run config-load warning tests
         run: |
@@ -1716,16 +1716,16 @@ jobs:
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
-          prove t/02-conf-warn.t
+          prove ci/t/02-conf-warn.t
 
       - name: Run static module tests
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/ci/t/servroot-static-${{ github.run_id }}-${{ github.job }}"
           mkdir -p "$TEST_NGINX_SERVROOT"
-          touch -d @1541504307 "$GITHUB_WORKSPACE/t/suite/test" "$GITHUB_WORKSPACE/t/suite/test.zst"
+          touch -d @1541504307 "$GITHUB_WORKSPACE/ci/t/suite/test" "$GITHUB_WORKSPACE/ci/t/suite/test.zst"
           cd "$GITHUB_WORKSPACE"
-          prove t/01-static.t
+          prove ci/t/01-static.t
 
       - name: Run dcz negotiation tests
         run: |
@@ -1734,17 +1734,17 @@ jobs:
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
-          prove t/03-dcz.t
+          prove ci/t/03-dcz.t
 
       - name: Run correctness/regression tool suite (drives filter edge cases)
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 19080
-          python3 tools/test_compression_matrix.py \
+          python3 ci/tools/test_encoding.py --nginx-binary "$TEST_NGINX_BINARY" --port 19080
+          python3 ci/tools/test_compression_matrix.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19096 --backend-port 19097
-          python3 tools/test_concurrent_cctx_isolation.py \
+          python3 ci/tools/test_concurrent_cctx_isolation.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19098 --backend-port 19099
-          python3 tools/test_proxy_unbuffered_truncation.py \
+          python3 ci/tools/test_proxy_unbuffered_truncation.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19094 --backend-port 19095
           # The reason this tool exists: the floor below assumes the
           # nomem-recovery and content-less-flush lines are covered,
@@ -1752,14 +1752,14 @@ jobs:
           # races (8 lines = 0.67pp; the floor's headroom is 0.6pp —
           # one unlucky run failed an unrelated two-line PR). This
           # forces both paths every run.
-          python3 tools/test_slow_drain.py \
+          python3 ci/tools/test_slow_drain.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19110 --backend-port 19111
-          python3 tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 19093
-          python3 tools/test_window_cap.py \
+          python3 ci/tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 19093
+          python3 ci/tools/test_window_cap.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19104 --backend-port 19105
-          python3 tools/test_zstd_long_ldm.py \
+          python3 ci/tools/test_zstd_long_ldm.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19102 --backend-port 19103
-          python3 tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" --port 19106
+          python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" --port 19106
 
       - name: Capture coverage (lcov) and enforce line-coverage floor
         run: |

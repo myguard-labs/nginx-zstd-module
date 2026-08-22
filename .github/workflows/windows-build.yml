@@ -14,7 +14,7 @@ on:
       - 'static/**'
       - '*.h'
       - 'config'
-      - 'tools/build-windows.sh'
+      - 'ci/tools/build-windows.sh'
       - '.github/scripts/configure-msvc.sh'
       - '.github/workflows/windows-build.yml'
   push:

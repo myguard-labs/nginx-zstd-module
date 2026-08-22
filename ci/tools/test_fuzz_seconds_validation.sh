@@ -16,7 +16,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKFLOW="$SCRIPT_DIR/../.github/workflows/ci-deep.yml"
+WORKFLOW="$SCRIPT_DIR/../../.github/workflows/ci-deep.yml"
 
 fail=0
 

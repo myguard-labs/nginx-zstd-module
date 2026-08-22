@@ -6,7 +6,7 @@ name: Bump versions
 # (see build-test.yml's `resolve` job / ci-deep.yml's per-job resolve steps),
 # so there's no static mainline pin to bump.
 #
-# tools/bump-versions.sh does the actual work (also runnable locally with
+# ci/tools/bump-versions.sh does the actual work (also runnable locally with
 # --dry-run to preview). Opens a PR rather than pushing straight to master --
 # master carries a required-pull-request ruleset with no bypass actor, so a
 # direct push is always rejected (audit sha e289021 F4); the bot instead
@@ -53,7 +53,7 @@ jobs:
           # The angie release lookup hits api.github.com; unauthenticated the
           # shared runner IP is rate-limited to 403s.
           GH_TOKEN: ${{ secrets.BUMP_PR_TOKEN }}
-        run: bash tools/bump-versions.sh
+        run: bash ci/tools/bump-versions.sh
 
       - name: Open PR if anything changed
         env:
@@ -72,7 +72,7 @@ jobs:
           git add -A
           git commit -m "chore: bump nginx-stable/angie pins
 
-          Automated weekly version check (tools/bump-versions.sh)."
+          Automated weekly version check (ci/tools/bump-versions.sh)."
           # persist-credentials is false, so the checkout leaves no git
           # credential behind and a plain `git push` prompts for a username
           # (fatal: could not read Username, run 29722422889). GH_TOKEN
@@ -103,6 +103,6 @@ jobs:
           fi
           gh pr create \
             --title "chore: bump nginx-stable/angie pins ($(date -u +%Y-%m-%d))" \
-            --body "Automated weekly version check (tools/bump-versions.sh). Review the diff and let required CI checks gate the merge." \
+            --body "Automated weekly version check (ci/tools/bump-versions.sh). Review the diff and let required CI checks gate the merge." \
             --base master \
             --head "$branch"

@@ -14,7 +14,7 @@
 set -euo pipefail
 
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HEADER="$FUZZ_DIR/../ngx_http_zstd_common.h"
+HEADER="$FUZZ_DIR/../../ngx_http_zstd_common.h"
 OUT="$FUZZ_DIR/generated_parser.inc"
 
 if [ ! -f "$HEADER" ]; then

@@ -25,7 +25,10 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_DIR="$(dirname "$SCRIPT_DIR")"
+# ci/tools/ -> ci/ -> repo root: TWO levels since the ci/ move. One climb
+# lands in ci/, where README.md and .github/ do not exist -- and the loop
+# below would then report every workflow undocumented.
+MODULE_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 cd "$MODULE_DIR" || exit 1
 
 fail=0

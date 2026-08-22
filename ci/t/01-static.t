@@ -63,7 +63,7 @@ __DATA__
 --- config
     location /test {
         zstd_static off;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -80,7 +80,7 @@ ETag: "5be17d33-e95a"
 --- config
     location /test {
         zstd_static off;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -98,7 +98,7 @@ ETag: "5be17d33-e95a"
 --- config
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -117,7 +117,7 @@ Content-Encoding: zstd
 --- config
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -134,7 +134,7 @@ ETag: "5be17d33-e95a"
 --- config
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -153,7 +153,7 @@ ETag: "5be17d33-e95a"
 --- config
     location /test {
         zstd_static always;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -172,7 +172,7 @@ Content-Encoding: zstd
 --- config
     location /test {
         zstd_static always;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -189,7 +189,7 @@ Content-Encoding: zstd
 --- config
     location /test {
         zstd_static always;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -208,7 +208,7 @@ Content-Encoding: zstd
 --- config
     location /test2 {
         zstd_static always;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test2
@@ -222,7 +222,7 @@ Accept-Encoding: gzip, br
 --- config
     location /test2 {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test2
@@ -236,7 +236,7 @@ Accept-Encoding: gzip, br
 --- config
     location /test2 {
         zstd_static off;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test2
@@ -250,7 +250,7 @@ Accept-Encoding: gzip, br
 --- config
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -269,7 +269,7 @@ ETag: "5be17d33-e95a"
 --- config
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -288,7 +288,7 @@ Content-Encoding: zstd
 --- config
     location /test {
         zstd_static always;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -308,7 +308,7 @@ Content-Encoding: zstd
     location /test {
         zstd_static on;
         gzip_vary on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -328,7 +328,7 @@ Content-Encoding: zstd
     location /test {
         zstd_static on;
         gzip_vary on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -347,7 +347,7 @@ ETag: "5be17d33-e95a"
 --- config
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 HEAD /test
@@ -366,7 +366,7 @@ Content-Encoding: zstd
 --- config
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 POST /test
@@ -426,7 +426,7 @@ Content-Encoding: zstd
 --- config
     location /s/ {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request eval
 "GET /s/" . ("a" x 2000) . "/nonexistent-resource-name"
@@ -480,7 +480,7 @@ is not a zstd frame
     gzip_vary on;
     location /test {
         zstd_static always;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -536,7 +536,7 @@ Accept-Encoding: zstd
 --- config
     location /dir/ {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /dir/
@@ -561,7 +561,7 @@ Accept-Encoding: zstd
     gzip_vary on;
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -591,7 +591,7 @@ Vary: Accept-Encoding
     location /test {
         zstd_static on;
         directio 1;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -688,7 +688,7 @@ Content-Encoding: gzip
     location /test {
         zstd_static on;
         add_header X-Sent-Content-Encoding $sent_http_content_encoding;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test
@@ -910,7 +910,7 @@ decompression window
 --- config
     location /test {
         zstd_static on;
-        root ../../t/suite;
+        root ../suite;
     }
 --- request
 GET /test

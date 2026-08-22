@@ -35,7 +35,8 @@ set -euo pipefail
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
-cd "$(dirname "$0")/.."
+# ci/tools/ -> ci/ -> repo root: TWO levels since the ci/ move.
+cd "$(dirname "$0")/../.."
 
 # --- discover latest versions -------------------------------------------
 

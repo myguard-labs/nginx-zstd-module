@@ -67,7 +67,7 @@ jobs:
           gnupghome="$(mktemp -d)"
           export GNUPGHOME="$gnupghome"
           chmod 700 "$gnupghome"
-          for keyfile in tools/keys/*.key; do
+          for keyfile in ci/tools/keys/*.key; do
             gpg --quiet --import "$keyfile" 2>/dev/null
           done
           gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
@@ -87,6 +87,6 @@ jobs:
         env:
           USE_VALGRIND: "1"
         run: |
-          bash tools/soak.sh \
+          bash ci/tools/soak.sh \
             "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" \
             60 4

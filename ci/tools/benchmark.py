@@ -24,14 +24,16 @@ import subprocess
 import sys
 import time
 
-REPO = pathlib.Path(__file__).resolve().parent.parent
+# ci/tools/benchmark.py -> ci/tools -> ci -> repo root: THREE parents
+# since the ci/ move (was tools/ at the root, where two sufficed).
+REPO = pathlib.Path(__file__).resolve().parent.parent.parent
 
 
 def build_payloads() -> dict[str, bytes]:
     """Representative, deterministic web payloads."""
     payloads: dict[str, bytes] = {}
 
-    fixture = REPO / "t" / "suite" / "test"
+    fixture = REPO / "ci" / "t" / "suite" / "test"
     if fixture.is_file():
         payloads["html-58k (test fixture)"] = fixture.read_bytes()
 
