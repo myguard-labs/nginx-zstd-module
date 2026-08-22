@@ -1151,6 +1151,7 @@ jobs:
             --with-debug \
             --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $SAN $(pkg-config --cflags libzstd zlib libpcre2-8)" \
             --with-ld-opt="$SAN $(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --with-http_sub_module \
             --add-module="$GITHUB_WORKSPACE"
           make -j"$(nproc)"
           if grep -q 'NGX_HTTP_ZSTD_HAVE_LIBCRYPTO' objs/ngx_auto_config.h; then

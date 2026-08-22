@@ -303,7 +303,25 @@ http {{
             text=True,
         )
         try:
-            wait_port(args.port)
+            try:
+                wait_port(args.port)
+            except RuntimeError:
+                # nginx never listened -- almost always a config-load
+                # rejection (a directive whose module is not compiled in,
+                # a bad path). Its stderr is the only thing that says
+                # WHICH, and it is on the pipe, so surface it instead of
+                # letting the bare "nothing listening" hide the cause.
+                proc.terminate()
+                try:
+                    out = proc.communicate(timeout=5)[0] or ""
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    out = proc.communicate()[0] or ""
+                if out.strip():
+                    sys.stderr.write("nginx output:\n")
+                    for line in out.strip().splitlines()[:20]:
+                        sys.stderr.write(f"  {line}\n")
+                raise
             failures: list[str] = []
             start_backend_listener(args.backend_port)
 
