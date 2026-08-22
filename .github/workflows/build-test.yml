@@ -1370,6 +1370,18 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18100 --backend-port 18101
           echo "✓ slow-drain backpressure + data-less flush passed"
+          # ci/t/00-filter.t TEST 92 pins the sub_filter/CCtx-reset
+          # contract but its Test::Nginx tcp_reply array-send coalesces
+          # the three backend chunks into one read locally, so it never
+          # exercises the mid-stream sync-carrier path the bug needs
+          # (see memory/labs/http-zstd/issues.md, 2026-08-13). This tool
+          # drives the same scenario over a raw socket backend with a
+          # real sleep between each send() call, and self-checks that
+          # the reads stayed uncoalesced before trusting its own result.
+          python3 ci/tools/test_sub_filter_cctx_reset.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18102 --backend-port 18103
+          echo "✓ sub_filter/CCtx-reset mid-stream regression passed"
 
       - name: Run broad compression correctness matrix
         timeout-minutes: 12
@@ -1608,6 +1620,13 @@ jobs:
           # coverage jobs, whose binaries are not sanitized.
           python3 ci/tools/test_slow_drain.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18110 --backend-port 18111 \
+            --log-level warn
+          # See the release job's "sub_filter/CCtx-reset" step for why
+          # this exists. --log-level warn: same UBSAN debug-log trap as
+          # test_slow_drain.py above -- the body round-trip assertion
+          # still runs, only the invocation-count self-check is skipped.
+          python3 ci/tools/test_sub_filter_cctx_reset.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18114 --backend-port 18115 \
             --log-level warn
           # Matrix under ASAN/UBSAN at repeat=1 (252 cells) — the
           # truncation/zero-size-buf/livelock class has UB+lifetime
@@ -1852,6 +1871,10 @@ jobs:
           # forces both paths every run.
           python3 ci/tools/test_slow_drain.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19110 --backend-port 19111
+          # See build-test.yml's release job for the ci/t/00-filter.t
+          # TEST 92 coalescing gap this closes.
+          python3 ci/tools/test_sub_filter_cctx_reset.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19112 --backend-port 19113
           python3 ci/tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 19093
           python3 ci/tools/test_window_cap.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19104 --backend-port 19105
