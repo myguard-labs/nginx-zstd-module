@@ -514,8 +514,15 @@ jobs:
           CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
           echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
       - name: flawfinder
+        # Threshold mirrors ci/linter/lint-c.sh and security-scanners.yml
+        # exactly: gate at >=4. --error-level is what makes flawfinder itself
+        # exit non-zero; --minlevel alone only controls what gets PRINTED, so
+        # the previous bare --minlevel=1 could never fail this step regardless
+        # of what it found. Move a threshold here, move it in lint-c.sh and
+        # security-scanners.yml in the SAME commit.
         run: |
-          flawfinder --minlevel=1 \
+          set -o pipefail
+          flawfinder --minlevel=4 --error-level=4 \
             "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
             "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c" 2>&1 | tee flawfinder.log
       - name: clang-tidy (cert-*, security.*)
@@ -537,9 +544,19 @@ jobs:
           done
           exit "$status"
       - name: semgrep
+        # Same target and threshold as ci/linter/lint-c.sh and
+        # security-scanners.yml: src/ is the module's real source directory --
+        # filter/ and static/ are the pre-skeleton layout this job was still
+        # pointed at, so the scan matched no files at all. Gate >=WARNING, and
+        # --jobs=1 --metrics=off (--jobs=1 is a CORRECTNESS flag on this host's
+        # shared RLIMIT_MEMLOCK, not a speed one). The dropped `|| true` meant
+        # this step could never fail on a real finding.
         run: |
+          set -o pipefail
           semgrep scan --config p/c --config p/security-audit \
-            "$GITHUB_WORKSPACE/filter/" "$GITHUB_WORKSPACE/static/" 2>&1 | tee semgrep.log || true
+            --severity=WARNING --severity=ERROR --error \
+            --jobs=1 --metrics=off \
+            "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
