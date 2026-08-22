@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../../ngx_http_zstd_sha256.h"
+#include "../../src/ngx_http_zstd_sha256.h"
 
 static int failures = 0;
 

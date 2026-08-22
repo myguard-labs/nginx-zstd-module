@@ -132,7 +132,7 @@ repos:
         name: flawfinder (gate on >=4)
         entry: flawfinder --minlevel=4 --error-level=4 --quiet
         language: system
-        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|ci/tools/.*\.[ch])$'
+        files: '^(src/.*\.[ch]|ci/tools/.*\.[ch])$'
         pass_filenames: true
 
       # Mirrors the CI "semgrep (gate on >=WARNING)" step, same configs and
@@ -166,7 +166,7 @@ repos:
         entry: semgrep scan --jobs=1 --config p/c --config p/security-audit
                --severity=WARNING --severity=ERROR --error
         language: system
-        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|ci/tools/.*\.[ch])$'
+        files: '^(src/.*\.[ch]|ci/tools/.*\.[ch])$'
         pass_filenames: true
         require_serial: true
 
@@ -194,7 +194,7 @@ repos:
                --suppress=normalCheckLevelMaxBranches --suppress=unusedFunction
                --suppress=unusedStructMember -I filter -I static -I tools -DNGX_PTR_SIZE=8
         language: system
-        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|ci/tools/.*\.[ch])$'
+        files: '^(src/.*\.[ch]|ci/tools/.*\.[ch])$'
         pass_filenames: true
 
       # Structural sink sweep: this superrepo's own c-* / nginx-* rules plus
@@ -235,7 +235,7 @@ repos:
                --error=c-format-string
                --error=c-shell-exec
         language: system
-        files: '^([^/]+\.[ch]|filter/.*\.[ch]|static/.*\.[ch]|ci/tools/.*\.[ch])$'
+        files: '^(src/.*\.[ch]|ci/tools/.*\.[ch])$'
         pass_filenames: true
 
       # Python is the runtime TEST HARNESS in these repos, so it carries the

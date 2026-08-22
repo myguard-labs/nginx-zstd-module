@@ -15,7 +15,7 @@
 #include <unistd.h>   /* pread(2) for the magic-number probe */
 #endif
 
-#include "../ngx_http_zstd_common.h"
+#include "ngx_http_zstd_common.h"
 
 
 #define NGX_HTTP_ZSTD_STATIC_OFF        0

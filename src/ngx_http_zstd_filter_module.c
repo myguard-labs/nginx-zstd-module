@@ -12,8 +12,8 @@
 
 #include <limits.h>  /* INT_MAX — config-load bound on (int)-narrowed sizes */
 
-#include "../ngx_http_zstd_common.h"
-#include "../ngx_http_zstd_sha256.h"
+#include "ngx_http_zstd_common.h"
+#include "ngx_http_zstd_sha256.h"
 
 
 /*

@@ -7,10 +7,15 @@ _ngx_zstd_root=$ngx_addon_dir
 # a libzstd DT_NEEDED onto every other dynamic module (see auto/zstd).
 . $_ngx_zstd_root/auto/zstd
 
-ngx_addon_dir=$_ngx_zstd_root/filter
+# ngx_addon_dir points at src/, not at the directory holding the config:
+# every module .c and .h lives in src/ since the ci/ adoption, while the two
+# per-module config fragments stay in filter/ and static/ so each module
+# keeps its own declaration file. The fragments resolve their sources
+# against ngx_addon_dir, so they need no ../ climb.
+ngx_addon_dir=$_ngx_zstd_root/src
 . $_ngx_zstd_root/filter/config
 
-ngx_addon_dir=$_ngx_zstd_root/static
+ngx_addon_dir=$_ngx_zstd_root/src
 . $_ngx_zstd_root/static/config
 
 ngx_addon_dir=$_ngx_zstd_root

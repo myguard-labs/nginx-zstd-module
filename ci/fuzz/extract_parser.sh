@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Slice the verbatim bodies of the Accept-Encoding parser out of the
-# shipped ../ngx_http_zstd_common.h into generated_parser.inc. That is
+# shipped ../../src/ngx_http_zstd_common.h into generated_parser.inc. That is
 # both ngx_http_zstd_eval_qvalue() (the qvalue evaluator) and its caller
 # ngx_http_zstd_accept_encoding(), in definition order so the .inc
 # compiles standalone.
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HEADER="$FUZZ_DIR/../../ngx_http_zstd_common.h"
+HEADER="$FUZZ_DIR/../../src/ngx_http_zstd_common.h"
 OUT="$FUZZ_DIR/generated_parser.inc"
 
 if [ ! -f "$HEADER" ]; then

@@ -210,8 +210,8 @@ jobs:
             --error-exitcode=1 \
             --suppress=missingIncludeSystem \
             --suppressions-list="$GITHUB_WORKSPACE/ci/tools/cppcheck-suppressions.txt" \
-            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c" \
             2>&1 | tee cppcheck.log
           echo "✓ cppcheck complete (no gated findings)"
 
@@ -231,8 +231,8 @@ jobs:
           # shellcheck disable=SC2086
           scan-build --status-bugs \
             gcc -c $INCLUDE_FLAGS \
-            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c" \
             2>&1 | tee clang-scan.log
           rm -f ngx_http_zstd_filter_module.o ngx_http_zstd_static_module.o
 
@@ -401,8 +401,8 @@ jobs:
           NGINX_CFLAGS=$(awk '/^CFLAGS[[:space:]]*=/{sub(/^CFLAGS[[:space:]]*=[[:space:]]*/,""); print; exit}' objs/Makefile)
           ALL_INCS=$(awk '/^ALL_INCS[[:space:]]*=/{found=1} found{line=$0; sub(/^ALL_INCS[[:space:]]*=[[:space:]]*/,"",line); gsub(/\\$/, "", line); printf "%s ", line; if (!/\\$/) exit}' objs/Makefile)
           for src in \
-            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c"; do
             echo "--- strict compile: $(basename "$src") ---"
             # NGINX_CFLAGS and ALL_INCS are flag lists that MUST word-split
             # into individual gcc arguments.

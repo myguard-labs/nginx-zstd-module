@@ -1,7 +1,7 @@
 # Fuzzing
 
 Coverage-guided fuzzing of the RFC 7231 Accept-Encoding / q-value parser
-in [`../ngx_http_zstd_common.h`](../ngx_http_zstd_common.h): the entry
+in [`../../src/ngx_http_zstd_common.h`](../../src/ngx_http_zstd_common.h): the entry
 point `ngx_http_zstd_accept_encoding()` and the `ngx_http_zstd_eval_qvalue()`
 helper it calls. Both are sliced into the fuzz target together.
 

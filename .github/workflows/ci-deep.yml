@@ -399,8 +399,8 @@ jobs:
       - name: flawfinder
         run: |
           flawfinder --minlevel=1 \
-            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c" 2>&1 | tee flawfinder.log
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c" 2>&1 | tee flawfinder.log
       - name: clang-tidy (cert-*, security.*)
         run: |
           set -euo pipefail
@@ -409,8 +409,8 @@ jobs:
             -I$N/src/os/unix -I$N/objs -I$N/src/http -I$N/src/http/modules -I$N/src/http/v2 -I/usr/include"
           status=0
           for f in \
-            "$GITHUB_WORKSPACE/filter/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/static/ngx_http_zstd_static_module.c"; do
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c"; do
             # shellcheck disable=SC2086,SC2046
             clang-tidy "$f" \
               --checks='-*,cert-*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
