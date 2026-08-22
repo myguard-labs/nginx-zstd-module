@@ -143,12 +143,20 @@ fi
 # stamp a changed src/ silently reuses the old objects and CI reports on a binary
 # that no longer matches the tree. The Actions cache does not save us: a cache
 # MISS still finds the retained local directory.
+# Every command here must succeed even when its input is absent. A bare
+# `[ -f x ] && cat x` as the LAST command of the group makes the whole
+# substitution exit non-zero when x is missing, and `set -e` then kills the
+# build before it has downloaded anything -- which reads as "rejected" to any
+# caller checking only the exit status.
 STAMP_INPUTS="$(
     {
         cat "${BASH_SOURCE[0]}"
-        [ -f "$ZSTD_MODULE_DIR/config" ] && cat "$ZSTD_MODULE_DIR/config"
+        if [ -f "$ZSTD_MODULE_DIR/config" ]; then
+            cat "$ZSTD_MODULE_DIR/config"
+        fi
         find "$ZSTD_MODULE_DIR/src" -type f \( -name '*.c' -o -name '*.h' \) \
             -print0 2>/dev/null | sort -z | xargs -0 -r cat
+        :
     } | sha256sum | cut -d" " -f1
 )"
 STAMP_FILE="$SRCDIR/.myguard-build-inputs"
