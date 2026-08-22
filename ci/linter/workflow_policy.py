@@ -114,9 +114,7 @@ SELF_HOSTED_ALLOWED = True
 # "builder-latest".
 #
 # macos-* is listed for completeness; no workflow here uses it today.
-HOSTED = re.compile(
-    r"(?:ubuntu|windows|macos)-(?:latest|[0-9]+(?:\.[0-9]+)?)(?:-arm)?"
-)
+HOSTED = re.compile(r"(?:ubuntu|windows|macos)-(?:latest|[0-9]+(?:\.[0-9]+)?)(?:-arm)?")
 
 # The runtime driver. A job that starts it is a "runtime-bearing" job and owes
 # the port-band declaration checked below.

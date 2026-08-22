@@ -18,7 +18,9 @@ class DetectPackageLayoutTests(unittest.TestCase):
         (modules_dir / "ngx_http_zstd_filter_module.so").write_text("")
         (modules_dir / "ngx_http_zstd_static_module.so").write_text("")
 
-        snippet = root / "usr" / "share" / flavor / "modules-available" / "mod-http-zstd.conf"
+        snippet = (
+            root / "usr" / "share" / flavor / "modules-available" / "mod-http-zstd.conf"
+        )
         snippet.parent.mkdir(parents=True)
         snippet.write_text(
             # FLY002 suppressed below: a list of load_module lines reads better than an

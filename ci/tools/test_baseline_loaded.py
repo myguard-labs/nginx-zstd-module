@@ -34,6 +34,7 @@ request instead of directly.
 Requires an nginx binary built --add-module (static) with the zstd
 filter module, plus the `zstd` CLI for the magic-byte / decode check.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,13 +49,14 @@ import threading
 import time
 import urllib.request
 
-BODY = b"BASELINE." * 4096   # 36KB, well above zstd_min_length, compressible
+BODY = b"BASELINE." * 4096  # 36KB, well above zstd_min_length, compressible
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Baseline: module loaded and blocking (PR2 step 22).")
+        description="Baseline: module loaded and blocking (PR2 step 22)."
+    )
     p.add_argument("--nginx-binary", required=True)
     p.add_argument("--zstd-bin", default="zstd")
     p.add_argument("--port", type=int, default=18110)
@@ -99,8 +101,9 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
     raise RuntimeError(f"nothing listening on 127.0.0.1:{port}")
 
 
-def run_one(nginx: pathlib.Path, port: int, backend_port: int,
-            zstd_directive: str) -> tuple[bool, bytes]:
+def run_one(
+    nginx: pathlib.Path, port: int, backend_port: int, zstd_directive: str
+) -> tuple[bool, bytes]:
     """Start nginx with (or without) the zstd directive, fetch once,
     return (is_zstd_encoded, raw_body)."""
     with tempfile.TemporaryDirectory(prefix="zstd-baseline-") as td:
@@ -109,7 +112,8 @@ def run_one(nginx: pathlib.Path, port: int, backend_port: int,
         logs.mkdir()
         pid_file = root / "nginx.pid"
         conf = root / "nginx.conf"
-        conf.write_text(f"""master_process off;
+        conf.write_text(
+            f"""master_process off;
 error_log {logs}/error.log warn;
 pid {pid_file};
 events {{ worker_connections 32; }}
@@ -124,17 +128,21 @@ http {{
         }}
     }}
 }}
-""", encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
 
         proc = subprocess.Popen(
-            [str(nginx), "-p", str(root), "-c", str(conf),
-             "-g", "daemon off;"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            [str(nginx), "-p", str(root), "-c", str(conf), "-g", "daemon off;"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
         try:
             wait_port(port)
             req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/",
-                headers={"Accept-Encoding": "zstd"})
+                f"http://127.0.0.1:{port}/", headers={"Accept-Encoding": "zstd"}
+            )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 ce = (resp.headers.get("Content-Encoding") or "").lower()
                 blob = resp.read()
@@ -162,18 +170,31 @@ def main() -> int:
 
         # Case 1: zstd explicitly enabled -> must compress.
         on_zstd, on_body = run_one(
-            nginx, args.port, args.backend_port,
-            "zstd on; zstd_comp_level 3; zstd_min_length 1;")
+            nginx,
+            args.port,
+            args.backend_port,
+            "zstd on; zstd_comp_level 3; zstd_min_length 1;",
+        )
         if not on_zstd:
-            print("FAIL baseline: 'zstd on;' did not produce a "
-                  "zstd-encoded response -- the module is not blocking "
-                  "as expected", file=sys.stderr)
+            print(
+                "FAIL baseline: 'zstd on;' did not produce a "
+                "zstd-encoded response -- the module is not blocking "
+                "as expected",
+                file=sys.stderr,
+            )
             return 1
-        r = subprocess.run([args.zstd_bin, "-dq", "-c"], input=on_body,
-                            capture_output=True, check=False)
+        r = subprocess.run(
+            [args.zstd_bin, "-dq", "-c"],
+            input=on_body,
+            capture_output=True,
+            check=False,
+        )
         if r.returncode != 0 or r.stdout != BODY:
-            print("FAIL baseline: 'zstd on;' response does not decode "
-                  "byte-exact to the origin body", file=sys.stderr)
+            print(
+                "FAIL baseline: 'zstd on;' response does not decode "
+                "byte-exact to the origin body",
+                file=sys.stderr,
+            )
             return 1
         print("ok   'zstd on;' compresses and decodes byte-exact")
 
@@ -189,20 +210,27 @@ def main() -> int:
         # the check would pass even if `enable`'s default were flipped.
         # (Caught exactly this way during the mutation pass, see
         # ci/adoption-findings.md.)
-        off_zstd, off_body = run_one(
-            nginx, args.off_port, args.backend_port, "")
+        off_zstd, off_body = run_one(nginx, args.off_port, args.backend_port, "")
         if off_zstd:
-            print("FAIL baseline: response was zstd-encoded with NO "
-                  "zstd directive present -- compiled-in default is not "
-                  "OFF", file=sys.stderr)
+            print(
+                "FAIL baseline: response was zstd-encoded with NO "
+                "zstd directive present -- compiled-in default is not "
+                "OFF",
+                file=sys.stderr,
+            )
             return 1
         if off_body != BODY:
-            print("FAIL baseline: undirected response body does not "
-                  "match origin (proxy path itself broken, unrelated to "
-                  "zstd)", file=sys.stderr)
+            print(
+                "FAIL baseline: undirected response body does not "
+                "match origin (proxy path itself broken, unrelated to "
+                "zstd)",
+                file=sys.stderr,
+            )
             return 1
-        print("ok   no zstd directive -> compiled-in default is OFF, "
-              "origin body served unmodified")
+        print(
+            "ok   no zstd directive -> compiled-in default is OFF, "
+            "origin body served unmodified"
+        )
 
         print("\n2/2 checks passed")
         return 0

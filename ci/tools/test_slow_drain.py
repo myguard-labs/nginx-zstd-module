@@ -38,6 +38,7 @@ Requires an nginx binary built ``--with-debug`` (the witnesses are
 ngx_log_debug lines) with the zstd filter module, plus the ``zstd``
 CLI for decoding.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -67,34 +68,45 @@ FLUSH_WITNESS = "content-less flush completed"
 def parse_args() -> argparse.Namespace:
     """Parse the CLI arguments (binary, module path, ports, zstd CLI)."""
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--nginx-binary", required=True,
-                   help="nginx (or angie) binary to launch.")
-    p.add_argument("--filter-module",
-                   help="Path to ngx_http_zstd_filter_module.so "
-                        "(auto-detected next to the binary if omitted).")
-    p.add_argument("--zstd-bin", default="zstd",
-                   help="zstd CLI used for decompression.")
-    p.add_argument("--port", type=int, default=18095,
-                   help="Front-end nginx port.")
-    p.add_argument("--backend-port", type=int, default=18096,
-                   help="Mock slow-headers upstream port.")
-    p.add_argument("--log-level", choices=("debug", "warn"),
-                   default="debug",
-                   help="Location error_log level. Witnesses are only "
-                        "asserted at debug. Use warn under sanitizer "
-                        "builds: UBSAN (-fno-sanitize-recover) fatally "
-                        "traps nginx core's own debug logging — every "
-                        "\"%%V?%%V\" line passes r->args={0,NULL} into "
-                        "ngx_sprintf_str's nonnull argument on "
-                        "query-less URIs (ngx_string.c:586) — so a "
-                        "sanitized nginx cannot log at debug at all. "
-                        "The forced paths still run; only their log "
-                        "proof is skipped.")
+    p.add_argument(
+        "--nginx-binary", required=True, help="nginx (or angie) binary to launch."
+    )
+    p.add_argument(
+        "--filter-module",
+        help="Path to ngx_http_zstd_filter_module.so "
+        "(auto-detected next to the binary if omitted).",
+    )
+    p.add_argument(
+        "--zstd-bin", default="zstd", help="zstd CLI used for decompression."
+    )
+    p.add_argument("--port", type=int, default=18095, help="Front-end nginx port.")
+    p.add_argument(
+        "--backend-port",
+        type=int,
+        default=18096,
+        help="Mock slow-headers upstream port.",
+    )
+    p.add_argument(
+        "--log-level",
+        choices=("debug", "warn"),
+        default="debug",
+        help="Location error_log level. Witnesses are only "
+        "asserted at debug. Use warn under sanitizer "
+        "builds: UBSAN (-fno-sanitize-recover) fatally "
+        "traps nginx core's own debug logging — every "
+        '"%%V?%%V" line passes r->args={0,NULL} into '
+        "ngx_sprintf_str's nonnull argument on "
+        "query-less URIs (ngx_string.c:586) — so a "
+        "sanitized nginx cannot log at debug at all. "
+        "The forced paths still run; only their log "
+        "proof is skipped.",
+    )
     return p.parse_args()
 
 
-def detect_module(explicit: str | None, nginx: pathlib.Path,
-                  name: str) -> pathlib.Path | None:
+def detect_module(
+    explicit: str | None, nginx: pathlib.Path, name: str
+) -> pathlib.Path | None:
     """Resolve a dynamic-module .so: explicit path, or beside the binary."""
     if explicit:
         return pathlib.Path(explicit)
@@ -154,9 +166,11 @@ class SlowHeaderBackend(threading.Thread):
                     if not piece:
                         break
                     buf += piece
-                conn.sendall(b"HTTP/1.1 200 OK\r\n"
-                             b"Content-Type: application/octet-stream\r\n"
-                             b"Connection: close\r\n\r\n")
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/octet-stream\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
                 time.sleep(HEADER_BODY_GAP)
                 half = len(self.body) // 2
                 conn.sendall(self.body[:half])
@@ -172,8 +186,7 @@ class SlowHeaderBackend(threading.Thread):
         self.srv.close()
 
 
-def http_get(port: int, path: str, slow: bool,
-             timeout: float = 120.0) -> bytes:
+def http_get(port: int, path: str, slow: bool, timeout: float = 120.0) -> bytes:
     """GET path expecting Content-Encoding: zstd; slow=True throttles
     reads through a small SO_RCVBUF to create real backpressure."""
     s = socket.create_connection(("127.0.0.1", port), timeout)
@@ -183,8 +196,7 @@ def http_get(port: int, path: str, slow: bool,
         # compressed response client-side and nginx never feels the
         # backpressure this test exists to create.
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16384)
-    req = (f"GET {path} HTTP/1.0\r\n"
-           f"Host: t\r\nAccept-Encoding: zstd\r\n\r\n")
+    req = f"GET {path} HTTP/1.0\r\nHost: t\r\nAccept-Encoding: zstd\r\n\r\n"
     s.sendall(req.encode("latin1"))
     raw = b""
     while True:
@@ -199,14 +211,15 @@ def http_get(port: int, path: str, slow: bool,
     headers = head.decode("latin1", "replace")
     status = headers.splitlines()[0] if headers else "<no response>"
     if " 200 " not in f"{status} ":
-        raise RuntimeError(f"{path}: expected 200, got {status!r} "
-                           f"({len(body)}B body)")
+        raise RuntimeError(f"{path}: expected 200, got {status!r} ({len(body)}B body)")
     m = re.search(r"(?im)^content-encoding:\s*(\S+)", headers)
     got = m.group(1) if m else None
     if got != "zstd":
-        raise RuntimeError(f"{path}: Content-Encoding {got!r}, "
-                           f"wanted 'zstd' (status {status!r}, "
-                           f"{len(body)}B body)")
+        raise RuntimeError(
+            f"{path}: Content-Encoding {got!r}, "
+            f"wanted 'zstd' (status {status!r}, "
+            f"{len(body)}B body)"
+        )
     return body
 
 
@@ -221,21 +234,29 @@ def main() -> int:
     if "zstd" not in v.stderr:
         raise RuntimeError("nginx -V shows no zstd module")
     if "--with-debug" not in v.stderr:
-        raise RuntimeError("the witnesses are ngx_log_debug lines: "
-                           "this tool needs an nginx built --with-debug")
+        raise RuntimeError(
+            "the witnesses are ngx_log_debug lines: "
+            "this tool needs an nginx built --with-debug"
+        )
 
-    filter_so = detect_module(args.filter_module, nginx,
-                              "ngx_http_zstd_filter_module.so")
+    filter_so = detect_module(
+        args.filter_module, nginx, "ngx_http_zstd_filter_module.so"
+    )
     load = f"load_module {filter_so};\n" if filter_so else ""
 
     def decode(blob: bytes) -> bytes:
         """Decompress with the zstd CLI; a nonzero exit means truncation."""
-        r = subprocess.run([args.zstd_bin, "-d", "-q", "-c"], input=blob,
-                           capture_output=True, check=False)
+        r = subprocess.run(
+            [args.zstd_bin, "-d", "-q", "-c"],
+            input=blob,
+            capture_output=True,
+            check=False,
+        )
         if r.returncode != 0:
             raise RuntimeError(
                 "zstd decode failed (truncated/corrupt stream): "
-                + r.stderr.decode("utf-8", "replace").strip())
+                + r.stderr.decode("utf-8", "replace").strip()
+            )
         return r.stdout
 
     drain_body = fixture_bytes(DRAIN_SIZE)
@@ -266,7 +287,8 @@ def main() -> int:
         # regardless of log level; the roundtrip oracles keep gating.
         lvl = args.log_level
         conf = root / "nginx.conf"
-        conf.write_text(f"""worker_processes 1;
+        conf.write_text(
+            f"""worker_processes 1;
 {load}error_log {root}/logs/error.log warn;
 pid {root}/nginx.pid;
 events {{ worker_connections 64; }}
@@ -291,7 +313,9 @@ http {{
         }}
     }}
 }}
-""", encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
 
         # nginx's own stdout/stderr to a file, not a PIPE: nothing
         # drains a pipe here (deadlock risk on a chatty ASan abort),
@@ -302,9 +326,19 @@ http {{
         # while nginx is still writing.
         nlog = open(nlog_path, "w", encoding="utf-8")  # noqa: SIM115
         proc = subprocess.Popen(
-            [str(nginx), "-p", str(root), "-c", str(conf),
-             "-g", "daemon off; master_process off;"],
-            stdout=nlog, stderr=subprocess.STDOUT, text=True)
+            [
+                str(nginx),
+                "-p",
+                str(root),
+                "-c",
+                str(conf),
+                "-g",
+                "daemon off; master_process off;",
+            ],
+            stdout=nlog,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
 
         def alive_or_die(when: str) -> None:
             """Fail with nginx's captured output if the process exited —
@@ -314,8 +348,8 @@ http {{
                 nlog.flush()
                 tail = nlog_path.read_text("utf-8", "replace")[-2000:]
                 raise RuntimeError(
-                    f"nginx exited (rc={proc.returncode}) {when}; "
-                    f"output tail:\n{tail}")
+                    f"nginx exited (rc={proc.returncode}) {when}; output tail:\n{tail}"
+                )
 
         try:
             wait_port(args.port)
@@ -333,10 +367,13 @@ http {{
                     failures.append(
                         f"slow-drain: decoded {len(plain)}B, expected "
                         f"{len(drain_body)}B — the pause/resume seams "
-                        f"corrupted or truncated the stream")
+                        f"corrupted or truncated the stream"
+                    )
                 else:
-                    print(f"  slow-drain: {len(body)}B compressed drained "
-                          f"in {took:.1f}s, decoded byte-exact")
+                    print(
+                        f"  slow-drain: {len(body)}B compressed drained "
+                        f"in {took:.1f}s, decoded byte-exact"
+                    )
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"slow-drain: {exc}")
 
@@ -356,15 +393,18 @@ http {{
                     failures.append(f"proxy #{i}: {exc}")
                     break
             if ok:
-                print(f"  proxy: {ok}/{PROXY_REPEAT} unbuffered responses "
-                      f"decoded byte-exact")
+                print(
+                    f"  proxy: {ok}/{PROXY_REPEAT} unbuffered responses "
+                    f"decoded byte-exact"
+                )
 
-            elog = (root / "logs" / "error.log").read_text(
-                "utf-8", "replace")
+            elog = (root / "logs" / "error.log").read_text("utf-8", "replace")
             if args.log_level != "debug":
-                print("  witnesses skipped (--log-level warn: sanitizer "
-                      "builds cannot log at debug — paths still forced, "
-                      "roundtrips still gate)")
+                print(
+                    "  witnesses skipped (--log-level warn: sanitizer "
+                    "builds cannot log at debug — paths still forced, "
+                    "roundtrips still gate)"
+                )
             # The upstream FLUSH special is unconditional per response,
             # so every successful proxied request owes one content-less
             # completion — a lower bound, not an exact pin, because
@@ -376,7 +416,8 @@ http {{
             if args.log_level == "debug":
                 witness_floors = (
                     (NOMEM_WITNESS, "buffer-cap/nomem", 1),
-                    (FLUSH_WITNESS, "content-less flush", PROXY_REPEAT))
+                    (FLUSH_WITNESS, "content-less flush", PROXY_REPEAT),
+                )
             for witness, path_name, floor in witness_floors:
                 n = elog.count(witness)
                 if n < floor:
@@ -384,7 +425,8 @@ http {{
                         f"witness short: {witness!r} x{n}, expected at "
                         f"least x{floor} — the {path_name} path did not "
                         f"run as forced (geometry drift, or the "
-                        f"filter's debug lines changed)")
+                        f"filter's debug lines changed)"
+                    )
                 else:
                     print(f"  witness: {witness!r} x{n}")
 
@@ -396,18 +438,25 @@ http {{
                 # evidence with the verdict.
                 nlog.flush()
                 sys.stderr.write("--- nginx stdout/stderr tail:\n")
-                sys.stderr.write(
-                    nlog_path.read_text("utf-8", "replace")[-2000:] + "\n")
+                sys.stderr.write(nlog_path.read_text("utf-8", "replace")[-2000:] + "\n")
                 sys.stderr.write("--- error.log tail (non-debug):\n")
-                sys.stderr.write("\n".join(
-                    ln for ln in elog.splitlines()
-                    if "[debug]" not in ln)[-3000:] + "\n")
+                sys.stderr.write(
+                    "\n".join(ln for ln in elog.splitlines() if "[debug]" not in ln)[
+                        -3000:
+                    ]
+                    + "\n"
+                )
                 return 1
 
-            proof = ("witnessed" if args.log_level == "debug"
-                     else "roundtripped (witnesses skipped)")
-            print(f"OK: forced backpressure and data-less flushes both "
-                  f"{proof}, streams byte-exact")
+            proof = (
+                "witnessed"
+                if args.log_level == "debug"
+                else "roundtripped (witnesses skipped)"
+            )
+            print(
+                f"OK: forced backpressure and data-less flushes both "
+                f"{proof}, streams byte-exact"
+            )
             return 0
         finally:
             proc.terminate()

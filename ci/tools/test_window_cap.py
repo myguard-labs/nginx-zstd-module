@@ -61,10 +61,11 @@ def make_payload() -> bytes:
     out = bytearray()
     i = 0
     while len(out) < BODY_SIZE:
-        out += (b'{"record":%08d,"name":"window-cap-effect-test",'
-                b'"path":"/var/lib/example/data/%04d/blob.bin",'
-                b'"flags":["a","b","c"],"pad":"%s"}\n'
-                % (i, i % 1000, b"x" * (i % 37)))
+        out += (
+            b'{"record":%08d,"name":"window-cap-effect-test",'
+            b'"path":"/var/lib/example/data/%04d/blob.bin",'
+            b'"flags":["a","b","c"],"pad":"%s"}\n' % (i, i % 1000, b"x" * (i % 37))
+        )
         i += 1
     return bytes(out[:BODY_SIZE])
 
@@ -76,15 +77,25 @@ def train_dict(zstd_bin: str, work: pathlib.Path) -> pathlib.Path:
     payload = make_payload()
     n, step = 64, len(make_payload()) // 64
     for k in range(n):
-        (samples / f"s{k:03d}").write_bytes(payload[k * step:(k + 1) * step])
+        (samples / f"s{k:03d}").write_bytes(payload[k * step : (k + 1) * step])
     dict_path = work / "test.dict"
     r = subprocess.run(
-        [zstd_bin, "--train", *sorted(str(f) for f in samples.iterdir()),
-         "-o", str(dict_path), "--maxdict=16384", "-q"],
-        capture_output=True, check=False)
+        [
+            zstd_bin,
+            "--train",
+            *sorted(str(f) for f in samples.iterdir()),
+            "-o",
+            str(dict_path),
+            "--maxdict=16384",
+            "-q",
+        ],
+        capture_output=True,
+        check=False,
+    )
     if r.returncode != 0 or not dict_path.exists():
-        raise RuntimeError("zstd --train failed: "
-                           + r.stderr.decode("utf-8", "replace"))
+        raise RuntimeError(
+            "zstd --train failed: " + r.stderr.decode("utf-8", "replace")
+        )
     raw = dict_path.read_bytes()
     if raw[:4] != DICT_MAGIC:
         raise RuntimeError("trained dict lacks dictionary magic")
@@ -111,7 +122,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         mv = memoryview(self.payload)
         for i in range(0, len(mv), 16384):
-            c = bytes(mv[i:i + 16384])
+            c = bytes(mv[i : i + 16384])
             self.wfile.write(b"%X\r\n" % len(c) + c + b"\r\n")
         self.wfile.write(b"0\r\n\r\n")
 
@@ -135,8 +146,10 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
 def parse_frame_header(blob: bytes):
     """Return (single_segment, window_size_or_None, dict_id_or_0)."""
     if len(blob) < 10:
-        raise RuntimeError(f"truncated response: {len(blob)} bytes is too "
-                           "short for a zstd frame header")
+        raise RuntimeError(
+            f"truncated response: {len(blob)} bytes is too "
+            "short for a zstd frame header"
+        )
     if blob[:4] != ZSTD_MAGIC:
         raise RuntimeError(f"no zstd magic (hex={blob[:8].hex()})")
     fhd = blob[4]
@@ -151,17 +164,21 @@ def parse_frame_header(blob: bytes):
         base = 1 << (10 + exp)
         window = base + (base // 8) * mantissa
     did_size = (0, 1, 2, 4)[did_flag]
-    did = int.from_bytes(blob[pos:pos + did_size], "little") if did_size else 0
+    did = int.from_bytes(blob[pos : pos + did_size], "little") if did_size else 0
     return single_segment, window, did
 
 
 def main() -> int:
     args = parse_args()
     nginx = pathlib.Path(args.nginx_binary).resolve()
-    mods = [m for m in (
-        detect(args.filter_module, nginx, "ngx_http_zstd_filter_module.so"),
-        detect(args.static_module, nginx, "ngx_http_zstd_static_module.so"),
-    ) if m]
+    mods = [
+        m
+        for m in (
+            detect(args.filter_module, nginx, "ngx_http_zstd_filter_module.so"),
+            detect(args.static_module, nginx, "ngx_http_zstd_static_module.so"),
+        )
+        if m
+    ]
 
     payload = make_payload()
     _Handler.payload = payload
@@ -190,7 +207,8 @@ def main() -> int:
 
         load = "".join(f"load_module {m};\n" for m in mods)
         conf = root / "nginx.conf"
-        conf.write_text(f"""{load}worker_processes 1;
+        conf.write_text(
+            f"""{load}worker_processes 1;
 error_log {logs}/error.log warn;
 pid {root}/nginx.pid;
 events {{ worker_connections 64; }}
@@ -215,22 +233,25 @@ http {{
         }}
     }}
 }}
-""", encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
 
         backend = _Srv(("127.0.0.1", args.backend_port), _Handler)
         threading.Thread(target=backend.serve_forever, daemon=True).start()
 
         proc = subprocess.Popen(
-            [str(nginx), "-p", str(root) + "/", "-c", str(conf),
-             "-g", "daemon off;"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            [str(nginx), "-p", str(root) + "/", "-c", str(conf), "-g", "daemon off;"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
         try:
             wait_port(args.port)
 
             req = urllib.request.Request(
                 f"http://127.0.0.1:{args.port}/blob",
-                headers={"Accept-Encoding": "zstd",
-                         "User-Agent": "zstd-wincap/1.0"})
+                headers={"Accept-Encoding": "zstd", "User-Agent": "zstd-wincap/1.0"},
+            )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 ce = (resp.headers.get("Content-Encoding") or "").lower()
                 if ce != "zstd":
@@ -242,36 +263,50 @@ http {{
             if single:
                 raise RuntimeError(
                     "frame is Single_Segment: no Window_Descriptor, the "
-                    "window equals the full content size — cap not applied")
+                    "window equals the full content size — cap not applied"
+                )
             cap = 1 << WINDOW_LOG
             if window > cap:
                 raise RuntimeError(
                     f"declared window {window} exceeds zstd_window_log "
-                    f"cap {cap} — directive ignored on the dict path")
+                    f"cap {cap} — directive ignored on the dict path"
+                )
             if did != did_expected:
                 raise RuntimeError(
                     f"frame dictID {did} != trained dict {did_expected} — "
-                    "CDict not engaged")
+                    "CDict not engaged"
+                )
 
             # Dictless decode must refuse (frame demands the dict) ...
-            r = subprocess.run([args.zstd_bin, "-dq", "-c"], input=blob,
-                               capture_output=True, check=False)
+            r = subprocess.run(
+                [args.zstd_bin, "-dq", "-c"],
+                input=blob,
+                capture_output=True,
+                check=False,
+            )
             if r.returncode == 0:
-                raise RuntimeError("decoded WITHOUT the dictionary — "
-                                   "dict not actually load-bearing")
+                raise RuntimeError(
+                    "decoded WITHOUT the dictionary — dict not actually load-bearing"
+                )
             # ... and dict-aware decode must round-trip byte-exact.
             r = subprocess.run(
                 [args.zstd_bin, "-dq", "-c", "-D", str(dict_path)],
-                input=blob, capture_output=True, check=False)
+                input=blob,
+                capture_output=True,
+                check=False,
+            )
             if r.returncode != 0:
-                raise RuntimeError("zstd -d -D failed: "
-                                   + r.stderr.decode("utf-8", "replace"))
+                raise RuntimeError(
+                    "zstd -d -D failed: " + r.stderr.decode("utf-8", "replace")
+                )
             if r.stdout != payload:
                 raise RuntimeError("dict decode not byte-exact")
 
-            print(f"✓ window {window} <= {cap} (log {WINDOW_LOG}), "
-                  f"dictID {did} engaged, {len(blob)} compressed bytes "
-                  f"round-trip {len(payload)} exactly")
+            print(
+                f"✓ window {window} <= {cap} (log {WINDOW_LOG}), "
+                f"dictID {did} engaged, {len(blob)} compressed bytes "
+                f"round-trip {len(payload)} exactly"
+            )
             return 0
         finally:
             proc.terminate()
@@ -285,7 +320,7 @@ http {{
                 proc.kill()
                 proc.wait(timeout=30)
             backend.shutdown()
-            err = (logs / "error.log")
+            err = logs / "error.log"
             if err.exists():
                 tail = err.read_text(errors="replace").strip()
                 if "[error]" in tail or "[crit]" in tail:

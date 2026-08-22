@@ -42,6 +42,7 @@ Rig discipline (same hard rules as the other regression tests):
 
 Self-contained: stdlib + the ``zstd`` CLI only.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -80,8 +81,8 @@ TOTAL = 2 * UNIQUE
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="zstd_long / windowLog directive regression "
-                    "(8edb7bb class).")
+        description="zstd_long / windowLog directive regression (8edb7bb class)."
+    )
     p.add_argument("--nginx-binary", required=True)
     p.add_argument("--filter-module")
     p.add_argument("--static-module")
@@ -139,7 +140,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         mv = memoryview(data)
         for i in range(0, len(mv), 16384):
-            c = bytes(mv[i:i + 16384])
+            c = bytes(mv[i : i + 16384])
             self.wfile.write(b"%X\r\n" % len(c) + c + b"\r\n")
         self.wfile.write(b"0\r\n\r\n")
 
@@ -164,32 +165,45 @@ def fetch(port: int, rid: int, zstd_bin: str) -> tuple[bytes, int]:
     """Return (decoded_body, compressed_size) or raise on any error."""
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/r/{rid}",
-        headers={"Accept-Encoding": "zstd",
-                 "User-Agent": "zstd-long/1.0"})
+        headers={"Accept-Encoding": "zstd", "User-Agent": "zstd-long/1.0"},
+    )
     with urllib.request.urlopen(req, timeout=30) as resp:
         if (resp.headers.get("Content-Encoding") or "").lower() != "zstd":
             raise RuntimeError(
                 f"rid={rid}: not zstd-encoded "
-                f"(C-E={resp.headers.get('Content-Encoding')!r})")
+                f"(C-E={resp.headers.get('Content-Encoding')!r})"
+            )
         blob = resp.read()
     if blob[:4] != b"\x28\xb5\x2f\xfd":
-        raise RuntimeError(f"rid={rid}: no zstd magic "
-                           f"(hex={blob[:8].hex()})")
-    r = subprocess.run([zstd_bin, "-dq", "-c"], input=blob,
-                       capture_output=True, check=False)
+        raise RuntimeError(f"rid={rid}: no zstd magic (hex={blob[:8].hex()})")
+    r = subprocess.run(
+        [zstd_bin, "-dq", "-c"], input=blob, capture_output=True, check=False
+    )
     if r.returncode != 0:
-        raise RuntimeError(f"rid={rid}: zstd -d failed (premature "
-                           f"end / corrupt): "
-                           + r.stderr.decode("utf-8", "replace"))
+        raise RuntimeError(
+            f"rid={rid}: zstd -d failed (premature "
+            f"end / corrupt): " + r.stderr.decode("utf-8", "replace")
+        )
     return r.stdout, len(blob)
 
 
-def run_server(nginx, conf, root, port, backend_port, zstd_bin,
-               rids: list[int]) -> dict[int, tuple[bytes, int]]:
+def run_server(
+    nginx, conf, root, port, backend_port, zstd_bin, rids: list[int]
+) -> dict[int, tuple[bytes, int]]:
     proc = subprocess.Popen(
-        [str(nginx), "-p", str(root), "-c", str(conf),
-         "-g", "daemon off; master_process off;"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        [
+            str(nginx),
+            "-p",
+            str(root),
+            "-c",
+            str(conf),
+            "-g",
+            "daemon off; master_process off;",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
     try:
         wait_port(port)
         return {rid: fetch(port, rid, zstd_bin) for rid in rids}
@@ -212,11 +226,14 @@ def main() -> int:
     nginx = pathlib.Path(args.nginx_binary)
     if not nginx.exists():
         raise FileNotFoundError(nginx)
-    mods = [m for m in (detect(args.filter_module, nginx,
-                               "ngx_http_zstd_filter_module.so"),
-                        detect(args.static_module, nginx,
-                               "ngx_http_zstd_static_module.so"))
-            if m]
+    mods = [
+        m
+        for m in (
+            detect(args.filter_module, nginx, "ngx_http_zstd_filter_module.so"),
+            detect(args.static_module, nginx, "ngx_http_zstd_static_module.so"),
+        )
+        if m
+    ]
 
     # Everything below must stay readable by the workers when run as
     # root (they drop to the compiled-in nginx user): a restrictive
@@ -233,17 +250,15 @@ def main() -> int:
         logs.mkdir()
 
         backend = _Srv(("127.0.0.1", args.backend_port), _Handler)
-        threading.Thread(target=backend.serve_forever,
-                         daemon=True).start()
+        threading.Thread(target=backend.serve_forever, daemon=True).start()
         try:
             wait_port(args.backend_port)
             for rid in (1, 2, 3):
                 raw = urllib.request.urlopen(
-                    f"http://127.0.0.1:{args.backend_port}/r/{rid}",
-                    timeout=10).read()
+                    f"http://127.0.0.1:{args.backend_port}/r/{rid}", timeout=10
+                ).read()
                 if raw != payload_for(rid):
-                    raise RuntimeError(
-                        f"backend self-check failed for rid={rid}")
+                    raise RuntimeError(f"backend self-check failed for rid={rid}")
             if len(payload_for(1)) != TOTAL:
                 raise RuntimeError("payload not the expected size")
 
@@ -278,18 +293,18 @@ http {{
             # Baseline: LDM off (default).
             off_conf = root / "off.conf"
             off_conf.write_text(conf_text(""), encoding="utf-8")
-            off = run_server(nginx, off_conf, root, args.port,
-                             args.backend_port, args.zstd_bin, rids)
+            off = run_server(
+                nginx, off_conf, root, args.port, args.backend_port, args.zstd_bin, rids
+            )
 
             # LDM on (directive under test, in isolation — no window
             # cap, so zstd's LDM default 2^27 window is what reaches
             # back the 8 MiB to the duplicate region).
             on_conf = root / "on.conf"
-            on_conf.write_text(
-                conf_text("    zstd_long on;\n"),
-                encoding="utf-8")
-            on = run_server(nginx, on_conf, root, args.port,
-                            args.backend_port, args.zstd_bin, rids)
+            on_conf.write_text(conf_text("    zstd_long on;\n"), encoding="utf-8")
+            on = run_server(
+                nginx, on_conf, root, args.port, args.backend_port, args.zstd_bin, rids
+            )
 
             failures: list[str] = []
             for rid in rids:
@@ -300,12 +315,14 @@ http {{
                 if off_body != want:
                     failures.append(
                         f"rid={rid}: LDM-off body mismatch "
-                        f"(got {len(off_body)}B want {len(want)}B)")
+                        f"(got {len(off_body)}B want {len(want)}B)"
+                    )
                 if on_body != want:
                     failures.append(
                         f"rid={rid}: LDM-on body mismatch "
                         f"(got {len(on_body)}B want {len(want)}B) — "
-                        f"directive corrupts/truncates the stream")
+                        f"directive corrupts/truncates the stream"
+                    )
                 # (2) LDM must actually engage. The duplicate region is
                 # only reachable via LDM's long-range window, so LDM-on
                 # must roughly halve the output vs LDM-off. Require a
@@ -317,23 +334,30 @@ http {{
                         f"rid={rid}: zstd_long had no/insufficient "
                         f"effect (on={on_sz}B vs off={off_sz}B; "
                         f"expected on <~ off/2) — directive is a "
-                        f"silent no-op (LDM never engaged)")
+                        f"silent no-op (LDM never engaged)"
+                    )
 
             # (3) error log clean across both runs.
             el = logs / "error.log"
-            logtext = (el.read_text("utf-8", "replace")
-                       if el.exists() else "")
-            bad = [ln for ln in logtext.splitlines()
-                   if ("[alert]" in ln or "[emerg]" in ln
-                       or "zero size buf in writer" in ln
-                       or "AddressSanitizer" in ln
-                       or "LeakSanitizer" in ln
-                       or "runtime error:" in ln)]
+            logtext = el.read_text("utf-8", "replace") if el.exists() else ""
+            bad = [
+                ln
+                for ln in logtext.splitlines()
+                if (
+                    "[alert]" in ln
+                    or "[emerg]" in ln
+                    or "zero size buf in writer" in ln
+                    or "AddressSanitizer" in ln
+                    or "LeakSanitizer" in ln
+                    or "runtime error:" in ln
+                )
+            ]
 
             if failures or bad:
                 sys.stderr.write(
                     f"ZSTD-LONG FAILED: {len(failures)} assertion "
-                    f"failures, {len(bad)} log issues:\n")
+                    f"failures, {len(bad)} log issues:\n"
+                )
                 for f in failures:
                     sys.stderr.write(f"  - {f}\n")
                 for b in bad[:10]:
@@ -341,13 +365,15 @@ http {{
                 return 1
 
             ratios = ", ".join(
-                f"rid={rid}: {off[rid][1]}->{on[rid][1]}B"
-                for rid in rids)
-            print(f"OK: zstd_long on decoded byte-exact on {len(rids)} "
-                  f"16MiB long-range-repetitive bodies AND compressed "
-                  f">=25% smaller than LDM-off (~2:1 as expected: "
-                  f"{ratios}) — directive reaches libzstd, engages, and "
-                  f"does not corrupt the stream; error log clean")
+                f"rid={rid}: {off[rid][1]}->{on[rid][1]}B" for rid in rids
+            )
+            print(
+                f"OK: zstd_long on decoded byte-exact on {len(rids)} "
+                f"16MiB long-range-repetitive bodies AND compressed "
+                f">=25% smaller than LDM-off (~2:1 as expected: "
+                f"{ratios}) — directive reaches libzstd, engages, and "
+                f"does not corrupt the stream; error log clean"
+            )
             return 0
         finally:
             backend.shutdown()

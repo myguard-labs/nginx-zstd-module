@@ -43,6 +43,7 @@ Hard test-rig discipline (learned the hard way during the bug-B hunt)
 Self-contained: stdlib + the ``zstd`` CLI only (no PHP-FPM/fcgiwrap),
 so it runs anywhere the rest of the Python suite does.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -68,32 +69,42 @@ SIZES = [1, 1024, 131071, 131072, 131073, 200000, 1048576]
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Regression test for the proxy_buffering-off zstd "
-            "truncation bug (bug B)."
+            "Regression test for the proxy_buffering-off zstd truncation bug (bug B)."
         )
     )
-    p.add_argument("--nginx-binary", required=True,
-                   help="nginx (or angie) binary to launch.")
-    p.add_argument("--filter-module",
-                   help="Path to ngx_http_zstd_filter_module.so "
-                        "(auto-detected next to the binary if omitted).")
-    p.add_argument("--static-module",
-                   help="Path to ngx_http_zstd_static_module.so "
-                        "(auto-detected next to the binary if omitted).")
-    p.add_argument("--zstd-bin", default="zstd",
-                   help="zstd CLI used for decompression.")
-    p.add_argument("--port", type=int, default=18086,
-                   help="Front-end nginx port.")
-    p.add_argument("--backend-port", type=int, default=18087,
-                   help="Mock chunked upstream port.")
-    p.add_argument("--repeat", type=int, default=5,
-                   help="Times to re-request each size (the bug is "
-                        "intermittent at the exact boundary).")
+    p.add_argument(
+        "--nginx-binary", required=True, help="nginx (or angie) binary to launch."
+    )
+    p.add_argument(
+        "--filter-module",
+        help="Path to ngx_http_zstd_filter_module.so "
+        "(auto-detected next to the binary if omitted).",
+    )
+    p.add_argument(
+        "--static-module",
+        help="Path to ngx_http_zstd_static_module.so "
+        "(auto-detected next to the binary if omitted).",
+    )
+    p.add_argument(
+        "--zstd-bin", default="zstd", help="zstd CLI used for decompression."
+    )
+    p.add_argument("--port", type=int, default=18086, help="Front-end nginx port.")
+    p.add_argument(
+        "--backend-port", type=int, default=18087, help="Mock chunked upstream port."
+    )
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=5,
+        help="Times to re-request each size (the bug is "
+        "intermittent at the exact boundary).",
+    )
     return p.parse_args()
 
 
-def detect_module(explicit: str | None, nginx: pathlib.Path,
-                   name: str) -> pathlib.Path | None:
+def detect_module(
+    explicit: str | None, nginx: pathlib.Path, name: str
+) -> pathlib.Path | None:
     if explicit:
         return pathlib.Path(explicit)
     sib = nginx.parent / name
@@ -127,13 +138,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         mv = memoryview(data)
         step = 16384
         for i in range(0, len(mv), step):
-            chunk = bytes(mv[i:i + step])
+            chunk = bytes(mv[i : i + step])
             self.wfile.write(b"%X\r\n" % len(chunk) + chunk + b"\r\n")
         self.wfile.write(b"0\r\n\r\n")
 
 
-class _ThreadingHTTPServer(socketserver.ThreadingMixIn,
-                           socketserver.TCPServer):
+class _ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     # Single-threaded server is OOM/stall-killed by the matrix and
     # yields mass false failures — must be threaded.
     allow_reuse_address = True
@@ -154,8 +164,7 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
 def http_get(port: int, path: str, timeout: float = 20.0) -> bytes:
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
-        headers={"Accept-Encoding": "zstd",
-                 "User-Agent": "zstd-bugb-regression/1.0"},
+        headers={"Accept-Encoding": "zstd", "User-Agent": "zstd-bugb-regression/1.0"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         if resp.headers.get("Content-Encoding", "").lower() != "zstd":
@@ -172,8 +181,9 @@ def zstd_decompress(zstd_bin: str, blob: bytes) -> bytes:
             f"missing zstd magic; first 16B hex={blob[:16].hex()} "
             f"(truncated/aborted response)"
         )
-    r = subprocess.run([zstd_bin, "-d", "-q", "-c"], input=blob,
-                       capture_output=True, check=False)
+    r = subprocess.run(
+        [zstd_bin, "-d", "-q", "-c"], input=blob, capture_output=True, check=False
+    )
     if r.returncode != 0:
         raise RuntimeError(
             "zstd -d failed (premature end / corrupt frame): "
@@ -188,10 +198,8 @@ def main() -> int:
     if not nginx.exists():
         raise FileNotFoundError(f"nginx binary not found: {nginx}")
 
-    filt = detect_module(args.filter_module, nginx,
-                         "ngx_http_zstd_filter_module.so")
-    stat = detect_module(args.static_module, nginx,
-                         "ngx_http_zstd_static_module.so")
+    filt = detect_module(args.filter_module, nginx, "ngx_http_zstd_filter_module.so")
+    stat = detect_module(args.static_module, nginx, "ngx_http_zstd_static_module.so")
     modules = [m for m in (filt, stat) if m is not None]
     for m in modules:
         if not m.exists():
@@ -225,8 +233,7 @@ def main() -> int:
             (fixtures / str(n)).write_bytes(bytes(buf))
 
         _Handler.fixture_dir = fixtures
-        backend = _ThreadingHTTPServer(("127.0.0.1", args.backend_port),
-                                       _Handler)
+        backend = _ThreadingHTTPServer(("127.0.0.1", args.backend_port), _Handler)
         bt = threading.Thread(target=backend.serve_forever, daemon=True)
         bt.start()
         try:
@@ -235,8 +242,8 @@ def main() -> int:
             # end-to-end result (rig-discipline rule).
             for n in (1, 131072, 1048576):
                 raw = urllib.request.urlopen(
-                    f"http://127.0.0.1:{args.backend_port}/b/{n}",
-                    timeout=10).read()
+                    f"http://127.0.0.1:{args.backend_port}/b/{n}", timeout=10
+                ).read()
                 if len(raw) != n:
                     raise RuntimeError(
                         f"backend self-check failed: /b/{n} returned "
@@ -275,9 +282,17 @@ http {{
             )
 
             proc = subprocess.Popen(
-                [str(nginx), "-p", str(root), "-c", str(conf),
-                 "-g", "daemon off; master_process off;"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                [
+                    str(nginx),
+                    "-p",
+                    str(root),
+                    "-c",
+                    str(conf),
+                    "-g",
+                    "daemon off; master_process off;",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
             )
             try:
@@ -306,16 +321,17 @@ http {{
 
                 if failures:
                     sys.stderr.write(
-                        "bug-B regression FAILED "
-                        f"({len(failures)} failing checks):\n"
+                        f"bug-B regression FAILED ({len(failures)} failing checks):\n"
                     )
                     for f in failures[:20]:
                         sys.stderr.write(f"  - {f}\n")
                     elog = logs / "error.log"
                     if elog.exists():
-                        zsb = [ln for ln in
-                               elog.read_text("utf-8", "replace").splitlines()
-                               if "zero size buf in writer" in ln]
+                        zsb = [
+                            ln
+                            for ln in elog.read_text("utf-8", "replace").splitlines()
+                            if "zero size buf in writer" in ln
+                        ]
                         if zsb:
                             sys.stderr.write(
                                 f"  nginx logged {len(zsb)} "

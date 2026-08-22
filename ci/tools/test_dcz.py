@@ -66,8 +66,7 @@ def parse_args() -> argparse.Namespace:
         "--fixture-lines",
         type=int,
         default=600,
-        help="Number of generated source lines shared between dictionary "
-        "and resource.",
+        help="Number of generated source lines shared between dictionary and resource.",
     )
     return parser.parse_args()
 
@@ -100,9 +99,7 @@ def wait_for_port(port: int, timeout: float = 10.0, stderr_file=None) -> None:
         text = stderr_file.read_text(errors="replace").strip()
         if text:
             detail = f"; nginx stderr:\n{text}"
-    raise RuntimeError(
-        f"nginx did not start listening on 127.0.0.1:{port}{detail}"
-    )
+    raise RuntimeError(f"nginx did not start listening on 127.0.0.1:{port}{detail}")
 
 
 def build_fixtures(root: pathlib.Path, lines: int) -> tuple[bytes, bytes]:
@@ -164,9 +161,7 @@ def fetch(port: int, headers: dict):
     repeated header lines — the module legitimately emits two Vary
     lines (Accept-Encoding via gzip_vary, Available-Dictionary its own),
     and a dict would silently keep only one of them."""
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/app.js", headers=headers
-    )
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/app.js", headers=headers)
     with urllib.request.urlopen(request, timeout=10) as response:
         return response.headers, response.read()
 
@@ -223,10 +218,12 @@ def main() -> int:
     modules = [
         m
         for m in (
-            detect_module(args.filter_module, nginx_path,
-                          "ngx_http_zstd_filter_module.so"),
-            detect_module(args.static_module, nginx_path,
-                          "ngx_http_zstd_static_module.so"),
+            detect_module(
+                args.filter_module, nginx_path, "ngx_http_zstd_filter_module.so"
+            ),
+            detect_module(
+                args.static_module, nginx_path, "ngx_http_zstd_static_module.so"
+            ),
         )
         if m
     ]
@@ -259,9 +256,7 @@ def main() -> int:
             wait_for_port(args.port, stderr_file=stderr_file)
 
             # -- plain zstd client: baseline and cache-key contract
-            headers, plain_body = fetch(
-                args.port, {"Accept-Encoding": "zstd"}
-            )
+            headers, plain_body = fetch(args.port, {"Accept-Encoding": "zstd"})
             check(
                 "plain client negotiates zstd",
                 content_encoding(headers) == "zstd",
@@ -345,10 +340,16 @@ def main() -> int:
             wrong_out = root / "response-wrongdict.out"
             wrong_rc = subprocess.run(
                 [
-                    args.zstd_bin, "-d", "-q", "-f",
+                    args.zstd_bin,
+                    "-d",
+                    "-q",
+                    "-f",
                     f"--memory={RFC_CLIENT_WINDOW}",
-                    "-D", str(wrong_dict),
-                    "-o", str(wrong_out), str(wrong_src),
+                    "-D",
+                    str(wrong_dict),
+                    "-o",
+                    str(wrong_out),
+                    str(wrong_src),
                 ],
                 capture_output=True,
                 check=False,

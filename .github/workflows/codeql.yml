@@ -32,12 +32,14 @@ jobs:
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     permissions:
-      contents: read
-      security-events: write
+      contents: read # build the CodeQL database from the tree
+      security-events: write # upload SARIF to the Security tab; the only write needed
 
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Resolve latest mainline nginx
         run: |

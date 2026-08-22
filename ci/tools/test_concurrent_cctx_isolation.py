@@ -40,6 +40,7 @@ Rig discipline (same hard rules as the other regression tests):
 
 Self-contained: stdlib + the ``zstd`` CLI only.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,26 +59,27 @@ import time
 import urllib.request
 
 CSTREAM_IN = 131072  # ZSTD_CStreamInSize (libzstd 1.5.x) — the size
-                      # where this module's bug history clusters.
+# where this module's bug history clusters.
 # Distinct sizes straddling the boundary; each request id maps to one.
-SIZES = [913, 65536, CSTREAM_IN - 1, CSTREAM_IN, CSTREAM_IN + 1,
-         180003, 524288]
+SIZES = [913, 65536, CSTREAM_IN - 1, CSTREAM_IN, CSTREAM_IN + 1, 180003, 524288]
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Per-request ZSTD_CCtx isolation regression "
-                    "(774b4a5 class).")
+        description="Per-request ZSTD_CCtx isolation regression (774b4a5 class)."
+    )
     p.add_argument("--nginx-binary", required=True)
     p.add_argument("--filter-module")
     p.add_argument("--static-module")
     p.add_argument("--zstd-bin", default="zstd")
     p.add_argument("--port", type=int, default=18098)
     p.add_argument("--backend-port", type=int, default=18099)
-    p.add_argument("--concurrency", type=int, default=16,
-                   help="Simultaneous in-flight requests.")
-    p.add_argument("--rounds", type=int, default=6,
-                   help="Times to run the full concurrent batch.")
+    p.add_argument(
+        "--concurrency", type=int, default=16, help="Simultaneous in-flight requests."
+    )
+    p.add_argument(
+        "--rounds", type=int, default=6, help="Times to run the full concurrent batch."
+    )
     return p.parse_args()
 
 
@@ -108,6 +110,7 @@ def payload_for(req_id: int) -> bytes:
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     """GET /r/<id> -> payload_for(id), chunked, no Content-Length."""
+
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *a):
@@ -129,7 +132,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         mv = memoryview(data)
         for i in range(0, len(mv), 16384):
-            c = bytes(mv[i:i + 16384])
+            c = bytes(mv[i : i + 16384])
             self.wfile.write(b"%X\r\n" % len(c) + c + b"\r\n")
         self.wfile.write(b"0\r\n\r\n")
 
@@ -153,23 +156,25 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
 def fetch_decoded(port: int, rid: int, zstd_bin: str) -> bytes:
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/r/{rid}",
-        headers={"Accept-Encoding": "zstd",
-                 "User-Agent": "zstd-cctx-iso/1.0"})
+        headers={"Accept-Encoding": "zstd", "User-Agent": "zstd-cctx-iso/1.0"},
+    )
     with urllib.request.urlopen(req, timeout=20) as resp:
         if (resp.headers.get("Content-Encoding") or "").lower() != "zstd":
             raise RuntimeError(
                 f"rid={rid}: not zstd-encoded "
-                f"(C-E={resp.headers.get('Content-Encoding')!r})")
+                f"(C-E={resp.headers.get('Content-Encoding')!r})"
+            )
         blob = resp.read()
     if blob[:4] != b"\x28\xb5\x2f\xfd":
-        raise RuntimeError(f"rid={rid}: no zstd magic "
-                           f"(hex={blob[:8].hex()})")
-    r = subprocess.run([zstd_bin, "-dq", "-c"], input=blob,
-                       capture_output=True, check=False)
+        raise RuntimeError(f"rid={rid}: no zstd magic (hex={blob[:8].hex()})")
+    r = subprocess.run(
+        [zstd_bin, "-dq", "-c"], input=blob, capture_output=True, check=False
+    )
     if r.returncode != 0:
-        raise RuntimeError(f"rid={rid}: zstd -d failed (premature "
-                           f"end / corrupt): "
-                           + r.stderr.decode('utf-8', 'replace'))
+        raise RuntimeError(
+            f"rid={rid}: zstd -d failed (premature "
+            f"end / corrupt): " + r.stderr.decode("utf-8", "replace")
+        )
     return r.stdout
 
 
@@ -178,11 +183,14 @@ def main() -> int:
     nginx = pathlib.Path(args.nginx_binary)
     if not nginx.exists():
         raise FileNotFoundError(nginx)
-    mods = [m for m in (detect(args.filter_module, nginx,
-                               "ngx_http_zstd_filter_module.so"),
-                        detect(args.static_module, nginx,
-                               "ngx_http_zstd_static_module.so"))
-            if m]
+    mods = [
+        m
+        for m in (
+            detect(args.filter_module, nginx, "ngx_http_zstd_filter_module.so"),
+            detect(args.static_module, nginx, "ngx_http_zstd_static_module.so"),
+        )
+        if m
+    ]
 
     # Everything below must stay readable by the workers when run as
     # root (they drop to the compiled-in nginx user): a restrictive
@@ -199,27 +207,29 @@ def main() -> int:
         logs.mkdir()
 
         backend = _Srv(("127.0.0.1", args.backend_port), _Handler)
-        threading.Thread(target=backend.serve_forever,
-                         daemon=True).start()
+        threading.Thread(target=backend.serve_forever, daemon=True).start()
         try:
             wait_port(args.backend_port)
             # Backend self-check: distinct ids -> distinct bodies.
             for rid in (0, 3, 7):
                 raw = urllib.request.urlopen(
-                    f"http://127.0.0.1:{args.backend_port}/r/{rid}",
-                    timeout=10).read()
+                    f"http://127.0.0.1:{args.backend_port}/r/{rid}", timeout=10
+                ).read()
                 if raw != payload_for(rid):
-                    raise RuntimeError(
-                        f"backend self-check failed for rid={rid}")
-            if (payload_for(0) == payload_for(1)
-                    or hashlib.sha256(payload_for(2)).digest()
-                    == hashlib.sha256(payload_for(3)).digest()):
-                raise RuntimeError("payloads not distinct per id "
-                                   "(test would be blind to bleed)")
+                    raise RuntimeError(f"backend self-check failed for rid={rid}")
+            if (
+                payload_for(0) == payload_for(1)
+                or hashlib.sha256(payload_for(2)).digest()
+                == hashlib.sha256(payload_for(3)).digest()
+            ):
+                raise RuntimeError(
+                    "payloads not distinct per id (test would be blind to bleed)"
+                )
 
             load = "".join(f"load_module {m};\n" for m in mods)
             conf = root / "nginx.conf"
-            conf.write_text(f"""{load}worker_processes 1;
+            conf.write_text(
+                f"""{load}worker_processes 1;
 error_log {logs}/error.log warn;
 pid {root}/nginx.pid;
 events {{ worker_connections 512; }}
@@ -241,13 +251,24 @@ http {{
         }}
     }}
 }}
-""", encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
 
             proc = subprocess.Popen(
-                [str(nginx), "-p", str(root), "-c", str(conf),
-                 "-g", "daemon off; master_process off;"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True)
+                [
+                    str(nginx),
+                    "-p",
+                    str(root),
+                    "-c",
+                    str(conf),
+                    "-g",
+                    "daemon off; master_process off;",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
             try:
                 wait_port(args.port)
                 failures: list[str] = []
@@ -257,20 +278,19 @@ http {{
                     ids = list(range(base, base + args.concurrency))
                     base += args.concurrency
                     with concurrent.futures.ThreadPoolExecutor(
-                            max_workers=args.concurrency) as ex:
+                        max_workers=args.concurrency
+                    ) as ex:
                         futs = {
-                            ex.submit(fetch_decoded, args.port, rid,
-                                      args.zstd_bin): rid
-                            for rid in ids}
-                        for fut in concurrent.futures.as_completed(
-                                futs):
+                            ex.submit(fetch_decoded, args.port, rid, args.zstd_bin): rid
+                            for rid in ids
+                        }
+                        for fut in concurrent.futures.as_completed(futs):
                             rid = futs[fut]
                             total += 1
                             try:
                                 got = fut.result()
                             except Exception as e:  # noqa: BLE001
-                                failures.append(
-                                    f"round {rnd} rid={rid}: {e}")
+                                failures.append(f"round {rnd} rid={rid}: {e}")
                                 continue
                             want = payload_for(rid)
                             if got != want:
@@ -278,28 +298,30 @@ http {{
                                 # body (the CCtx-bleed signature).
                                 culprit = ""
                                 if got[:32].startswith(b"REQ-"):
-                                    culprit = (" looks like "
-                                               + got[:28].decode(
-                                                   "ascii", "replace"))
+                                    culprit = " looks like " + got[:28].decode(
+                                        "ascii", "replace"
+                                    )
                                 failures.append(
                                     f"round {rnd} rid={rid}: body "
                                     f"mismatch (got {len(got)}B want "
-                                    f"{len(want)}B){culprit}")
+                                    f"{len(want)}B){culprit}"
+                                )
                 if failures:
                     sys.stderr.write(
-                        f"CCtx-ISOLATION FAILED: "
-                        f"{len(failures)}/{total}:\n")
+                        f"CCtx-ISOLATION FAILED: {len(failures)}/{total}:\n"
+                    )
                     for f in failures[:25]:
                         sys.stderr.write(f"  - {f}\n")
                     if len(failures) > 25:
-                        sys.stderr.write(
-                            f"  ... +{len(failures)-25} more\n")
+                        sys.stderr.write(f"  ... +{len(failures) - 25} more\n")
                     return 1
-                print(f"OK: {total} concurrent requests "
-                      f"({args.concurrency} in flight x {args.rounds} "
-                      f"rounds, distinct per-request bodies, keepalive "
-                      f"reuse) each decoded byte-exact to its own "
-                      f"origin — no cross-request CCtx bleed")
+                print(
+                    f"OK: {total} concurrent requests "
+                    f"({args.concurrency} in flight x {args.rounds} "
+                    f"rounds, distinct per-request bodies, keepalive "
+                    f"reuse) each decoded byte-exact to its own "
+                    f"origin — no cross-request CCtx bleed"
+                )
                 return 0
             finally:
                 proc.terminate()

@@ -83,7 +83,9 @@ def fetch_response(port: int) -> tuple[bytes, str]:
     return compressed, content_encoding
 
 
-def validate_response(port: int, zstd_bin: str, expected: bytes, request_label: str) -> None:
+def validate_response(
+    port: int, zstd_bin: str, expected: bytes, request_label: str
+) -> None:
     compressed, encoding = fetch_response(port)
     if encoding.lower() != "zstd":
         raise RuntimeError(f"expected Content-Encoding=zstd, got {encoding!r}")
@@ -103,7 +105,10 @@ def main() -> int:
     nginx_binary = pathlib.Path(args.nginx_binary)
     if not nginx_binary.exists():
         raise FileNotFoundError(f"nginx binary not found: {nginx_binary}")
-    if test_encoding.shutil.which(args.zstd_bin) is None and not pathlib.Path(args.zstd_bin).exists():
+    if (
+        test_encoding.shutil.which(args.zstd_bin) is None
+        and not pathlib.Path(args.zstd_bin).exists()
+    ):
         raise FileNotFoundError(f"zstd CLI not found: {args.zstd_bin}")
     if args.request_count < 1:
         raise ValueError(f"request-count must be >= 1, got {args.request_count}")
@@ -118,7 +123,9 @@ def main() -> int:
         nginx_binary,
         "ngx_http_zstd_static_module.so",
     )
-    modules = [module for module in (filter_module, static_module) if module is not None]
+    modules = [
+        module for module in (filter_module, static_module) if module is not None
+    ]
 
     for module in modules:
         if not module.exists():

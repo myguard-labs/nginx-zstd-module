@@ -16,6 +16,7 @@ Usage:
 Exit non-zero only on harness error (missing zstd/gzip), never on a
 "slow" result — this is measurement, not a pass/fail gate.
 """
+
 import argparse
 import json
 import pathlib
@@ -39,14 +40,12 @@ def build_payloads() -> dict[str, bytes]:
 
     # Highly compressible JSON-ish API response.
     row = b'{"id":%d,"name":"item-%d","active":true,"tags":["a","b","c"]}'
-    payloads["json-api-256k"] = b"[" + b",".join(
-        row % (i, i) for i in range(4000)
-    ) + b"]"
+    payloads["json-api-256k"] = (
+        b"[" + b",".join(row % (i, i) for i in range(4000)) + b"]"
+    )
 
     # JS-like text with realistic redundancy.
-    js_line = (
-        b"function handler_%d(req,res){return res.json({ok:true,n:%d});}\n"
-    )
+    js_line = b"function handler_%d(req,res){return res.json({ok:true,n:%d});}\n"
     payloads["js-512k"] = b"".join(js_line % (i, i) for i in range(8000))
 
     # Low-entropy worst case (already-compressed-ish): pseudo-random.
@@ -74,10 +73,12 @@ def run_codec(cmd: list[str], data: bytes, repeat: int) -> tuple[int, float]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--levels", default="1,3,6,9,19",
-                    help="comma-separated zstd levels")
-    ap.add_argument("--repeat", type=int, default=3,
-                    help="runs per measurement (best time kept)")
+    ap.add_argument(
+        "--levels", default="1,3,6,9,19", help="comma-separated zstd levels"
+    )
+    ap.add_argument(
+        "--repeat", type=int, default=3, help="runs per measurement (best time kept)"
+    )
     ap.add_argument("--json", help="write machine-readable results here")
     args = ap.parse_args()
 
@@ -91,10 +92,7 @@ def main() -> int:
     payloads = build_payloads()
     results: list[dict] = []
 
-    header = (
-        f"{'payload':<30}{'codec':<10}{'in':>9}{'out':>9}"
-        f"{'ratio':>8}{'MB/s':>9}"
-    )
+    header = f"{'payload':<30}{'codec':<10}{'in':>9}{'out':>9}{'ratio':>8}{'MB/s':>9}"
     print(header)
     print("-" * len(header))
 
@@ -103,32 +101,53 @@ def main() -> int:
 
         gz_size, gz_t = run_codec([gzip, "-6", "-c"], data, args.repeat)
         gz_mbps = (n / gz_t) / 1e6
-        results.append({"payload": name, "codec": "gzip-6", "in": n,
-                        "out": gz_size, "ratio": n / gz_size,
-                        "mbps": gz_mbps})
-        print(f"{name:<30}{'gzip-6':<10}{n:>9}{gz_size:>9}"
-              f"{n / gz_size:>8.2f}{gz_mbps:>9.1f}")
+        results.append(
+            {
+                "payload": name,
+                "codec": "gzip-6",
+                "in": n,
+                "out": gz_size,
+                "ratio": n / gz_size,
+                "mbps": gz_mbps,
+            }
+        )
+        print(
+            f"{name:<30}{'gzip-6':<10}{n:>9}{gz_size:>9}"
+            f"{n / gz_size:>8.2f}{gz_mbps:>9.1f}"
+        )
 
         for lv in levels:
-            sz, t = run_codec([zstd, f"-{lv}", "-c", "-q"], data,
-                              args.repeat)
+            sz, t = run_codec([zstd, f"-{lv}", "-c", "-q"], data, args.repeat)
             mbps = (n / t) / 1e6
-            results.append({"payload": name, "codec": f"zstd-{lv}",
-                            "in": n, "out": sz, "ratio": n / sz,
-                            "mbps": mbps})
-            print(f"{'':<30}{'zstd-' + str(lv):<10}{n:>9}{sz:>9}"
-                  f"{n / sz:>8.2f}{mbps:>9.1f}")
+            results.append(
+                {
+                    "payload": name,
+                    "codec": f"zstd-{lv}",
+                    "in": n,
+                    "out": sz,
+                    "ratio": n / sz,
+                    "mbps": mbps,
+                }
+            )
+            print(
+                f"{'':<30}{'zstd-' + str(lv):<10}{n:>9}{sz:>9}"
+                f"{n / sz:>8.2f}{mbps:>9.1f}"
+            )
         print()
 
     if args.json:
         meta = {
             "zstd_version": subprocess.run(
-                [zstd, "--version"], capture_output=True, text=True,
+                [zstd, "--version"],
+                capture_output=True,
+                text=True,
                 check=False,
             ).stdout.strip(),
             "commit": subprocess.run(
                 ["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, check=False,
+                capture_output=True,
+                text=True,
+                check=False,
             ).stdout.strip(),
             "repeat": args.repeat,
         }

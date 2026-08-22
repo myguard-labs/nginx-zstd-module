@@ -140,9 +140,7 @@ def write_config(
     gzip_vary: str,
     modules: list[pathlib.Path],
 ) -> None:
-    load_modules = "".join(
-        f"load_module {module};\n" for module in modules
-    )
+    load_modules = "".join(f"load_module {module};\n" for module in modules)
     conf_path.write_text(
         f"""
 {load_modules}worker_processes  1;
@@ -226,9 +224,13 @@ def validate_response(
     if encoding.lower() != "zstd":
         raise RuntimeError(f"expected Content-Encoding=zstd, got {encoding!r}")
     if expect_vary:
-        vary_values = {value.strip().lower() for value in vary.split(",") if value.strip()}
+        vary_values = {
+            value.strip().lower() for value in vary.split(",") if value.strip()
+        }
         if "accept-encoding" not in vary_values:
-            raise RuntimeError(f"expected Vary to include Accept-Encoding, got {vary!r}")
+            raise RuntimeError(
+                f"expected Vary to include Accept-Encoding, got {vary!r}"
+            )
     decoded = decompress_payload(zstd_bin, compressed)
     if decoded != expected:
         raise RuntimeError(
@@ -311,7 +313,9 @@ def main() -> int:
         nginx_binary,
         "ngx_http_zstd_static_module.so",
     )
-    modules = [module for module in (filter_module, static_module) if module is not None]
+    modules = [
+        module for module in (filter_module, static_module) if module is not None
+    ]
 
     for module in modules:
         if not module.exists():
@@ -367,7 +371,9 @@ def main() -> int:
                 )
 
             if args.concurrent_requests > 1:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrent_requests) as executor:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=args.concurrent_requests
+                ) as executor:
                     futures = [
                         executor.submit(
                             validate_response,
@@ -390,8 +396,16 @@ def main() -> int:
             print(
                 "OK: verified zstd response integrity"
                 f" for {len(expected)}-byte JavaScript fixture"
-                + (f" across {args.request_count} sequential requests" if args.request_count > 1 else "")
-                + (f" and {args.concurrent_requests} concurrent requests" if args.concurrent_requests > 1 else "")
+                + (
+                    f" across {args.request_count} sequential requests"
+                    if args.request_count > 1
+                    else ""
+                )
+                + (
+                    f" and {args.concurrent_requests} concurrent requests"
+                    if args.concurrent_requests > 1
+                    else ""
+                )
                 + (" with Vary: Accept-Encoding" if args.expect_vary else "")
             )
             return 0

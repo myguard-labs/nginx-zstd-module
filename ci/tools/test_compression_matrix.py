@@ -32,6 +32,7 @@ Rig discipline (learned the hard way):
 Self-contained: stdlib + the ``zstd`` and ``gzip`` CLIs (+ ``brotli``
 if present; brotli cells are skipped when it is not). No PHP-FPM.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -52,24 +53,25 @@ import urllib.request
 from typing import ClassVar
 
 CSTREAM_IN = 131072  # ZSTD_CStreamInSize on libzstd 1.5.x — the
-                      # historical boundary for this bug class.
-SIZES = [1, 1024, CSTREAM_IN - 1, CSTREAM_IN, CSTREAM_IN + 1,
-         200000, 1024 * 1024]
+# historical boundary for this bug class.
+SIZES = [1, 1024, CSTREAM_IN - 1, CSTREAM_IN, CSTREAM_IN + 1, 200000, 1024 * 1024]
 PAYLOADS = ("incompressible", "compressible", "css")
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Broad zstd filter correctness matrix.")
+    p = argparse.ArgumentParser(description="Broad zstd filter correctness matrix.")
     p.add_argument("--nginx-binary", required=True)
     p.add_argument("--filter-module")
     p.add_argument("--static-module")
     p.add_argument("--zstd-bin", default="zstd")
     p.add_argument("--port", type=int, default=18096)
     p.add_argument("--backend-port", type=int, default=18097)
-    p.add_argument("--repeat", type=int, default=2,
-                   help="Re-request each cell N times (intermittent "
-                        "bugs surface on repeats).")
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=2,
+        help="Re-request each cell N times (intermittent bugs surface on repeats).",
+    )
     return p.parse_args()
 
 
@@ -95,8 +97,9 @@ def make_payload(kind: str, n: int) -> bytes:
         head = f"CELL-{kind}-{n}-".encode()
         return (head + b"A" * max(0, n - len(head)))[:n]
     # "css": realistic mid-ratio text, distinct per size.
-    unit = (f"/* cell {n} */.c{n}"
-            "{color:#abcdef;margin:0 auto;padding:1px}\n").encode()
+    unit = (
+        f"/* cell {n} */.c{n}{{color:#abcdef;margin:0 auto;padding:1px}}\n"
+    ).encode()
     body = (unit * (n // len(unit) + 1))[:n]
     return body
 
@@ -104,6 +107,7 @@ def make_payload(kind: str, n: int) -> bytes:
 class _Handler(http.server.BaseHTTPRequestHandler):
     """GET /p/<kind>/<n> -> exactly <n> bytes of <kind>, **chunked,
     no Content-Length**, streamed in small records."""
+
     protocol_version = "HTTP/1.1"
     # ClassVar: deliberately shared by every handler instance -- the server
     # populates it once before serving, and each request only reads it.
@@ -132,7 +136,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         mv = memoryview(data)
         for i in range(0, len(mv), 16384):
-            c = bytes(mv[i:i + 16384])
+            c = bytes(mv[i : i + 16384])
             self.wfile.write(b"%X\r\n" % len(c) + c + b"\r\n")
         self.wfile.write(b"0\r\n\r\n")
 
@@ -157,23 +161,22 @@ def fetch(port: int, path: str, accept_encoding: str):
     hdrs = {"User-Agent": "zstd-matrix/1.0"}
     if accept_encoding:
         hdrs["Accept-Encoding"] = accept_encoding
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
-                                 headers=hdrs)
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=hdrs)
     with urllib.request.urlopen(req, timeout=25) as resp:
-        return resp.read(), (resp.headers.get("Content-Encoding")
-                             or "").lower()
+        return resp.read(), (resp.headers.get("Content-Encoding") or "").lower()
 
 
 def decode(zstd_bin: str, blob: bytes, enc: str) -> bytes:
     if enc == "zstd":
         if blob[:4] != b"\x28\xb5\x2f\xfd":
-            raise RuntimeError("zstd C-E but no zstd magic "
-                               f"(hex={blob[:8].hex()})")
-        r = subprocess.run([zstd_bin, "-dq", "-c"], input=blob,
-                           capture_output=True, check=False)
+            raise RuntimeError(f"zstd C-E but no zstd magic (hex={blob[:8].hex()})")
+        r = subprocess.run(
+            [zstd_bin, "-dq", "-c"], input=blob, capture_output=True, check=False
+        )
         if r.returncode != 0:
-            raise RuntimeError("zstd -d failed (premature end): "
-                               + r.stderr.decode("utf-8", "replace"))
+            raise RuntimeError(
+                "zstd -d failed (premature end): " + r.stderr.decode("utf-8", "replace")
+            )
         return r.stdout
     if enc == "gzip":
         return _gzip.decompress(blob)
@@ -195,11 +198,14 @@ def main() -> int:
     nginx = pathlib.Path(args.nginx_binary)
     if not nginx.exists():
         raise FileNotFoundError(nginx)
-    mods = [m for m in (detect(args.filter_module, nginx,
-                               "ngx_http_zstd_filter_module.so"),
-                        detect(args.static_module, nginx,
-                               "ngx_http_zstd_static_module.so"))
-            if m]
+    mods = [
+        m
+        for m in (
+            detect(args.filter_module, nginx, "ngx_http_zstd_filter_module.so"),
+            detect(args.static_module, nginx, "ngx_http_zstd_static_module.so"),
+        )
+        if m
+    ]
     have_brotli = shutil.which("brotli") is not None
 
     # Everything below must stay readable by the workers when run as
@@ -226,24 +232,25 @@ def main() -> int:
         _Handler.fixtures = fixtures
 
         backend = _Srv(("127.0.0.1", args.backend_port), _Handler)
-        threading.Thread(target=backend.serve_forever,
-                         daemon=True).start()
+        threading.Thread(target=backend.serve_forever, daemon=True).start()
         try:
             wait_port(args.backend_port)
             # backend self-check (rig discipline)
-            for kind, n in (("incompressible", 1),
-                            ("compressible", CSTREAM_IN),
-                            ("css", 1024 * 1024)):
+            for kind, n in (
+                ("incompressible", 1),
+                ("compressible", CSTREAM_IN),
+                ("css", 1024 * 1024),
+            ):
                 raw = urllib.request.urlopen(
-                    f"http://127.0.0.1:{args.backend_port}/p/{kind}/{n}",
-                    timeout=10).read()
+                    f"http://127.0.0.1:{args.backend_port}/p/{kind}/{n}", timeout=10
+                ).read()
                 if raw != fixtures[(kind, n)]:
-                    raise RuntimeError(
-                        f"backend self-check failed for {kind}/{n}")
+                    raise RuntimeError(f"backend self-check failed for {kind}/{n}")
 
             load = "".join(f"load_module {m};\n" for m in mods)
             conf = root / "nginx.conf"
-            conf.write_text(f"""{load}worker_processes 1;
+            conf.write_text(
+                f"""{load}worker_processes 1;
 error_log {logs}/error.log warn;
 pid {root}/nginx.pid;
 events {{ worker_connections 256; }}
@@ -279,13 +286,24 @@ http {{
         }}
     }}
 }}
-""", encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
 
             proc = subprocess.Popen(
-                [str(nginx), "-p", str(root), "-c", str(conf),
-                 "-g", "daemon off; master_process off;"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True)
+                [
+                    str(nginx),
+                    "-p",
+                    str(root),
+                    "-c",
+                    str(conf),
+                    "-g",
+                    "daemon off; master_process off;",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
             try:
                 wait_port(args.port)
                 ae_axis = ["zstd", "gzip", ""]
@@ -295,7 +313,7 @@ http {{
                     ae_axis.append("gzip, zstd")  # zstd should win
 
                 transports = {
-                    "bufon":  lambda k, n: f"/bufon/{k}/{n}",
+                    "bufon": lambda k, n: f"/bufon/{k}/{n}",
                     "bufoff": lambda k, n: f"/bufoff/{k}/{n}",
                     "static": lambda k, n: f"/static/{k}-{n}",
                 }
@@ -309,15 +327,15 @@ http {{
                             for ae in ae_axis:
                                 for attempt in range(args.repeat):
                                     cells += 1
-                                    lbl = (f"{tname} {kind} n={n} "
-                                           f"AE={ae!r} #{attempt+1}")
+                                    lbl = (
+                                        f"{tname} {kind} n={n} AE={ae!r} #{attempt + 1}"
+                                    )
                                     try:
                                         body, enc = fetch(
-                                            args.port,
-                                            mkpath(kind, n), ae)
+                                            args.port, mkpath(kind, n), ae
+                                        )
                                     except Exception as e:  # noqa
-                                        failures.append(
-                                            f"{lbl}: request failed: {e}")
+                                        failures.append(f"{lbl}: request failed: {e}")
                                         continue
                                     # Correctness rules:
                                     # AE 'zstd' -> must be zstd.
@@ -325,57 +343,56 @@ http {{
                                     # any      -> body decodes to origin.
                                     if ae == "zstd" and enc != "zstd":
                                         failures.append(
-                                            f"{lbl}: expected zstd, "
-                                            f"got C-E={enc!r}")
+                                            f"{lbl}: expected zstd, got C-E={enc!r}"
+                                        )
                                         continue
-                                    if (ae == "gzip"
-                                            and enc == "zstd"):
+                                    if ae == "gzip" and enc == "zstd":
                                         failures.append(
-                                            f"{lbl}: zstd served to "
-                                            f"gzip-only client")
+                                            f"{lbl}: zstd served to gzip-only client"
+                                        )
                                         continue
                                     try:
-                                        dec = decode(args.zstd_bin,
-                                                     body, enc)
+                                        dec = decode(args.zstd_bin, body, enc)
                                     except Exception as e:  # noqa
                                         failures.append(
-                                            f"{lbl}: decode failed "
-                                            f"(C-E={enc!r}): {e}")
+                                            f"{lbl}: decode failed (C-E={enc!r}): {e}"
+                                        )
                                         continue
                                     if dec != origin:
                                         failures.append(
                                             f"{lbl}: body mismatch "
                                             f"(C-E={enc!r} got "
-                                            f"{len(dec)}B want {n}B)")
+                                            f"{len(dec)}B want {n}B)"
+                                        )
 
                 if failures:
-                    sys.stderr.write(
-                        f"MATRIX FAILED: {len(failures)}/{cells} "
-                        f"cells:\n")
+                    sys.stderr.write(f"MATRIX FAILED: {len(failures)}/{cells} cells:\n")
                     for f in failures[:30]:
                         sys.stderr.write(f"  - {f}\n")
                     if len(failures) > 30:
-                        sys.stderr.write(
-                            f"  ... +{len(failures) - 30} more\n")
+                        sys.stderr.write(f"  ... +{len(failures) - 30} more\n")
                     el = logs / "error.log"
                     if el.exists():
-                        z = [ln for ln in el.read_text(
-                                "utf-8", "replace").splitlines()
-                             if "zero size buf in writer" in ln]
+                        z = [
+                            ln
+                            for ln in el.read_text("utf-8", "replace").splitlines()
+                            if "zero size buf in writer" in ln
+                        ]
                         if z:
                             sys.stderr.write(
-                                f"  nginx logged {len(z)} "
-                                f"'zero size buf in writer'\n")
+                                f"  nginx logged {len(z)} 'zero size buf in writer'\n"
+                            )
                     return 1
 
-                print(f"OK: {cells} matrix cells "
-                      f"({len(transports)} transports x "
-                      f"{len(PAYLOADS)} payloads x {len(SIZES)} sizes "
-                      f"x {len(ae_axis)} AE x {args.repeat}) "
-                      f"all round-tripped byte-exact / correct "
-                      f"fallback"
-                      + ("" if have_brotli
-                         else " [brotli CLI absent: br-axis skipped]"))
+                print(
+                    f"OK: {cells} matrix cells "
+                    f"({len(transports)} transports x "
+                    f"{len(PAYLOADS)} payloads x {len(SIZES)} sizes "
+                    f"x {len(ae_axis)} AE x {args.repeat}) "
+                    f"all round-tripped byte-exact / correct "
+                    f"fallback"
+                    + ("" if have_brotli else " [brotli CLI absent: br-axis skipped]")
+                )
                 return 0
             finally:
                 proc.terminate()

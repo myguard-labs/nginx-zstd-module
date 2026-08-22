@@ -27,6 +27,7 @@ Rig discipline (same hard rules as the other regression tests):
 
 Self-contained: stdlib + the ``zstd`` CLI only.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,7 +51,8 @@ SIZES = [4096, 65000, CSTREAM_IN - 1, CSTREAM_IN + 1, 200000]
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Response correctness across reload under load "
-                    "(2c538e0 CDict-cycle class).")
+        "(2c538e0 CDict-cycle class)."
+    )
     p.add_argument("--nginx-binary", required=True)
     p.add_argument("--filter-module")
     p.add_argument("--static-module")
@@ -58,11 +60,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=18100)
     p.add_argument("--backend-port", type=int, default=18101)
     p.add_argument("--reloads", type=int, default=6)
-    p.add_argument("--workers", type=int, default=4,
-                   help="Concurrent client workers driving load.")
-    p.add_argument("--duration", type=float, default=18.0,
-                   help="Seconds of sustained load (reloads spread "
-                        "across it).")
+    p.add_argument(
+        "--workers", type=int, default=4, help="Concurrent client workers driving load."
+    )
+    p.add_argument(
+        "--duration",
+        type=float,
+        default=18.0,
+        help="Seconds of sustained load (reloads spread across it).",
+    )
     return p.parse_args()
 
 
@@ -107,7 +113,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         mv = memoryview(data)
         for i in range(0, len(mv), 16384):
-            c = bytes(mv[i:i + 16384])
+            c = bytes(mv[i : i + 16384])
             self.wfile.write(b"%X\r\n" % len(c) + c + b"\r\n")
         self.wfile.write(b"0\r\n\r\n")
 
@@ -131,13 +137,13 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
 def one(port: int, rid: int, zstd_bin: str, dict_path: pathlib.Path) -> None:
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/r/{rid}",
-        headers={"Accept-Encoding": "zstd",
-                 "User-Agent": "zstd-reload/1.0"})
+        headers={"Accept-Encoding": "zstd", "User-Agent": "zstd-reload/1.0"},
+    )
     with urllib.request.urlopen(req, timeout=20) as resp:
         if (resp.headers.get("Content-Encoding") or "").lower() != "zstd":
             raise RuntimeError(
-                f"rid={rid}: not zstd "
-                f"(C-E={resp.headers.get('Content-Encoding')!r})")
+                f"rid={rid}: not zstd (C-E={resp.headers.get('Content-Encoding')!r})"
+            )
         blob = resp.read()
     if blob[:4] != b"\x28\xb5\x2f\xfd":
         raise RuntimeError(f"rid={rid}: no zstd magic")
@@ -147,15 +153,21 @@ def one(port: int, rid: int, zstd_bin: str, dict_path: pathlib.Path) -> None:
     # rejects the frame as "Data corruption detected" even though nothing is
     # actually corrupt. Omitting -D here previously made this test fail on
     # every run regardless of reload timing (any response, any size).
-    r = subprocess.run([zstd_bin, "-dq", "-c", "-D", str(dict_path)],
-                       input=blob, capture_output=True, check=False)
+    r = subprocess.run(
+        [zstd_bin, "-dq", "-c", "-D", str(dict_path)],
+        input=blob,
+        capture_output=True,
+        check=False,
+    )
     if r.returncode != 0:
-        raise RuntimeError(f"rid={rid}: zstd -d failed: "
-                           + r.stderr.decode("utf-8", "replace"))
+        raise RuntimeError(
+            f"rid={rid}: zstd -d failed: " + r.stderr.decode("utf-8", "replace")
+        )
     if r.stdout != payload_for(rid):
         raise RuntimeError(
             f"rid={rid}: body mismatch across reload "
-            f"(got {len(r.stdout)}B want {len(payload_for(rid))}B)")
+            f"(got {len(r.stdout)}B want {len(payload_for(rid))}B)"
+        )
 
 
 def main() -> int:
@@ -163,11 +175,14 @@ def main() -> int:
     nginx = pathlib.Path(args.nginx_binary)
     if not nginx.exists():
         raise FileNotFoundError(nginx)
-    mods = [m for m in (detect(args.filter_module, nginx,
-                               "ngx_http_zstd_filter_module.so"),
-                        detect(args.static_module, nginx,
-                               "ngx_http_zstd_static_module.so"))
-            if m]
+    mods = [
+        m
+        for m in (
+            detect(args.filter_module, nginx, "ngx_http_zstd_filter_module.so"),
+            detect(args.static_module, nginx, "ngx_http_zstd_static_module.so"),
+        )
+        if m
+    ]
 
     # Everything below must stay readable by the workers when run as
     # root (they drop to the compiled-in nginx user): a restrictive
@@ -193,21 +208,20 @@ def main() -> int:
         dict_path.write_bytes(bytes(dseed))
 
         backend = _Srv(("127.0.0.1", args.backend_port), _Handler)
-        threading.Thread(target=backend.serve_forever,
-                         daemon=True).start()
+        threading.Thread(target=backend.serve_forever, daemon=True).start()
         try:
             wait_port(args.backend_port)
             for rid in (0, 2, 4):
                 if urllib.request.urlopen(
-                        f"http://127.0.0.1:{args.backend_port}/r/{rid}",
-                        timeout=10).read() != payload_for(rid):
-                    raise RuntimeError(
-                        f"backend self-check failed rid={rid}")
+                    f"http://127.0.0.1:{args.backend_port}/r/{rid}", timeout=10
+                ).read() != payload_for(rid):
+                    raise RuntimeError(f"backend self-check failed rid={rid}")
 
             load = "".join(f"load_module {m};\n" for m in mods)
             pid_file = root / "nginx.pid"
             conf = root / "nginx.conf"
-            conf.write_text(f"""{load}worker_processes 2;
+            conf.write_text(
+                f"""{load}worker_processes 2;
 error_log {logs}/error.log warn;
 pid {pid_file};
 events {{ worker_connections 256; }}
@@ -229,14 +243,17 @@ http {{
         }}
     }}
 }}
-""", encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
 
             # Master process mode (reload needs a master to signal).
             proc = subprocess.Popen(
-                [str(nginx), "-p", str(root), "-c", str(conf),
-                 "-g", "daemon off;"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True)
+                [str(nginx), "-p", str(root), "-c", str(conf), "-g", "daemon off;"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
             try:
                 wait_port(args.port)
                 stop = threading.Event()
@@ -254,8 +271,10 @@ http {{
                         except Exception as e:  # noqa: BLE001
                             failures.append(str(e))
 
-                threads = [threading.Thread(target=worker, daemon=True)
-                           for _ in range(args.workers)]
+                threads = [
+                    threading.Thread(target=worker, daemon=True)
+                    for _ in range(args.workers)
+                ]
                 for t in threads:
                     t.start()
 
@@ -287,14 +306,19 @@ http {{
                     proc.wait(timeout=30)
 
                 el = logs / "error.log"
-                logtext = (el.read_text("utf-8", "replace")
-                           if el.exists() else "")
-                bad = [ln for ln in logtext.splitlines()
-                       if ("[alert]" in ln or "[emerg]" in ln
-                           or "zero size buf in writer" in ln
-                           or "AddressSanitizer" in ln
-                           or "LeakSanitizer" in ln
-                           or "runtime error:" in ln)]
+                logtext = el.read_text("utf-8", "replace") if el.exists() else ""
+                bad = [
+                    ln
+                    for ln in logtext.splitlines()
+                    if (
+                        "[alert]" in ln
+                        or "[emerg]" in ln
+                        or "zero size buf in writer" in ln
+                        or "AddressSanitizer" in ln
+                        or "LeakSanitizer" in ln
+                        or "runtime error:" in ln
+                    )
+                ]
 
                 if failures or bad:
                     sys.stderr.write(
@@ -302,18 +326,21 @@ http {{
                         f"{len(failures)} response failures, "
                         f"{len(bad)} log issues, "
                         f"{counter['n']} reqs, "
-                        f"{done_reloads} reloads:\n")
+                        f"{done_reloads} reloads:\n"
+                    )
                     for f in failures[:15]:
                         sys.stderr.write(f"  resp: {f}\n")
                     for b in bad[:10]:
                         sys.stderr.write(f"  log:  {b}\n")
                     return 1
 
-                print(f"OK: {counter['n']} requests across "
-                      f"{done_reloads} SIGHUP reloads under "
-                      f"{args.workers}-way load — every response "
-                      f"decoded byte-exact, master survived, error log "
-                      f"clean (CDict cycle lifetime intact)")
+                print(
+                    f"OK: {counter['n']} requests across "
+                    f"{done_reloads} SIGHUP reloads under "
+                    f"{args.workers}-way load — every response "
+                    f"decoded byte-exact, master survived, error log "
+                    f"clean (CDict cycle lifetime intact)"
+                )
                 return 0
             finally:
                 if proc.poll() is None:
