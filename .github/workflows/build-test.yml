@@ -1571,6 +1571,17 @@ jobs:
           # frame header is hand-assembled — both lifetime/OOB classes.
           python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18089
+          # Baseline loaded-and-blocking control (PR2 step 22): the ASAN
+          # binary is a static --add-module build, the shape this check
+          # needs to prove the compiled-in `zstd on;` default is OFF.
+          # Every other case in this job asserts response CORRECTNESS,
+          # none of them individually depend on compression having
+          # happened at all -- this is the control that would catch a
+          # module that failed to load or a decision-flip in the enable
+          # default, which every other green case here would miss.
+          python3 ci/tools/test_baseline_loaded.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18107 --backend-port 18108 --off-port 18112
 
           # Leak verdict. Everything in lsan.suppress is gone by now, so any
           # surviving "ERROR: LeakSanitizer" is an unsuppressed leak and fails

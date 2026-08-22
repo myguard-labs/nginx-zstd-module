@@ -89,7 +89,76 @@ flipped, not just the aggregate count).
 
 ## Step 22 — live-server layer
 
-Not reached this session — see "Stopped here" below.
+The module already has its own mature live-server driver convention:
+separate, purpose-named scripts under `ci/tools/` (`test_reload_under_load.py`,
+`test_concurrent_cctx_isolation.py`, `test_slow_drain.py`, `test_dcz.py`,
+`test_compression_matrix.py`, ...) rather than the skeleton's single
+`ci/tools/test_runtime.py` driver file. Per "adopt the convention, keep the
+content", this session kept the module's own multi-script convention rather
+than collapsing it into one `test_runtime.py` — the reviewed reason (step
+22's "what belongs here" line) is about *placement* (driver vs `ci/t/`), and
+every existing script here already only does what the driver's three
+exemptions allow (concurrency, a signal at the master mid-traffic, or N
+separate own-connection requests), so nothing needed to move.
+
+**Gap found and closed: no baseline loaded-and-blocking control.** None of
+the existing driver scripts prove the module is actually acting — they
+assert response *correctness* under a stressor, which a module that failed
+to load, or whose `enable` predicate silently decided OFF, could still
+satisfy by accident (an unmodified passthrough is still byte-correct).
+Added `ci/tools/test_baseline_loaded.py`: two live requests against the same
+backend, one with `zstd on;` (must compress, decode byte-exact), one with NO
+zstd directive at all (must NOT be zstd-encoded — the compiled-in default).
+Wired into `build-test.yml`'s `tests-asan` job (`--port 18107
+--backend-port 18108 --off-port 18112`, ports checked against every existing
+`--port`/`--backend-port` literal in the file to avoid a collision) because
+that job's binary is the one static (`--add-module`) build already produced
+in this pipeline (asan.yml's own build), and the "no directive" case needs a
+build where the module is compiled in but not turned on by config — a
+dynamic `load_module`-based build cannot express that distinction cleanly
+(no directive → unknown directive, config fails to parse, which the module-
+unloaded case already covers via a different binary).
+
+### Mutation pass
+
+Ran locally against a hand-built static `--add-module` nginx (not part of
+the fast PR lane; the CI wiring above uses the pipeline's own asan.yml
+artifact instead).
+
+1. **Module genuinely unloaded** — built the SAME nginx tree with no
+   `--add-module` at all, ran the baseline script against it.
+   `$ python3 ci/tools/test_baseline_loaded.py --nginx-binary
+   /tmp/nginx-no-module`
+   Result: `RuntimeError: nothing listening on 127.0.0.1:18110` (nginx fails
+   to start at all — `zstd on;` is an unknown directive) — the script itself
+   raises rather than silently passing. Confirms the baseline genuinely
+   depends on the module being present.
+
+2. **`enable` default flipped ON** — `src/ngx_http_zstd_filter_module.c`
+   line 1919, `ngx_conf_merge_value(conf->enable, prev->enable, 0)` →
+   `..., 1)`. Rebuilt (`objs/nginx`, distinct mtime/size verified against
+   the pre-mutation binary each time — see
+   [[feedback-stale-binary-fakes-a-hang]]), ran against a build with the
+   mutation and a build without.
+   Unmutated: `2/2 checks passed`, exit 0.
+   Mutated: `FAIL baseline: response was zstd-encoded with NO zstd
+   directive present -- compiled-in default is not OFF`, exit 1.
+   **First attempt at this mutation test silently passed 2/2 against the
+   mutated binary** — the script's own `--off-port` originally defaulted to
+   `args.port + 1`, which collided with `--backend-port`'s default
+   (18111 == 18110+1), so the "no directive" nginx failed to bind and the
+   client request landed directly on the backend instead, which is
+   trivially never zstd-encoded regardless of the mutation. Fixed by giving
+   the off-case its own `--off-port` argument, distinct from both `--port`
+   and `--backend-port`; re-ran and got the FAIL above. Left as a comment in
+   the script at the call site so the next port choice does not repeat it.
+   This is exactly the class of finding rejected-test item 4 (a shared
+   resource that lets one check's assertion satisfy an unrelated one)
+   generalizes to outside pure counters — recorded here rather than
+   shipping the false-negative test.
+
+Reverted both source and binaries after; `diff` against the pre-mutation
+`.c` backup confirmed clean before committing.
 
 ## Step 25 note (out of my 21-26 slice but adjacent, flagged for step 33)
 
@@ -109,7 +178,7 @@ skeleton's own instructions on how to build one — never a copy).
 
 ## Stopped here
 
-Ran out of budget partway through step 22 planning. Landed: step 21 complete
-(unit tests + 5/5 mutations caught, wired into build-test.yml's Validation
-job). Steps 22-26 not started. See the worker return banner for exact
-scope remaining.
+Landed: step 21 (unit tests, 5/5 mutations caught) and step 22 (baseline
+loaded-and-blocking control added + its mutation pass, existing driver
+scripts reviewed and kept as-is). Steps 23-26 not started this session. See
+the worker return banner for exact scope remaining.
