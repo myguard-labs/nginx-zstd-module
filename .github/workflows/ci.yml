@@ -15,10 +15,11 @@ name: CI
 #                decision it would inform -- schedule + dispatch only.
 #   bump.yml     the version-bump bot; opens PRs, is not a gate on one.
 #
-# The two long-runners that ARE members are bounded and stay bounded:
+# The long-runners that ARE members are bounded and stay bounded:
 #   fuzzing.yml   -max_total_time=120   (2 minutes)
 #   valgrind.yml  soak.sh <nginx> 60 4  (60 seconds at concurrency 4)
-# If either grows an open-ended budget it belongs in ci-deep.yml instead.
+#   asan.yml      soak.sh <nginx> 60 4  (60 seconds at concurrency 4)
+# If any grows an open-ended budget it belongs in ci-deep.yml instead.
 
 on:
   pull_request:
@@ -33,6 +34,12 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint
+    uses: ./.github/workflows/lint.yml
+    permissions:
+      contents: read
+
   build-test:
     name: Build & Test
     uses: ./.github/workflows/build-test.yml
@@ -40,7 +47,7 @@ jobs:
       contents: read
 
   security-scanners:
-    name: Security scanners
+    name: Security Scanners
     uses: ./.github/workflows/security-scanners.yml
     permissions:
       contents: read
@@ -64,6 +71,12 @@ jobs:
   valgrind:
     name: Valgrind
     uses: ./.github/workflows/valgrind.yml
+    permissions:
+      contents: read
+
+  asan:
+    name: A/UBSan
+    uses: ./.github/workflows/asan.yml
     permissions:
       contents: read
 
