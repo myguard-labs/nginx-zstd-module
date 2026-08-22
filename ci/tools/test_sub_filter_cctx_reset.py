@@ -110,16 +110,21 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def detect_module(explicit: str | None, nginx: pathlib.Path) -> pathlib.Path:
+def detect_module(explicit: str | None, nginx: pathlib.Path) -> pathlib.Path | None:
+    """Resolve the filter .so: explicit path, or beside the binary.
+
+    Returns None when neither is present, which is the normal case for a
+    STATICALLY linked CI build -- the filter is already in the binary and
+    emitting a `load_module` line for it would make nginx refuse to start.
+    Same contract as ci/tools/test_slow_drain.py's detect_module().
+    """
     if explicit:
-        return pathlib.Path(explicit)
-    sib = nginx.parent / "ngx_http_zstd_filter_module.so"
-    if sib.exists():
-        return sib
-    raise FileNotFoundError(
-        "ngx_http_zstd_filter_module.so not found next to the nginx binary; "
-        "pass --filter-module explicitly"
-    )
+        return pathlib.Path(explicit).resolve()
+    # resolve(): nginx resolves a relative load_module path against its
+    # PREFIX (-p, a temp dir here), not against the cwd, so a relative
+    # path dlopen()s from inside the temp dir and fails.
+    sib = (nginx.parent / "ngx_http_zstd_filter_module.so").resolve()
+    return sib if sib.exists() else None
 
 
 def wait_port(port: int, timeout: float = 10.0) -> None:
@@ -245,8 +250,9 @@ def main() -> int:
     if not nginx.exists():
         raise FileNotFoundError(f"nginx binary not found: {nginx}")
     module = detect_module(args.filter_module, nginx)
-    if not module.exists():
+    if module is not None and not module.exists():
         raise FileNotFoundError(f"module not found: {module}")
+    load = f"load_module {module};\n" if module else ""
 
     with tempfile.TemporaryDirectory(prefix="zstd-subfilter-") as td:
         root = pathlib.Path(td)
@@ -256,8 +262,7 @@ def main() -> int:
         lvl = args.log_level
         conf = root / "nginx.conf"
         conf.write_text(
-            f"""load_module {module};
-worker_processes 1;
+            f"""{load}worker_processes 1;
 error_log {logs}/error.log {lvl};
 pid {root}/nginx.pid;
 events {{ worker_connections 64; }}
