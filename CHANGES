@@ -1,5 +1,18 @@
 Changes with http-zstd
 
+    *) Change: the repository adopted the myguard nginx-module skeleton
+       standard. CI material moved under ci/ (t/, tests/unit/, tools/,
+       fuzz/, linter/), the module sources moved to src/, and .github/
+       workflows/ci.yml became the single pull-request entry point that
+       calls Lint, Build&Test, Security Scanners, Fuzzing, Valgrind,
+       CodeQL, A/UBSan and Windows build as reusable workflows. Long
+       runners moved to the scheduled ci-deep.yml lane. Adds a unit-test
+       layer over the real Accept-Encoding decision function, a fuzz
+       dictionary derived from live call sites with a drift gate, a
+       coverage report scoped to src/, and a tracked pre-commit hook.
+       No module behaviour changed; directives, defaults and the module
+       binary are unaffected.
+
     *) Feature: RFC 9842 dcz dictionary compression. New repeatable
        zstd_dcz_dict_file directive (http/server/location) loads
        dictionaries hashed at config load; a request whose

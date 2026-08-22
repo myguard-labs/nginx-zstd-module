@@ -362,3 +362,194 @@ Also re-verified after all of the cycle's workflow edits: `ci.yml` is still the
 only workflow carrying a `pull_request:` trigger. Checked by parsing each
 workflow's `on:` key with a YAML loader, not by grepping for the string --
 `on:` parses as the boolean True in YAML, so a naive grep is not the same test.
+
+## Step 30 — the depth audit: does each gate reach the module? (2026-08-22)
+
+Five subjects, each answered from configuration plus step 26's coverage report.
+No long run started by this step.
+
+### 1. The seam — VERIFIED, with a positive control
+
+`UNIT_ENTRY` = `ci/tests/unit/run.sh`; fuzz entry = `ci/fuzz/build.sh`. Neither
+compiles `src/*.c` directly: both `#include` `ci/fuzz/generated_parser.inc`,
+which `ci/fuzz/extract_parser.sh` slices verbatim out of the shipped
+`src/ngx_http_zstd_common.h`. Both entry points regenerate it at build time
+(`ci/tests/unit/run.sh:60`, `ci/fuzz/build.sh:19`), so there is no
+hand-maintained copy to drift.
+
+Proven, not assumed:
+
+- regenerating in a clean tree reproduces the committed `.inc` byte for byte
+  (no drift);
+- renaming `ngx_http_zstd_eval_qvalue()` in `src/ngx_http_zstd_common.h` and
+  re-running the extractor propagates the change into the generated TU
+  (`PROBE` present) — so an edit to production code really does reach the unit
+  and fuzz builds. Source restored, regeneration re-diffed clean.
+
+**What it now catches that it did not before:** a parser change that compiles in
+`src/` but was never exercised — previously possible only if someone remembered
+to re-copy the parser by hand.
+
+### 2. ASan/UBSan — the soak config reaches the module
+
+`ci/tools/soak.sh` enables the module's own directives in more than one
+location: `zstd on`, `zstd_min_length`, `zstd_max_length`, `zstd_types`,
+`zstd_bypass $arg_nozstd`, `zstd_window_log 21`, and drives `/bypass` and
+`/bypass?nozstd=1` plus clients that do not advertise zstd. Step 26's coverage
+over `src/` reports 60.0% — the handler's lines execute, and the figure is not
+~1%, so nginx core is not padding the denominator.
+
+**Catches now:** a use-after-free or overflow on the bypass and
+Vary/no-zstd-client paths, not only on the happy compress path.
+
+### 3. Fuzzing — surface and dictionary match the parse surface
+
+`fuzz.dict` is derived from real call sites and gated against drift by
+`gen_dict.sh --check`, which passes: coding tokens `"dcz"` and `"zstd"` match
+`src/*.c`. The parser's table literals are `"*"`, `"identity"`, `"q"` and
+`"zstd"`; all are reachable — the qvalue surface has 5 dedicated dict entries
+(`";q="`, `"q=0"`, `"q=1"`, `"q=0.0"`, `"q=1.0"`) and 597 of the 9280 corpus
+inputs carry a `q=`. Two regression inputs replay before each fresh run.
+
+**Catches now:** qvalue arithmetic and precedence defects, which the mutation
+pass in step 24 confirmed the target detects.
+
+### 4. Coverage — measured over the module only
+
+`ci/tools/coverage.sh` reports with gcovr filtered to `src/`; unfiltered gcovr
+walks the whole configured nginx tree. Measured 60.0%, so the filter is real —
+a ~1% figure would have meant nginx core was in the denominator.
+
+### 5. Valgrind / helgrind
+
+**Memcheck: NOT trustworthy as a gate — see `issues.md`.** `valgrind.suppress`
+is the generic circulated nginx file: all 28 blocks are unedited
+`<insert_a_suppression_name_here>` placeholders and the set names
+`ngx_http_lua_*` and `drizzle_state_connect`, symbols this module never links.
+Several blocks suppress bare `fun:malloc` / `fun:memcpy` under short stacks, so
+it can mask this module's own errors. It is live config, not dead:
+`ci/tools/soak.sh:71,79` passes it to both tools. Deliberately NOT fixed here —
+deriving a real set needs a genuine memcheck soak, which is phase-7 work.
+Ledgered OPEN with two acceptable fixes, and sent upstream (skeleton PR #41)
+because the skeleton ships the same file to every adopter.
+
+**Helgrind: NOT applicable, settled with evidence.** The module has no shared
+cross-worker state. Counted over `src/*.c` and `src/*.h`: `ngx_shared_memory_add`
+0, `shm_zone` 0, `ngx_slab` 0, `ngx_atomic` 0, `ngx_thread` 0, `pthread` 0. The
+only file-scope mutable state is the two filter-chain pointers at
+`src/ngx_http_zstd_filter_module.c:215-216`, assigned once in
+`ngx_http_zstd_filter_init()` (`:2358` and `:2361`) — the `postconfiguration`
+hook, which runs in the master process before fork. All other state is
+per-request `ctx` off the request pool. There is no cross-thread sharing for
+helgrind to reason about.
+
+## Step 31 — re-audit the gates that drift (2026-08-22)
+
+Six explicit answers. `/proc/loadavg` was 1.4-2.5 (1-min) on a 6-slot box for
+every timing below.
+
+**Caching.** `ci/tools/ci-build.sh` is the single chokepoint; no workflow
+duplicates cache logic. Measured in PR2: `NO_CACHE=1` cold build of nginx 1.31.2
+-> ccache 0/146 (0.00%); a second identical build -> 146/292 (50.00%) cumulative,
+i.e. **100% of the second run's own compiles hit**. Not 0%, so it is wired.
+`--with-cc="ccache gcc"` is load-bearing — nginx's configure ignores a bare `CC=`.
+
+**zizmor.** `zizmor --pedantic .github/workflows/` audits **11** workflows;
+`ls .github/workflows/*.yml` is **11**. Counts match, no member unaudited. "No
+findings to report (3 ignored, 11 suppressed)". All three
+`# zizmor: ignore[misfeature]` still name a reason that is still true — each sits
+on a `shell: cmd` step in `windows-build.yml` (lines 82, 89, 112) that needs the
+environment `vcvars64.bat` installs in that same cmd process. No suppression has
+outlived its subject.
+
+**actionlint and the fromJSON ternary.** Acknowledged, not used as evidence:
+actionlint is clean, and that says nothing about runner labels. The selector is
+`${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}` on all 10 build-test jobs —
+the approved form, no inline pool, no fork ternary. That is probe 2's finding,
+not actionlint's.
+
+**LINT_ONLY still matches the checkers that exist.** Normalized comparison, both
+directions:
+
+```
+on disk (ci/linter/lint-*.sh): c ci-cadence ci-ports ci-runners ci-secrets
+                               docs-drift nginx perl python sh spelling yaml
+in lint.yml LINT_ONLY:         nginx sh python perl yaml spelling ci-runners
+                               ci-ports ci-cadence ci-secrets docs-drift
+on disk but NOT in LINT_ONLY:  c        <- deliberate, documented lint.yml:9-12
+in LINT_ONLY but NOT on disk:  (empty)
+```
+
+`c` is excluded because flawfinder/clang-tidy/semgrep over `src/` are
+`security-scanners.yml`'s job at the same thresholds (PR2 paired them). No
+orphan in either direction.
+
+**`run-all.sh` reads `git ls-files`** (`ci/linter/lib.sh:50`), so an untracked
+file is invisible and the run reads green while checking nothing. Staged before
+every timing and lint run in this pass. The oracle is the checker's file COUNT,
+not the exit code.
+
+**Hook timing — OVER the ~2s budget on a C change.** Measured, 3 runs each:
+
+```
+docs-only staged change:   0.51 / 0.52 / 0.56 s   OK
+real C file staged:        3.59 / 3.59 s          OVER
+```
+
+The first C measurement (0.49s) was a false pass: the file was `touch`ed but
+unmodified, so pre-commit skipped its hooks. Forcing a real content change gives
+3.59s. Per-hook breakdown with a C file staged:
+
+```
+semgrep    2.17s   <- 60% of the total, alone over budget
+cppcheck   0.63s
+flawfinder 0.13s
+shellcheck 0.08s
+ruff       0.08s
+```
+
+Not fixed here: the cheap levers (`--jobs=1 --metrics=off`) are already set, and
+dropping or narrowing semgrep is a gate-weakening change, not a speed fix. A
+C-file commit paying 3.6s is the honest cost of the current gate. Ledgered.
+
+## Step 32 — re-measure the CI shape (2026-08-22)
+
+Numbers from `gh run list`/`gh run view` on run **32547163515** (PR2's final
+run, 2026-08-22), not estimates.
+
+**Total wall-clock 370s, 18 jobs.** Critical path is
+`resolve(6s) -> build(212s) -> tests(145s)` = 370s. Longest single legs:
+CodeQL 266s, MinGW 254s, build 212s, validation 215s, tests-asan 180s.
+
+**Exactly one `pull_request:` entry point holds.** Parsed with a YAML loader,
+not a grep — `on:` parses as boolean `True` in YAML, so a grep is a different
+test. `ci.yml` is the only one; no member carries `push:`. Step 14's demotion
+therefore still holds, and step 16's long-runner greps return `ci.yml` alone.
+
+**Every member is reached.** ci.yml calls 8 members (lint, build-test,
+security-scanners, codeql, fuzzing, valgrind, asan, windows-build); the set of
+workflows declaring `workflow_call` minus the set ci.yml calls is **empty**, so
+no member keeps a stale-green badge.
+
+**Peak concurrency 15 against 6 slots at t+21s** — measured, and worse than the
+11 recorded at step 29. Two causes:
+
+1. **The step 29 lane fix for `build-old-libzstd` was never actually in the
+   tree.** `adoption-findings.md` recorded it as "landed (safe, single-file,
+   verified)", but `build-test.yml:484` on master was still bare
+   `needs: resolve`. A note claiming a change landed is not evidence it did —
+   `git log -- <file>` showed no such commit. **Now genuinely applied** in this
+   PR: `needs: [resolve, validation]` with `if: ${{ !cancelled() }}`, dropping
+   this workflow's own fan-out from 7 to 6. Job `name:` deliberately unchanged,
+   and the ruleset context `Build & Test / Build (libzstd 1.4.x — fallback
+   paths)` re-checked against the live ruleset after the edit.
+2. **The cross-workflow pile-on is unchanged and unfixable inside step 29.**
+   codeql/security-scanners/fuzzing/valgrind/asan all start at t=0 alongside
+   build-test's fan-out, because `needs:` cannot cross a reusable-workflow-call
+   boundary: `needs:` on a `uses:` job waits for that member's ENTIRE workflow,
+   so laning codeql behind build-test would serialize it behind the 370s
+   critical path instead. The only real remedies are folding those single jobs
+   into build-test.yml's job graph, or adding pool slots. Sent upstream as
+   decision-class feedback (skeleton PR #41, finding 3).
+
+No check was deleted and no threshold widened.

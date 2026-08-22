@@ -174,7 +174,7 @@ load_module modules/ngx_http_zstd_static_module.so;
 * If you are using a custom zstd installation, set `ZSTD_INC` (path to `zstd.h`) and `ZSTD_LIB` (path to the library) before running `configure`. If unset, the system-installed zstd is used.
 * **Windows:** MSVC builds the modules statically into `nginx.exe`; MinGW-w64
   can also build them as dynamic `.so`-named PE DLLs. The SHA-pinned
-  [`tools/build-windows.sh`](tools/build-windows.sh) assembles the MSVC build
+  [`ci/tools/build-windows.sh`](ci/tools/build-windows.sh) assembles the MSVC build
   (and optionally ngx_brotli and headers-more). The usual Windows-nginx caveats
   apply (effectively single-worker via `select()`, no HTTP/3 — local dev use,
   not production), and the `zstd_static` frame probes (magic number and
@@ -985,18 +985,63 @@ Run the suites locally:
 
 ```bash
 # Perl suites (needs Test::Nginx::Socket and a built nginx)
-TEST_NGINX_BINARY=/path/to/nginx prove t/00-filter.t t/01-static.t
+TEST_NGINX_BINARY=/path/to/nginx prove ci/t/00-filter.t ci/t/01-static.t
+
+# Unit tests over the Accept-Encoding decision function
+ci/tests/unit/run.sh
 
 # End-to-end smoke tests
-python3 tools/test_encoding.py --nginx-binary /path/to/nginx
+python3 ci/tools/test_encoding.py --nginx-binary /path/to/nginx
 
 # Build and run the fuzzer (needs clang)
-bash fuzz/build.sh && ./fuzz/fuzz_accept_encoding -max_total_time=60 fuzz/corpus/
+bash ci/fuzz/build.sh && ./ci/fuzz/fuzz_accept_encoding -max_total_time=60 ci/fuzz/corpus/
 ```
+
+## Repository layout
+
+Everything CI needs lives under `ci/`, so the repository root stays the
+module: sources, docs and packaging.
+
+```text
+src/                     the module itself
+  ngx_http_zstd_filter_module.c    the compression filter
+  ngx_http_zstd_static_module.c    the .zst static handler
+  ngx_http_zstd_common.h           shared helpers + the Accept-Encoding parser
+ci/
+  t/                     Test::Nginx::Socket suites (00-filter, 01-static, …)
+  tests/unit/            unit tests over the real decision TU
+  tools/                 soak.sh, test_encoding.py, benchmark.py, ci-build.sh, …
+  fuzz/                  libFuzzer target, corpus, dictionary, regressions
+  linter/                the checker set run by the hook and the Lint workflow
+  ast-grep/              structural rules
+.github/workflows/       ci.yml (the only pull_request entry point) + members
+.githooks/pre-commit     the tracked local gate
+```
+
+The `Accept-Encoding` parser is sliced out of `src/ngx_http_zstd_common.h`
+into the fuzz and unit builds at build time by `ci/fuzz/extract_parser.sh`,
+so those targets always compile production code — there is no second copy to
+drift.
+
+## Linting
+
+The same checkers run in three places: your commit (via `.githooks/pre-commit`),
+`ci/linter/run-all.sh` by hand, and the **Lint** workflow on every PR.
+
+```sh
+git config core.hooksPath .githooks    # enable the hook, once per clone
+ci/linter/install-linters.sh           # install what the checkers need
+ci/linter/install-linters.sh --check   # report presence; non-zero if any missing
+ci/linter/run-all.sh                   # run every checker over the tracked tree
+```
+
+Full description of each checker, what it is blind to, and how to narrow a run
+with `LINT_ONLY`: [`ci/linter/README.md`](ci/linter/README.md). Contributor
+setup and the `git ls-files` trap: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 # Benchmarks
 
-Reproduce with `python3 tools/benchmark.py` (drives the `zstd`/`gzip`
+Reproduce with `python3 ci/tools/benchmark.py` (drives the `zstd`/`gzip`
 CLIs linked against the same libzstd/zlib, so ratio is machine-stable;
 throughput scales with CPU). Figures below: **libzstd 1.5.5**, single
 core, `--repeat 3`, best wall-time.
@@ -1070,7 +1115,7 @@ context; new requests use new workers. There is no shared compression
 state to corrupt across a reload. The `zstd_dict_file` `ZSTD_CDict` is
 loaded once per cycle and freed on the old cycle's cleanup; a
 reload-leak regression for exactly this runs under ASAN in CI
-(`tools/test_reload_leak.sh`).
+(`ci/tools/test_reload_leak.sh`).
 
 **`zstd_dict_file`.** Loaded at config load in the `http` context, into
 a `ZSTD_CDict` shared read-only by all workers (dictionary size capped
@@ -1095,7 +1140,7 @@ purely "load the previous `.so` / previous nginx binary and reload":
 No data migration, no irreversible step. A bad deploy is a one-line
 config change or a binary swap away from rolled back.
 
-**Pre-deploy soak.** `tools/soak.sh <nginx> <seconds> <concurrency>`
+**Pre-deploy soak.** `ci/tools/soak.sh <nginx> <seconds> <concurrency>`
 drives sustained mixed load (tiny/medium/large/compressible payloads,
 zstd and non-zstd clients, the bypass path, a chunked upstream) and
 fails on any sanitizer report, leak, crash, `[alert]`/`[emerg]`, or

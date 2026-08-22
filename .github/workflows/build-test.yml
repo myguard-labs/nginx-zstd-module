@@ -481,7 +481,18 @@ jobs:
     name: Build (libzstd 1.4.x — fallback paths)
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 25
-    needs: resolve
+    # Lane D: takes validation's slot rather than starting a new one. The pool
+    # has 6 real slots and this workflow's own fan-out after `resolve` was 7
+    # jobs wide, so one of them had to queue. validation(216s) ->
+    # build-old-libzstd(135s) = 351s, still under the 370s
+    # resolve(6s)->build(212s)->tests(145s) critical path measured on run
+    # 32547163515, so this costs no wall-clock while dropping this
+    # workflow's peak from 7 to 6. `!cancelled()` keeps it running when
+    # validation FAILS -- it depends on validation only for the slot, never
+    # for an artifact, and a validation failure must not silently skip a
+    # build-matrix leg.
+    needs: [resolve, validation]
+    if: ${{ !cancelled() }}
 
     env:
       # Resolved mainline nginx (used by the cache keys + download/build steps

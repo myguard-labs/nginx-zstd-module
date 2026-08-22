@@ -1,0 +1,12 @@
+prompt_version: 241a7ac6f664bf98324f085489ed41a7f67eae56bf0ff500507ec84bb9f2f4eb
+skeleton_sha:   537f28ea996e6e540cebff486a9e8fff824b6918
+adopted_date:   2026-08-22
+steps_degraded: 30
+
+# step 30: the memcheck subject cannot be answered honestly from configuration.
+# valgrind.suppress is the generic circulated nginx file (28 unfilled
+# <insert_a_suppression_name_here> blocks naming ngx_http_lua_* and
+# drizzle_state_connect, symbols this module never links) and can mask this
+# module's own errors. Deriving a real set needs a memcheck soak = phase 7 work.
+# Tracked: memory/labs/http-zstd/issues.md, and upstream in skeleton PR #41.
+# Every other subject and step is fully satisfied.
