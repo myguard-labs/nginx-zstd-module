@@ -90,10 +90,12 @@ jobs:
           gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
           rm -rf "$gnupghome"
 
-      # soak.sh asserts it saw >=1 block AND >=1 pass, so a green result
-      # proves the module actually ran under the sanitizer -- not merely that
-      # nothing crashed. It sets its own ASAN_OPTIONS/UBSAN_OPTIONS with
-      # halt_on_error=1 so the soak fails loudly on the first report.
+      # soak.sh requires ok>0 and bad==0 per worker, where a zstd-magic
+      # response must ALSO decode cleanly (ci/tools/soak.sh's worker()):
+      # a green result proves the module actually compressed real
+      # responses under the sanitizer, not merely that nothing crashed.
+      # It sets its own ASAN_OPTIONS/UBSAN_OPTIONS with halt_on_error=1
+      # so the soak fails loudly on the first report.
       - name: Configure & build nginx with ASAN + UBSAN (static --add-module)
         env:
           # Keep the portable SHA-256 fallback covered under the sanitizer --

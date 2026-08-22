@@ -176,9 +176,114 @@ that is an explicit long-runner under the worker contract (build + soak).
 target-specific `ci/tools/valgrind.supp` derived from that real run (per the
 skeleton's own instructions on how to build one — never a copy).
 
+## Step 23 — fuzz target, corpus and dictionary
+
+The fuzz target (`ci/fuzz/fuzz_accept_encoding.c`) already satisfied the
+hard requirement before this session: it links the real
+`ngx_http_zstd_accept_encoding()` / `ngx_http_zstd_eval_qvalue()` /
+`ngx_http_zstd_coding_weight()` via `extract_parser.sh` (never a
+reimplementation), carries a 9041-file curated corpus, and a
+`fuzz.dict` already built from the module's own real Accept-Encoding
+grammar (not the skeleton's tokens). It also already has an independent
+semantic-differential oracle (`ref_accepts()`), which is stronger than
+this phase's baseline ask.
+
+**Gap found and closed: `"dcz"` was missing from `fuzz.dict`.** The module
+has no single lookup table of coding names (unlike the skeleton's rule
+table) — the tokens are two literal call-site arguments to
+`ngx_http_zstd_coding_weight(ae, "TOKEN", ...)`, one in
+`src/ngx_http_zstd_filter_module.c` ("dcz") and one in
+`src/ngx_http_zstd_common.h`'s own wrapper ("zstd"). Added
+`ci/fuzz/gen_dict.sh`, which greps those exact call sites (both `.c` and
+`.h` — an earlier version of the script only scanned `.c` and missed
+"zstd", caught immediately by running `--check` against the tree; see the
+commands below) and replaces a marked block in `fuzz.dict` in place.
+Wired `gen_dict.sh --check` into `ci/linter/lint-c.sh`.
+
+```
+$ bash ci/fuzz/gen_dict.sh --check
+✓ fuzz.dict coding tokens match src/*.c call sites: "dcz" "zstd"
+
+$ sed -i 's/"dcz"/"xyz"/' ci/fuzz/fuzz.dict && bash ci/fuzz/gen_dict.sh --check; echo exit=$?
+✗ fuzz.dict's generated coding-token block is stale.
+  Source call sites: "dcz" "zstd"
+  Run: ci/fuzz/gen_dict.sh
+exit=1
+# restored, re-checked clean
+
+$ bash ci/linter/lint-c.sh   # with the same drift reintroduced
+  fuzz.dict coding-token drift (ci/fuzz/gen_dict.sh --check)
+✗ fuzz.dict's generated coding-token block is stale.
+# (rc=1, confirmed the linter gate actually fails on this)
+```
+
+Did not attempt to measure a coverage-vs-signature-reach delta the way
+the reference module's own step 23 evidence does (PROMPT.md cites a
+23→35/645 table-literal reach figure) — this module's "table" is two
+literals, not 645, so that specific metric does not apply; noted here so
+nobody goes looking for a coverage number that was never produced.
+
+## Step 24 — replay order and the ASan soak
+
+**Replay-then-fuzz order.** Added `ci/fuzz/regressions/` (was entirely
+missing) and a "Replay recorded crash regressions" step in
+`fuzzing.yml`, before the time-boxed fresh run, with a `nullglob` guard
+so an empty directory reports its case count rather than silently
+matching nothing forever.
+
+No fuzz-discovered crash existed to seed it with (a bounded local run —
+693576 execs in 10s — found none against the current corpus/dict, which
+is itself a proof-of-clean, not a gap). Seeded one synthetic case,
+`crash-wildcard-precedence-flip` (`*, zstd;q=0`), from mutation 1 of
+step 21's mutation pass (wildcard/explicit precedence swap), which trips
+the fuzz target's own semantic-differential oracle:
+
+```
+# mutated ngx_http_zstd_coding_weight() (precedence swapped):
+$ ./fuzz_target_mutant /tmp/crash-wildcard-precedence-flip
+==...== ERROR: libFuzzer: deadly signal
+    ... LLVMFuzzerTestOneInput fuzz_accept_encoding.c:281 ...
+exit=77
+
+# reverted to the real parser, rebuilt (distinct binary, verified same
+# source diffed clean against the pre-mutation backup before commit):
+$ ./fuzz_target_clean /tmp/crash-wildcard-precedence-flip
+Executed .../crash-wildcard-precedence-flip in 0 ms
+exit=0
+```
+
+Then ran it through the actual wired CI step's own command
+(`shopt -s nullglob; cases=(regressions/crash-*); ./fuzz_accept_encoding
+"${cases[@]}"`) against the real build — 0ms, exit 0, matching the
+manual run above. This is the "deliberately reintroduced past bug caught
+in seconds" acceptance criterion, verified once then reverted, per the
+step's own instruction.
+
+**ASan soak reaches the module, with evidence.** `ci/tools/soak.sh`'s
+`worker()` requires `ok > 0` and `bad == 0` per worker, where `bad` is
+incremented both on a failed request AND on a response that comes back
+zstd-magic-prefixed but fails to `zstd -d` cleanly — so a green soak
+proves real compressed responses were served and decoded correctly under
+the sanitizer, not merely that nginx did not crash. `asan.yml`'s own
+comment overstated this as "asserts it saw >=1 block AND >=1 pass" (no
+such block/pass counter exists in soak.sh); corrected the comment to
+describe the actual mechanism instead of inventing an assertion that
+was not there — small, but exactly the kind of comment-vs-code drift the
+green-that-proves-nothing checklist warns about, in this case in the
+DOCUMENTATION rather than the check itself, so it was worth fixing on
+sight without expanding scope to touch soak.sh's logic (which was
+already correct).
+
+Did not run a local ASan soak — the build (~1-2 min) plus soak
+(60s+) crosses into long-runner territory for a worker session; the
+mechanism was verified by reading soak.sh's actual assertions, not by
+executing them locally. Flagged for whoever next runs `asan.yml` in CI
+to confirm the corrected comment matches the real log output.
+
 ## Stopped here
 
-Landed: step 21 (unit tests, 5/5 mutations caught) and step 22 (baseline
-loaded-and-blocking control added + its mutation pass, existing driver
-scripts reviewed and kept as-is). Steps 23-26 not started this session. See
-the worker return banner for exact scope remaining.
+Landed: steps 21, 22, 23, 24. Steps 25-26 not started this session (step
+25's valgrind.supp gap noted above under "Step 25 note" was found while
+doing step 22's adjacent reading, not investigated further — genuinely out
+of my 21-26 core scope until reached properly). See the worker return
+banner for exact scope remaining.

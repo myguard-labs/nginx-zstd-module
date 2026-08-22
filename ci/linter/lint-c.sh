@@ -32,6 +32,14 @@ mapfile -t FILES < <(lint_files '^src/.*\.[ch]$' "$@")
 echo "lint-c: ${#FILES[@]} file(s)"
 rc=0
 
+# fuzz.dict's coding-name tokens are generated from the real
+# ngx_http_zstd_coding_weight(..., "TOKEN", ...) call sites in src/*.[ch]
+# (ci/fuzz/gen_dict.sh). A merely incomplete dictionary still produces a
+# green crash-only fuzz run, so this is the only thing that would ever
+# catch a new coding name added without updating the dictionary.
+say "fuzz.dict coding-token drift (ci/fuzz/gen_dict.sh --check)"
+bash "$(git rev-parse --show-toplevel)/ci/fuzz/gen_dict.sh" --check || rc=1
+
 need flawfinder "apt-get install flawfinder"
 say "flawfinder (gate >=4)"
 flawfinder --minlevel=4 --error-level=4 --quiet "${FILES[@]}" || rc=1

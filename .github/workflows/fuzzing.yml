@@ -49,6 +49,28 @@ jobs:
       - name: Build fuzz target
         run: bash ci/fuzz/build.sh "$GITHUB_WORKSPACE/ci/fuzz/fuzz_accept_encoding"
 
+      # Replay every triaged past crash FIRST -- fast (each is one input)
+      # and deterministic, so a reintroduced bug fails in seconds instead
+      # of waiting on the 120s fresh budget to happen to rediscover it.
+      # Currently empty (see ci/fuzz/regressions/README.md) -- the glob
+      # guard below keeps that from being a silent no-op forever: an
+      # empty directory is a real state, not a bug, but a stale directory
+      # that stopped matching anything after a rename WOULD be, so this
+      # step still reports its case count explicitly either way.
+      - name: Replay recorded crash regressions
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          shopt -s nullglob
+          cases=(regressions/crash-*)
+          if [ "${#cases[@]}" -eq 0 ]; then
+            echo "no recorded regressions yet (ci/fuzz/regressions/ is empty)"
+          else
+            echo "replaying ${#cases[@]} recorded crash(es)"
+            ./fuzz_accept_encoding "${cases[@]}"
+            echo "✓ all recorded regressions still pass"
+          fi
+
       - name: Run fuzzer (120s regression)
         run: |
           set -euo pipefail
