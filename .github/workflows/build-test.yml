@@ -1622,7 +1622,7 @@ jobs:
           python3 ci/tools/test_slow_drain.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18110 --backend-port 18111 \
             --log-level warn
-          # See the release job's "sub_filter/CCtx-reset" step for why
+          # See the tests job's "sub_filter/CCtx-reset" step for why
           # this exists. --log-level warn: same UBSAN debug-log trap as
           # test_slow_drain.py above -- the body round-trip assertion
           # still runs, only the invocation-count self-check is skipped.
@@ -1872,7 +1872,7 @@ jobs:
           # forces both paths every run.
           python3 ci/tools/test_slow_drain.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19110 --backend-port 19111
-          # See build-test.yml's release job for the ci/t/00-filter.t
+          # See the tests job's "sub_filter/CCtx-reset" step for the
           # TEST 92 coalescing gap this closes.
           python3 ci/tools/test_sub_filter_cctx_reset.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19112 --backend-port 19113
