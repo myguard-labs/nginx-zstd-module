@@ -1619,8 +1619,14 @@ jobs:
     needs: resolve
     env:
       NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
-      # Own Test::Nginx listen port — see the tests job for why.
-      TEST_NGINX_SERVER_PORT: "2034"
+      # This job's own Test::Nginx port band -- see ci/tools/max-port.sh.
+      # Distinct from every other TEST_BASE_PORT in this repo so a collision
+      # with another runtime job on the same self-hosted runner reads as the
+      # bind error it is, not as an unrelated flake in a rerun.
+      TEST_BASE_PORT: 19200
+      # Test::Nginx reads TEST_NGINX_PORT, not TEST_BASE_PORT -- every `prove`
+      # call below shares this job's band.
+      TEST_NGINX_PORT: 19200
       # See ci-deep.yml:117 for why this must be 20, not the ~2s Test::Nginx::Socket default.
       TEST_NGINX_TIMEOUT: "20"
 
@@ -1700,6 +1706,10 @@ jobs:
         run: |
           cpanm -l ~/perl5 --notest Test::Nginx::Socket
           echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+
+      - name: Verify test port band
+        # Before the first `prove` -- see ci/tools/max-port.sh.
+        run: ci/tools/max-port.sh "$TEST_BASE_PORT"
 
       - name: Run filter module tests
         run: |

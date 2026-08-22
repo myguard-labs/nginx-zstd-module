@@ -54,6 +54,16 @@ jobs:
     name: Build & Test::Nginx (${{ matrix.flavor }} ${{ matrix.version }})
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
+    env:
+      # Job-level band -- see ci/tools/max-port.sh. Each matrix leg still
+      # gets its own port via matrix.port below (they run concurrently on the
+      # SAME runner); this declares the job's OWN territory to the port-band
+      # policy checker, which only understands one band per job. The legs'
+      # individual ports below all sit inside this band's width and are well
+      # clear of the 1984 Test::Nginx default, so a job that forgets to wire
+      # TEST_NGINX_PORT fails loudly on that default instead of silently
+      # landing inside this job's own territory.
+      TEST_BASE_PORT: 19300
     strategy:
       fail-fast: false
       matrix:
@@ -68,15 +78,15 @@ jobs:
           - flavor: nginx
             version: "1.31.2"
             label: mainline
-            port: 1984
+            port: 19300
           - flavor: nginx
             version: "1.30.4"
             label: stable
-            port: 1994
+            port: 19310
           - flavor: angie
             version: "1.12.1"
             label: angie
-            port: 2004
+            port: 19320
     steps:
       - name: Checkout module
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -118,13 +128,28 @@ jobs:
           cpanm -l ~/perl5 --notest Test::Nginx::Socket
           echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
 
+      - name: Verify test port band
+        # Before the first `prove` -- see ci/tools/max-port.sh. The three
+        # matrix legs run CONCURRENTLY (no max-parallel cap) on their own
+        # ports (matrix.port), each inside this job's declared 19300-width-64
+        # band, so each leg verifies its OWN port here rather than the job's
+        # shared TEST_BASE_PORT -- checking only the mainline leg's port
+        # would leave the stable/angie legs unverified.
+        run: ci/tools/max-port.sh "${{ matrix.port }}" 10
+
       - name: Run ci/t/ (filter + static + conf-warn)
         env:
           # See build-test.yml's identical setting for why this must be 20,
           # not the ~2s Test::Nginx::Socket default.
           TEST_NGINX_TIMEOUT: "20"
-          # Per-leg listen port — see the matrix comment above.
+          # Per-leg listen port — see the matrix comment above. Test::Nginx
+          # prefers TEST_NGINX_SERVER_PORT over TEST_NGINX_PORT when both are
+          # set (see perldoc Test::Nginx::Socket), so the actual bind is the
+          # per-leg matrix.port; TEST_NGINX_PORT carries the job's declared
+          # TEST_BASE_PORT purely so the port-band policy checker (which only
+          # understands TEST_NGINX_PORT) can see this job is wired at all.
           TEST_NGINX_SERVER_PORT: "${{ matrix.port }}"
+          TEST_NGINX_PORT: "${{ env.TEST_BASE_PORT }}"
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
           cd "$GITHUB_WORKSPACE"
