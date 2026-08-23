@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Regression test for the worker-lifetime ZSTD_CCtx cache.
+
+ZSTD_createCCtx() plus its first-use workspace allocation is 34-75% of the
+per-response libzstd CPU at typical body sizes, so the filter lends one
+worker-lifetime context to one request at a time instead of creating a fresh
+context per response.
+
+Two properties have to hold at once, and a test for either alone is worthless:
+
+  1. The cache actually engages. A green correctness suite proves only that
+     nothing broke -- it passes identically if the cache never hits and every
+     request builds its own context, which is the bug this optimisation exists
+     to avoid. Asserted here from the ngx_log_debug witnesses: N sequential
+     requests through one worker must yield exactly ONE "created cctx" and
+     N-1 "reusing worker cctx".
+
+  2. Reuse never bleeds state between requests. Asserted by decoding every
+     response and byte-comparing it to its own distinct origin body. This
+     overlaps test_concurrent_cctx_isolation.py on purpose: that tool proves
+     the CONCURRENT case (a second in-flight claimant must not get the loaned
+     context), this one proves the SEQUENTIAL case (the reused context must
+     carry no residue from the previous response).
+
+Also pins the level-partition rule: a location with a different
+zstd_comp_level must NOT reuse a context cached for another level, because the
+retained workspace is level-driven and never shrinks. Without that partition a
+single level-19 location would raise the worker's memory floor for every
+request of every other location.
+
+Needs an nginx built --with-debug: the reuse witnesses are debug log lines.
+"""
+
+import argparse
+import importlib.util
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+MODULE_PATH = pathlib.Path(__file__).with_name("test_encoding.py")
+SPEC = importlib.util.spec_from_file_location("test_encoding", MODULE_PATH)
+test_encoding = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(test_encoding)
+
+CREATE_WITNESS = "zstd: created cctx"
+REUSE_WITNESS = "zstd: reusing worker cctx"
+
+# Enough requests that a one-off cache miss cannot be mistaken for the
+# steady state, small enough to stay fast.
+ROUNDS = 12
+
+# Comfortably over zstd_min_length, and distinct per request so a stale
+# context serving the previous body is a byte mismatch, not a silent pass.
+BODY_SIZE = 24 * 1024
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Regression test for the worker-lifetime ZSTD_CCtx cache."
+    )
+    parser.add_argument("--nginx-binary", required=True)
+    parser.add_argument("--filter-module")
+    parser.add_argument("--port", type=int, default=18116)
+    parser.add_argument(
+        "--log-level",
+        choices=("debug", "warn"),
+        default="debug",
+        help="Location error_log level. The cache-engagement witnesses are "
+        "only asserted at debug. Use warn under sanitizer builds: UBSAN "
+        "(-fno-sanitize-recover) fatally traps nginx core's own debug "
+        'logging -- every "%%V?%%V" line passes r->args={0,NULL} into '
+        "ngx_sprintf_str's nonnull argument on query-less URIs "
+        "(ngx_string.c:586) -- so a sanitized nginx cannot log at debug at "
+        "all. The byte-exactness oracles still run and still gate; only the "
+        "witness counts are skipped.",
+    )
+    parser.add_argument(
+        "--zstd-bin",
+        default=test_encoding.shutil.which("zstd") or "zstd",
+    )
+    return parser.parse_args()
+
+
+def fixture(rid: int) -> bytes:
+    """A distinct, compressible body per request id.
+
+    Distinct matters: if every request shared one body, a context that
+    replayed the PREVIOUS response would still decode byte-exact and the
+    isolation half of this test would assert nothing.
+    """
+    seed = f"cctx-reuse-{rid:04d}-".encode()
+    return (seed * (BODY_SIZE // len(seed) + 1))[:BODY_SIZE]
+
+
+def http_get(port: int, path: str) -> bytes:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        headers={"Accept-Encoding": "zstd"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        if resp.headers.get("Content-Encoding") != "zstd":
+            raise RuntimeError(
+                f"{path}: expected Content-Encoding: zstd, got "
+                f"{resp.headers.get('Content-Encoding')!r} -- the response was "
+                f"not compressed, so this run proves nothing about the cache"
+            )
+        return resp.read()
+
+
+def main() -> int:
+    args = parse_args()
+    nginx = pathlib.Path(args.nginx_binary)
+    if not nginx.exists():
+        raise FileNotFoundError(nginx)
+
+    v = subprocess.run([str(nginx), "-V"], capture_output=True, text=True, check=False)
+    if "zstd" not in v.stderr:
+        raise RuntimeError("nginx -V shows no zstd module")
+    if args.log_level == "debug" and "--with-debug" not in v.stderr:
+        raise RuntimeError(
+            "the reuse witnesses are ngx_log_debug lines: this tool needs an "
+            "nginx built --with-debug, or --log-level warn to skip them"
+        )
+
+    filter_so = test_encoding.detect_module_path(
+        args.filter_module, nginx, "ngx_http_zstd_filter_module.so"
+    )
+    load = f"load_module {filter_so};\n" if filter_so else ""
+
+    def decode(blob: bytes) -> bytes:
+        r = subprocess.run(
+            [args.zstd_bin, "-d", "-q", "-c"],
+            input=blob,
+            capture_output=True,
+            check=False,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(
+                "zstd decode failed: " + r.stderr.decode("utf-8", "replace").strip()
+            )
+        return r.stdout
+
+    os.umask(0o022)
+    with tempfile.TemporaryDirectory(prefix="zstd-cctx-reuse-") as td:
+        os.chmod(td, 0o755)
+        root = pathlib.Path(td)
+        (root / "logs").mkdir()
+        html = root / "html"
+        html.mkdir()
+        alt = root / "html-alt"
+        alt.mkdir()
+
+        for rid in range(ROUNDS):
+            (html / f"b{rid}").write_bytes(fixture(rid))
+        # Served by a location pinned to a different zstd_comp_level.
+        (alt / "b").write_bytes(fixture(999))
+
+        lvl = args.log_level
+        conf = root / "nginx.conf"
+        conf.write_text(
+            f"""worker_processes 1;
+{load}error_log {root}/logs/error.log warn;
+pid {root}/nginx.pid;
+events {{ worker_connections 64; }}
+http {{
+    access_log off;
+    default_type application/octet-stream;
+    zstd on;
+    zstd_min_length 1;
+    zstd_types application/octet-stream;
+    gzip_vary on;
+    server {{
+        listen 127.0.0.1:{args.port};
+        location /b {{
+            error_log {root}/logs/error.log {lvl};
+            alias {html}/;
+        }}
+        location /alt/ {{
+            error_log {root}/logs/error.log {lvl};
+            alias {alt}/;
+            zstd_comp_level 9;
+        }}
+    }}
+}}
+""",
+            encoding="utf-8",
+        )
+
+        nlog_path = root / "logs" / "nginx-stdout.log"
+        nlog = open(nlog_path, "w", encoding="utf-8")  # noqa: SIM115
+        proc = subprocess.Popen(
+            [
+                str(nginx),
+                "-p",
+                str(root),
+                "-c",
+                str(conf),
+                "-g",
+                "daemon off; master_process off;",
+            ],
+            stdout=nlog,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        failures: list[str] = []
+        try:
+            test_encoding.wait_for_port(args.port)
+            if proc.poll() is not None:
+                nlog.flush()
+                raise RuntimeError(
+                    "nginx exited during startup; tail:\n"
+                    + nlog_path.read_text("utf-8", "replace")[-2000:]
+                )
+
+            # --- property 2: no state bleed across reused contexts ---
+            for rid in range(ROUNDS):
+                want = fixture(rid)
+                got = decode(http_get(args.port, f"/b/b{rid}"))
+                if got != want:
+                    failures.append(
+                        f"request {rid}: decoded {len(got)}B != origin "
+                        f"{len(want)}B -- the reused context carried state "
+                        f"from a previous response"
+                    )
+                    break
+
+            # A different zstd_comp_level must take the per-request path.
+            alt_want = fixture(999)
+            alt_got = decode(http_get(args.port, "/alt/b"))
+            if alt_got != alt_want:
+                failures.append("level-9 location: decoded body mismatch")
+
+            # Flush the debug log before reading witnesses.
+            time.sleep(0.3)
+            elog = (root / "logs" / "error.log").read_text("utf-8", "replace")
+            created = len(re.findall(re.escape(CREATE_WITNESS), elog))
+            reused = len(re.findall(re.escape(REUSE_WITNESS), elog))
+
+            if args.log_level != "debug":
+                print(
+                    "  witnesses skipped (--log-level warn: a sanitized "
+                    "nginx cannot log at debug -- byte-exactness still "
+                    "gates, cache engagement is NOT proven in this run)"
+                )
+
+            # --- property 1: the cache actually engages ---
+            #
+            # Exactly two contexts are ever created: the level-3 default one
+            # seeded by the first /b request, and the level-9 one the /alt
+            # location cannot borrow. Anything more means the cache is not
+            # holding across requests.
+            if args.log_level == "debug" and created != 2:
+                failures.append(
+                    f"expected exactly 2 'created cctx' witnesses "
+                    f"(one cached default-level, one for the level-9 "
+                    f"location that must not reuse it), saw {created} -- "
+                    f"the cache is not surviving across requests"
+                )
+            # ROUNDS-1: the first /b request seeds the cache (counted as a
+            # create, not a reuse). The /alt request is a create too.
+            if args.log_level == "debug" and reused != ROUNDS - 1:
+                failures.append(
+                    f"expected {ROUNDS - 1} 'reusing worker cctx' witnesses "
+                    f"across {ROUNDS} sequential requests, saw {reused}"
+                )
+
+            if not failures:
+                print(
+                    f"  {ROUNDS} sequential responses decoded byte-exact to "
+                    f"their own origins"
+                )
+                if args.log_level == "debug":
+                    print(
+                        f"  witnesses: {created} cctx created, {reused} "
+                        f"reused -- cache engaged and level-partitioned"
+                    )
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            nlog.close()
+
+        if failures:
+            for f in failures:
+                print(f"FAIL: {f}", file=sys.stderr)
+            return 1
+
+    print(
+        f"OK: worker CCtx cache reused across {ROUNDS} sequential requests "
+        f"with no cross-request state bleed, and a different zstd_comp_level "
+        f"correctly took the per-request path"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

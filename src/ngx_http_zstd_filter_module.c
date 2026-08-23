@@ -318,6 +318,10 @@ static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static void ngx_http_zstd_cleanup_dict(void *data);
 static void ngx_http_zstd_cleanup_cctx(void *data);
+static void ngx_http_zstd_release_cctx(void *data);
+static ngx_int_t ngx_http_zstd_acquire_cctx(ngx_http_request_t *r,
+    ngx_http_zstd_ctx_t *ctx, ngx_http_zstd_loc_conf_t *zlcf);
+static void ngx_http_zstd_exit_process(ngx_cycle_t *cycle);
 static char *ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_table_elt_t *ngx_http_zstd_find_request_header(
@@ -326,6 +330,44 @@ static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
     ngx_http_request_t *r, ngx_http_zstd_loc_conf_t *zlcf);
 static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
+
+
+/*
+ * Worker-lifetime CCtx cache.
+ *
+ * ZSTD_createCCtx() plus the first-use workspace allocation is 34-75% of the
+ * per-response libzstd CPU on typical body sizes (measured, libzstd 1.5.7:
+ * ~1.6us of 3.1us at level 6 / 8 KB; ~10.8us of 15.0us at level 6 / 64 KB).
+ * Since ngx_http_zstd_filter_init_cctx() already does a full
+ * ZSTD_reset_session_and_parameters() and re-applies every parameter on each
+ * request, a context carried across requests is byte-for-byte equivalent on
+ * the wire to a freshly created one -- the creation is pure overhead.
+ *
+ * Why this does NOT reintroduce the shared-context bug 774b4a5 fixed: that
+ * commit's defect was a context shared between CONCURRENT requests (interleaved
+ * compression state). Here the cache lends the context to exactly one
+ * request at a time -- `busy` is set on loan and cleared by the request
+ * pool's cleanup handler -- so any second concurrent claimant (a subrequest
+ * compressing while the main request is mid-stream) transparently gets its
+ * own per-request context instead. The per-request ownership model is
+ * preserved; only the allocation is amortised.
+ *
+ * Why there is no runtime memory cap: ZSTD_sizeof_CCtx() does not shrink on
+ * reset, so an unbounded cache would pin each worker's RSS at its
+ * largest-ever footprint. Measured, the retained workspace is driven by the
+ * COMPRESSION LEVEL, not by windowLog or by a dcz raw prefix (level 1 ->
+ * 582 KB, level 19 -> 85 MB, and returning to level 1 keeps the 85 MB;
+ * windowLog 20 vs 27 and a 1 MB refPrefix all leave it unchanged at a fixed
+ * level). zstd_comp_level is fixed at config load, and zstd_max_cctx_memory
+ * already asserts that level's estimated footprint against the operator's
+ * budget at config time. So the cached context's high-water mark is exactly
+ * the figure config load already vetted, and pinning the cache to one level
+ * keeps it there. A location with a different
+ * zstd_comp_level does not reuse the cache; it takes the per-request path.
+ */
+static ZSTD_CCtx  *ngx_http_zstd_worker_cctx;
+static ngx_int_t   ngx_http_zstd_worker_cctx_level;
+static ngx_uint_t  ngx_http_zstd_worker_cctx_busy;
 
 
 static ngx_conf_post_t  ngx_http_zstd_comp_level_bounds = {
@@ -490,7 +532,7 @@ ngx_module_t  ngx_http_zstd_filter_module = {
     NULL,                                   /* init process */
     NULL,                                   /* init thread */
     NULL,                                   /* exit thread */
-    NULL,                                   /* exit process */
+    ngx_http_zstd_exit_process,             /* exit process */
     NULL,                                   /* exit master */
     NGX_MODULE_V1_PADDING
 };
@@ -1701,10 +1743,101 @@ ngx_http_zstd_set_param(ngx_http_request_t *r, ZSTD_CCtx *cctx,
 
 
 /*
- * Configure a per-request CCtx on first body data.
- * The CCtx is allocated outside the request pool but attached to the request
- * cleanup chain, so overlapping requests in one worker never share libzstd
- * streaming state.
+ * Give this request a CCtx: either the worker's cached one on loan, or a
+ * fresh per-request context.
+ *
+ * Extracted from ngx_http_zstd_filter_init_cctx() so the loan bookkeeping --
+ * which cleanup handler owns the context, and when `busy` may be set -- reads
+ * as one unit instead of as five branches inside the parameter-setting code.
+ *
+ * On success ctx->cctx is non-NULL and a pool cleanup owns it: either
+ * ngx_http_zstd_release_cctx (returns the loan) or ngx_http_zstd_cleanup_cctx
+ * (frees an unshared context).
+ */
+static ngx_int_t
+ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
+    ngx_http_zstd_loc_conf_t *zlcf)
+{
+    ngx_uint_t           borrowed;
+    ngx_pool_cleanup_t  *cln;
+
+    /*
+     * The cleanup slot is registered BEFORE the context is claimed, so a
+     * borrowed context can never be stranded with busy set: an allocation
+     * failure here happens while the cache is still untouched.
+     */
+    cln = ngx_pool_cleanup_add(r->pool, 0);
+    if (cln == NULL) {
+        return NGX_ERROR;
+    }
+
+    borrowed = 0;
+
+    /*
+     * Borrow the worker context when it is free and was built for this
+     * location's compression level. A level mismatch takes the per-request
+     * path rather than re-levelling the cache: the retained workspace is
+     * level-driven and never shrinks, so honouring a higher-level location
+     * here would raise the worker's floor for every subsequent request of
+     * every other location.
+     */
+    if (!ngx_http_zstd_worker_cctx_busy
+        && ngx_http_zstd_worker_cctx != NULL
+        && ngx_http_zstd_worker_cctx_level == zlcf->level)
+    {
+        ctx->cctx = ngx_http_zstd_worker_cctx;
+        borrowed = 1;
+
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: reusing worker cctx %p", ctx->cctx);
+
+    } else {
+        ctx->cctx = ZSTD_createCCtx();
+        if (ctx->cctx == NULL) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "zstd: ZSTD_createCCtx() failed");
+            return NGX_ERROR;
+        }
+
+        /*
+         * Seed an empty cache so subsequent requests amortise. Only an empty
+         * cache is populated -- a live cached context is never evicted
+         * mid-flight, and one already on loan is left alone.
+         */
+        if (ngx_http_zstd_worker_cctx == NULL) {
+            ngx_http_zstd_worker_cctx = ctx->cctx;
+            ngx_http_zstd_worker_cctx_level = zlcf->level;
+            borrowed = 1;
+        }
+
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: created cctx %p (cached:%ui)",
+                       ctx->cctx, borrowed);
+    }
+
+    if (borrowed) {
+        ngx_http_zstd_worker_cctx_busy = 1;
+        cln->handler = ngx_http_zstd_release_cctx;
+
+    } else {
+        cln->handler = ngx_http_zstd_cleanup_cctx;
+    }
+
+    cln->data = ctx->cctx;
+
+    return NGX_OK;
+}
+
+
+/*
+ * Configure this request's CCtx on first body data.
+ *
+ * The context comes from ngx_http_zstd_acquire_cctx() -- either the worker's
+ * cached one on loan or a fresh per-request one -- and is attached to the
+ * request cleanup chain either way, so overlapping requests in one worker
+ * never share libzstd streaming state. Every parameter is (re-)applied here
+ * after a full reset, which is what makes a carried-over context equivalent
+ * to a freshly created one.
  */
 static ngx_int_t
 ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
@@ -1716,25 +1849,10 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
 
     zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
 
-    if (ctx->cctx == NULL) {
-        ngx_pool_cleanup_t  *cln;
-
-        ctx->cctx = ZSTD_createCCtx();
-        if (ctx->cctx == NULL) {
-            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                          "zstd: ZSTD_createCCtx() failed");
-            return NGX_ERROR;
-        }
-
-        cln = ngx_pool_cleanup_add(r->pool, 0);
-        if (cln == NULL) {
-            ZSTD_freeCCtx(ctx->cctx);
-            ctx->cctx = NULL;
-            return NGX_ERROR;
-        }
-
-        cln->handler = ngx_http_zstd_cleanup_cctx;
-        cln->data = ctx->cctx;
+    if (ctx->cctx == NULL
+        && ngx_http_zstd_acquire_cctx(r, ctx, zlcf) != NGX_OK)
+    {
+        return NGX_ERROR;
     }
 
     cctx = ctx->cctx;
@@ -2716,6 +2834,67 @@ ngx_http_zstd_cleanup_cctx(void *data)
     if (cctx != NULL) {
         ZSTD_freeCCtx(cctx);
     }
+}
+
+
+/*
+ * Return a borrowed worker context to the cache at request end.
+ *
+ * Runs from the request pool's cleanup list, so it fires on every exit path --
+ * normal completion, client abort, upstream error, worker shutdown of a live
+ * request -- which is what makes `busy` a reliable loan flag rather than a leak
+ * waiting for the one path that forgot to clear it.
+ *
+ * The session is reset HERE, not only on the next acquire: a request may be
+ * abandoned mid-stream (client reset on a partially compressed response), and
+ * leaving that half-finished frame state resident means the cached context
+ * holds the previous response's compression state until something else
+ * claims it.
+ * init_cctx does reset before reuse, so this is defence in depth against a
+ * future caller that forgets -- and it releases the session's internal buffers
+ * promptly rather than pinning them until the next request arrives.
+ */
+static void
+ngx_http_zstd_release_cctx(void *data)
+{
+    ZSTD_CCtx *cctx = data;
+
+    if (cctx == NULL) {
+        return;
+    }
+
+    if (cctx == ngx_http_zstd_worker_cctx) {
+        (void) ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);
+        ngx_http_zstd_worker_cctx_busy = 0;
+        return;
+    }
+
+    /*
+     * Not the cached context: the cache was replaced while this request held
+     * its loan (only reachable if a future edit adds eviction). Own it.
+     */
+    ZSTD_freeCCtx(cctx);
+}
+
+
+/*
+ * Free the worker's cached context at process exit.
+ *
+ * Without this the cache is a live allocation at shutdown, which LeakSanitizer
+ * and Valgrind both report -- this tree gates on both, so a "harmless" one-off
+ * worker-lifetime leak would be a red CI job, not a footnote. Any request still
+ * holding a loan has already had its pool destroyed by the time module exit
+ * handlers run, so the context is unowned here.
+ */
+static void
+ngx_http_zstd_exit_process(ngx_cycle_t *cycle)
+{
+    if (ngx_http_zstd_worker_cctx != NULL) {
+        ZSTD_freeCCtx(ngx_http_zstd_worker_cctx);
+        ngx_http_zstd_worker_cctx = NULL;
+    }
+
+    ngx_http_zstd_worker_cctx_busy = 0;
 }
 
 

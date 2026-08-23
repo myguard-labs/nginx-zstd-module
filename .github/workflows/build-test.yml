@@ -1421,6 +1421,24 @@ jobs:
             --concurrency 16 --rounds 6
           echo "✓ per-request CCtx isolation regression passed"
 
+      - name: Run worker CCtx cache regression
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # The filter lends one worker-lifetime CCtx to one request at a
+          # time instead of creating one per response. Two properties, and
+          # the correctness suite above only covers the second: the cache
+          # must actually ENGAGE (asserted from the debug witnesses -- a
+          # cache that never hits passes every other test in this file),
+          # and a reused context must carry no residue into the next
+          # response. Also pins the level partition: the retained workspace
+          # is compression-level-driven and never shrinks, so a location at
+          # a different zstd_comp_level must not reuse the cached context.
+          python3 ci/tools/test_cctx_reuse.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18116
+          echo "✓ worker CCtx cache regression passed"
+
       - name: Run reload-under-load correctness regression
         timeout-minutes: 6
         run: |
@@ -1866,6 +1884,13 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" --port 19096 --backend-port 19097
           python3 ci/tools/test_concurrent_cctx_isolation.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19098 --backend-port 19099
+          # --log-level warn: UBSAN (-fno-sanitize-recover) fatally traps
+          # nginx core's own debug logging (ngx_string.c:586), so a
+          # sanitized nginx cannot run at debug at all. The byte-exactness
+          # oracles still gate here; the cache-engagement witnesses are
+          # asserted by the same tool in the non-sanitized tests job.
+          python3 ci/tools/test_cctx_reuse.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19114 --log-level warn
           python3 ci/tools/test_proxy_unbuffered_truncation.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19094 --backend-port 19095
           # The reason this tool exists: the floor below assumes the
