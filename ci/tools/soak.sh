@@ -163,16 +163,20 @@ worker() {
         fi
         if curl -fsS "${hdrs[@]}" \
             "http://127.0.0.1:18222$p" -o "$body" 2>/dev/null; then
-            # If it came back zstd-encoded, it must decode cleanly.
+            # Every served response variant must be enumerated explicitly.
+            # Unrecognized magics are a hard failure, not a silent pass.
             #
-            # A dcz response starts with the skippable-frame magic
-            # 5e2a4d18, NOT 28b52ffd, so testing only for the zstd magic
-            # would let every dcz response fall through to the unchecked
-            # else-branch and count as ok without ever being decoded --
-            # a green soak that proves nothing about the path it was
-            # extended to cover. Decode dcz against the same dictionary
-            # the request advertised: that verifies the frame header, the
-            # refPrefix output and the dictionary content all agree.
+            # Legitimate response variants:
+            # 1. Plain zstd: magic 28b52ffd (all paths except /bypass?nozstd=1)
+            # 2. DCZ skippable frame: magic 5e2a4d18 (from /dcz with negotiation)
+            # 3. Identity/uncompressed: no magic (only /bypass?nozstd=1, which
+            #    has zstd_bypass active, so the response is not compressed)
+            #
+            # A dcz response starts with 5e2a4d18, NOT 28b52ffd, so testing
+            # only for the zstd magic would let every dcz response fall through
+            # and count as ok without ever being decoded. Decode dcz against
+            # the same dictionary the request advertised: that verifies the
+            # frame header, the refPrefix output and the dictionary content.
             magic="$(head -c4 "$body" | od -An -tx1 | tr -d ' ')"
             if [ "$magic" = "28b52ffd" ]; then
                 if zstd -dq -c "$body" >/dev/null 2>&1; then
@@ -196,8 +200,26 @@ worker() {
                 # dcz frame nor a zstd frame.
                 echo "BAD dcz $p: negotiated request returned magic $magic"
                 bad=$((bad + 1))
-            else
+            elif [ "$ae" != "zstd" ]; then
+                # This request advertised only gzip (no zstd in
+                # Accept-Encoding), so the module correctly declined to
+                # compress on every path, identity is expected here.
                 ok=$((ok + 1))
+            elif [ "$p" = "/tiny" ]; then
+                # /tiny is a 50-byte fixture, deliberately below
+                # zstd_min_length 100 on location /. Identity is expected.
+                ok=$((ok + 1))
+            elif [ "$p" = "/bypass?nozstd=1" ]; then
+                # zstd_bypass is active on this path, so the response is
+                # uncompressed identity. No magic header, just accept it.
+                ok=$((ok + 1))
+            else
+                # Every other combination (ae advertised zstd, and the path
+                # is not sub-min_length or bypassed) must have compressed.
+                # Identity here is a real "we stopped compressing"
+                # regression, not a benign variant.
+                echo "BAD unknown magic $magic $p (Accept-Encoding: $ae)"
+                bad=$((bad + 1))
             fi
 
             # A negotiated request that came back as a plain zstd frame is
