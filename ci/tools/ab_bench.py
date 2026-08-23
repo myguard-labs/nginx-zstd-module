@@ -25,6 +25,41 @@ What it measures
   separately, specifically so nobody can quote a blanket speedup that
   doesn't hold at every size.
 
+Why bodies are proxied through a paced backend, not served static
+-------------------------------------------------------------------
+The worker-lifetime CCtx loan (acquire_cctx sets the busy flag; only
+request CLEANUP clears it -- src/ngx_http_zstd_filter_module.c:1847 and
+:2896) is held for the FULL lifetime of one compression, so two
+compressions only contend when their lifetimes actually overlap on one
+worker. A location serving a static, fully-buffered, known-length body
+from page cache completes inside a single event-loop turn; `wrk`
+connections then queue rather than overlap, and every concurrency in the
+sweep reports the same meaningless 100% hit rate with worker RSS that
+never moves -- indistinguishable, from the debug pass's own numbers,
+from a real single-slot cache never actually contending. An earlier
+version of this harness did exactly that and it was caught in review
+before the numbers were trusted.
+
+Every body is therefore served by PacedBackend: a mock upstream, proxied
+with `proxy_buffering off`, that sends chunked-transfer headers
+immediately and then the body in small pieces with a short sleep between
+each. The filter's compression session for one response stays open
+across many event-loop turns while other connections are being
+accepted, so a second concurrent request can reach acquire_cctx while
+the first still holds the loan -- the only way this workload can
+demonstrate the contention the ring-sizing row is about.
+
+The harness self-checks this rather than trusting it: the debug pass
+requires the hit rate at the LOWEST swept concurrency to be measurably
+higher than at the HIGHEST -- a relative fall, because "decays toward
+1/N" is itself a relative claim -- plus an absolute floor on `created`
+witnesses at the highest concurrency, and raises a RuntimeError (harness
+error, non-zero exit) if either does not hold. A flat 100% hit rate at
+every concurrency is never printed as a result -- it is either real
+contention whose hit rate genuinely falls with concurrency, which the
+self-check has independently confirmed, or the self-check itself fails
+loudly instead.
+
 What it deliberately does NOT do
 ---------------------------------
 - It does NOT report a cache-engagement hit rate alongside release
@@ -40,10 +75,15 @@ What it deliberately does NOT do
   possible to accidentally print one pass's numbers as if measured
   together with the other's. If only a release-mode binary is given, the
   hit rate is reported as unmeasured, never inferred.
-- It is not a pass/fail gate. Exit non-zero only on a harness error
-  (missing wrk/nginx, nginx failed to start, zero successful requests for
-  an arm) -- same contract as ci/tools/benchmark.py. A "slow" result is a
-  result, not a failure.
+- It does NOT trust a flat hit rate. See "Why bodies are proxied" above --
+  the debug pass's own self-check must independently prove contention
+  happened before its numbers are printed at all.
+- It is not a pass/fail gate on the MODULE's performance. Exit non-zero
+  only on a harness error (missing wrk/nginx, nginx failed to start, zero
+  successful requests for an arm, or the contention self-check failing)
+  -- same contract as ci/tools/benchmark.py. A "slow" result is a result,
+  not a failure; a workload that cannot contend IS a harness failure,
+  because it cannot back up any hit-rate number it would otherwise print.
 - It is not wired into any CI workflow. This is a manual measurement tool
   the TODO rows above call out as their prerequisite; running it is a
   deliberate step a human (or a grind worker sizing the ring) takes, not
@@ -83,6 +123,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -103,6 +144,33 @@ BODY_SIZES: dict[str, int] = {
 
 CREATE_WITNESS = "zstd: created cctx"
 REUSE_WITNESS = "zstd: reusing worker cctx"
+
+# The loan (ngx_http_zstd_worker_cctx_busy) is held from acquire_cctx
+# until REQUEST CLEANUP, so two compressions only actually CONTEND when
+# their lifetimes overlap on one worker. A location that serves a static,
+# fully-buffered, known-length body from page cache completes inside one
+# event-loop turn -- wrk connections then queue rather than overlap, and
+# the harness would silently report a meaningless 100% hit rate at every
+# concurrency (caught in review: flat 100% at 8/32/128 conn plus
+# unmoving worker RSS is the signature of a workload that never
+# contends, not of a healthy cache). Bodies are therefore served via
+# PacedBackend + `proxy_buffering off` below: the backend sends headers
+# immediately, then the body in small chunked pieces with a sleep
+# between each, so the filter's compression session for one response
+# stays open across many event-loop turns while other connections are
+# being accepted -- long enough for a second concurrent request to
+# reach acquire_cctx while the first still holds the loan.
+PACE_CHUNK = 512
+PACE_DELAY_S = 0.004
+
+# Self-check thresholds for the debug pass -- see run_debug_pass. An
+# absolute "created > 1" floor and a relative created-fraction rise
+# were both tried and rejected (see the comment at the check itself);
+# the check that survived compares the HIT RATE at the lowest vs the
+# highest swept concurrency, since "decays toward 1/N" is a relative
+# claim about the hit rate and this is its negative control.
+CONTENTION_MIN_CREATED = 2
+CONTENTION_MIN_RELATIVE_RISE = 1.5
 
 
 @dataclasses.dataclass
@@ -169,9 +237,100 @@ def wait_for_port(port: int, timeout: float = 10.0) -> bool:
     return False
 
 
+def body_bytes(size: int) -> bytes:
+    """Realistic ~6:1-compressible HTML-ish body of the given size --
+    matches the fixture the existing +79% measurement used, not
+    incompressible random bytes (which would exercise a different, less
+    representative code path in the compressor).
+    """
+    unit = b"<div class='row'><span>item</span><a href='/x'>link text here</a></div>\n"
+    reps = size // len(unit) + 1
+    return (unit * reps)[:size]
+
+
+class PacedBackend(threading.Thread):
+    """Mock upstream: sends chunked-transfer headers immediately, then
+    the body in PACE_CHUNK-sized pieces with a PACE_DELAY_S sleep
+    between each. One handler thread per accepted connection so it
+    scales to the harness's own concurrency sweep without becoming the
+    bottleneck itself.
+
+    This is what makes compression sessions overlap. Proxied through
+    nginx with `proxy_buffering off`, the filter processes each chunk as
+    it streams in rather than compressing one fully-buffered body in a
+    single event-loop turn -- so the worker-lifetime CCtx loan
+    (acquired at acquire_cctx, released only at request cleanup, per
+    src/ngx_http_zstd_filter_module.c:1847/:2896) stays held for the
+    whole paced duration instead of being taken and returned before the
+    next request is even accepted. A static, fully-buffered,
+    known-length body completes inside one event-loop turn and can
+    never contend, however high the connection count -- that was the
+    workload bug this class exists to fix.
+    """
+
+    def __init__(self, port: int, bodies: dict[str, bytes]) -> None:
+        super().__init__(daemon=True)
+        self.port = port
+        self.bodies = bodies
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(("127.0.0.1", port))
+        self.srv.listen(256)
+        self._stopping = False
+
+    def stop(self) -> None:
+        self._stopping = True
+        try:
+            self.srv.close()
+        except OSError:
+            pass
+
+    def run(self) -> None:
+        while not self._stopping:
+            try:
+                conn, _ = self.srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve_conn, args=(conn,), daemon=True).start()
+
+    def _serve_conn(self, conn: socket.socket) -> None:
+        try:
+            conn.settimeout(15)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                piece = conn.recv(4096)
+                if not piece:
+                    return
+                buf += piece
+            request_line = buf.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            path = request_line.split(" ")[1] if " " in request_line else "/"
+            name = path.strip("/").split("/")[-1] or "8kb"
+            body = self.bodies.get(name, next(iter(self.bodies.values())))
+
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/octet-stream\r\n"
+                b"Transfer-Encoding: chunked\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            for i in range(0, len(body), PACE_CHUNK):
+                piece = body[i : i + PACE_CHUNK]
+                conn.sendall(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+                time.sleep(PACE_DELAY_S)
+            conn.sendall(b"0\r\n\r\n")
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
 def write_conf(
     root: pathlib.Path,
     port: int,
+    backend_port: int,
     arm: Arm,
     workers: int,
     log_level: str,
@@ -203,29 +362,22 @@ http {{
     zstd_types application/octet-stream;
     server {{
         listen 127.0.0.1:{port};
-        root {root}/html;
         default_type application/octet-stream;
-        location / {{ }}
+        location / {{
+            # Paced, chunked, unbuffered upstream -- see PacedBackend.
+            # A static in-page-cache body completes in one event-loop
+            # turn and can never make two compressions overlap.
+            proxy_pass http://127.0.0.1:{backend_port};
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_buffering off;
+        }}
     }}
 }}
 """,
         encoding="utf-8",
     )
     return conf
-
-
-def make_bodies(root: pathlib.Path) -> None:
-    """Realistic ~6:1-compressible HTML-ish bodies, one file per size
-    class -- matches the fixture the existing +79% measurement used, not
-    incompressible random bytes (which would exercise a different, less
-    representative code path in the compressor).
-    """
-    html = root / "html"
-    html.mkdir(exist_ok=True)
-    unit = b"<div class='row'><span>item</span><a href='/x'>link text here</a></div>\n"
-    for name, size in BODY_SIZES.items():
-        reps = size // len(unit) + 1
-        (html / name).write_bytes((unit * reps)[:size])
 
 
 def start_nginx(arm: Arm, conf: pathlib.Path, root: pathlib.Path) -> subprocess.Popen:
@@ -401,16 +553,20 @@ def run_release_pass(
         for arm in arms
     }
 
+    bodies = {name: body_bytes(size) for name, size in BODY_SIZES.items()}
     procs: dict[str, tuple[subprocess.Popen, pathlib.Path, int]] = {}
+    backends: list[PacedBackend] = []
     workdirs: list[pathlib.Path] = []
     try:
         for i, arm in enumerate(arms):
             root = pathlib.Path(tempfile.mkdtemp(prefix=f"ab-bench-{arm.label}-"))
             workdirs.append(root)
-            (root / "html").mkdir(exist_ok=True)
-            make_bodies(root)
-            port = base_port + i
-            conf = write_conf(root, port, arm, workers, "warn")
+            port = base_port + i * 2
+            backend_port = port + 1
+            backend = PacedBackend(backend_port, bodies)
+            backend.start()
+            backends.append(backend)
+            conf = write_conf(root, port, backend_port, arm, workers, "warn")
             proc = start_nginx(arm, conf, root)
             if not wait_for_port(port, timeout=10):
                 tail = ""
@@ -451,6 +607,8 @@ def run_release_pass(
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        for backend in backends:
+            backend.stop()
         for root in workdirs:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -459,20 +617,44 @@ def run_release_pass(
 
 def run_debug_pass(
     arm: Arm,
-    conc: int,
+    concurrencies: list[int],
     duration: str,
     workers: int,
     base_port: int,
-) -> WitnessSample:
+) -> dict[int, WitnessSample]:
     """Separate pass, debug-level logging, only for engagement witnesses.
     Its own throughput is NOT reported -- see module docstring.
+
+    Runs the FULL concurrency sweep against ONE long-lived nginx
+    instance (never restarted between concurrencies) so `created` and
+    `reused` accumulate across the whole sweep and the ring-sizing row's
+    actual question -- does the hit rate DEGRADE as concurrency rises --
+    is something this pass can show directly, not just a single
+    snapshot.
+
+    Raises RuntimeError (a harness error, not a "slow result") if the
+    workload never demonstrates genuine RELATIVE contention: the hit
+    rate at the lowest swept concurrency must be materially higher than
+    at the highest (CONTENTION_MIN_RELATIVE_RISE), with at least
+    CONTENTION_MIN_CREATED "created cctx" witnesses at the highest
+    concurrency. An absolute `created > 1` floor alone is too weak, and
+    a relative created-fraction check saturates near 1.0 once
+    contention is heavy -- both were tried and rejected, see the
+    comment at the check itself. A flat or barely-falling hit rate
+    across the sweep is indistinguishable from a workload that never
+    contends, which is a broken measurement, not a real 100% hit rate.
+    See PacedBackend's docstring for why the workload needs pacing to
+    make genuine overlap possible at all.
     """
     root = pathlib.Path(tempfile.mkdtemp(prefix=f"ab-bench-debug-{arm.label}-"))
+    bodies = {name: body_bytes(size) for name, size in BODY_SIZES.items()}
+    backend_port = base_port + 1
+    backend = PacedBackend(backend_port, bodies)
+    results: dict[int, WitnessSample] = {}
     try:
-        (root / "html").mkdir(exist_ok=True)
-        make_bodies(root)
+        backend.start()
         port = base_port
-        conf = write_conf(root, port, arm, workers, "debug")
+        conf = write_conf(root, port, backend_port, arm, workers, "debug")
         proc = start_nginx(arm, conf, root)
         try:
             if not wait_for_port(port, timeout=10):
@@ -483,23 +665,84 @@ def run_debug_pass(
                 raise RuntimeError(
                     f"debug pass: nginx never became ready. Log tail:\n{tail}"
                 )
-            # Short, throughput-not-reported run purely to generate
-            # witness lines under realistic concurrent load.
-            run_wrk(f"http://127.0.0.1:{port}/8kb", conc, duration, min(conc, 4))
-            time.sleep(0.3)  # let the debug log flush
+            elog_path = root / "error.log"
+            prev_created = 0
+            prev_reused = 0
+            for conc in concurrencies:
+                # Throughput-not-reported run purely to generate witness
+                # lines under realistic concurrent load.
+                run_wrk(f"http://127.0.0.1:{port}/8kb", conc, duration, min(conc, 4))
+                time.sleep(0.3)  # let the debug log flush
+                elog = elog_path.read_text("utf-8", "replace")
+                total_created = len(re.findall(re.escape(CREATE_WITNESS), elog))
+                total_reused = len(re.findall(re.escape(REUSE_WITNESS), elog))
+                # Per-cell delta, not the running total, so each concurrency's
+                # own hit rate is reported rather than a cumulative blend.
+                created = total_created - prev_created
+                reused = total_reused - prev_reused
+                prev_created, prev_reused = total_created, total_reused
+                results[conc] = WitnessSample(created=created, reused=reused)
         finally:
             proc.terminate()
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-
-        elog = (root / "error.log").read_text("utf-8", "replace")
-        created = len(re.findall(re.escape(CREATE_WITNESS), elog))
-        reused = len(re.findall(re.escape(REUSE_WITNESS), elog))
-        return WitnessSample(created=created, reused=reused)
     finally:
+        backend.stop()
         shutil.rmtree(root, ignore_errors=True)
+
+    # Self-check. Two things were tried and rejected before this one:
+    #   1. An ABSOLUTE `created > 1` floor -- too weak. Even a
+    #      near-instant single-chunk send through the proxy hop picks
+    #      up a handful of "created" witnesses from ordinary
+    #      thread-scheduling jitter, which let a workload that barely
+    #      contends pass silently.
+    #   2. A RELATIVE rise in created-fraction (created / total) from
+    #      the lowest to the highest concurrency -- also wrong, because
+    #      created-fraction saturates near 1.0 once contention is heavy
+    #      (measured: 87.8% -> 96.9%, only a 1.10x rise) and compresses
+    #      all the signal into a narrow band exactly where the ring row
+    #      needs resolution.
+    # The metric that actually has headroom is the HIT RATE itself
+    # (reused / total): on a genuinely contending run it dropped 12.2%
+    # -> 3.1%, a 3.9x fall, because it is not pinned near a ceiling. The
+    # check below requires the hit rate at the lowest swept concurrency
+    # to be MEASURABLY HIGHER than at the highest -- "decays toward
+    # 1/N" is exactly this claim -- plus an absolute floor on `created`
+    # at the highest concurrency so a pass can't come from two
+    # single-digit witness counts dividing favourably.
+    lo_conc, hi_conc = min(concurrencies), max(concurrencies)
+    lo, hi = results.get(lo_conc), results.get(hi_conc)
+    lo_hr = lo.hit_rate if lo is not None else None
+    hi_hr = hi.hit_rate if hi is not None else None
+    hi_created_ok = hi is not None and hi.created >= CONTENTION_MIN_CREATED
+    degrades = (
+        lo_hr is not None
+        and hi_hr is not None
+        and lo_hr >= hi_hr * CONTENTION_MIN_RELATIVE_RISE
+    )
+    if len(concurrencies) < 2 or not hi_created_ok or not degrades:
+        raise RuntimeError(
+            "harness self-check FAILED: the paced workload did not "
+            f"demonstrate genuine single-slot contention. At {lo_conc} "
+            f"conn the hit rate was "
+            f"{'n/a' if lo_hr is None else f'{lo_hr * 100:.1f}%'}; "
+            f"at {hi_conc} conn it was "
+            f"{'n/a' if hi_hr is None else f'{hi_hr * 100:.1f}%'} "
+            f"(need the {lo_conc}-conn rate >= "
+            f"{CONTENTION_MIN_RELATIVE_RISE}x the {hi_conc}-conn rate, "
+            f"and >= {CONTENTION_MIN_CREATED} 'created cctx' witnesses "
+            f"at {hi_conc} conn). A single-slot worker cache can only "
+            "show a real hit rate when concurrent compressions "
+            "genuinely overlap and that overlap actually WORSENS as "
+            "concurrency rises -- a flat or barely-falling hit rate "
+            "across the sweep means this run never demonstrated that, "
+            "so any hit rate it reported would be a workload artifact, "
+            "not a measurement. This is the harness's own negative "
+            "control failing, not a benign 100% hit rate."
+        )
+    return results
 
 
 def check_with_debug(binary: pathlib.Path) -> None:
@@ -559,21 +802,51 @@ def print_release_table(
         )
 
 
-def print_debug_table(results: dict[tuple[str, int], WitnessSample]) -> None:
+def print_debug_table(
+    label: str, results: dict[int, WitnessSample], concurrencies: list[int]
+) -> None:
     print()
     print("=== DEBUG PASS: cache-engagement witnesses ===")
     print(
         "Throughput numbers from this pass are NOT reported and are NOT "
         "comparable to the release pass above -- debug-level logging on "
         "the hot path would distort them. This section is witness counts "
-        "only."
+        "only. The harness self-check already confirmed the hit rate "
+        "falls materially from the lowest to the highest swept "
+        "concurrency; the table below is the actual per-cell evidence "
+        "for the ring-sizing question -- does the hit rate DEGRADE as "
+        "concurrency rises."
     )
     header = f"{'arm':<14}{'conc':>6}{'created':>9}{'reused':>8}{'hit rate':>10}"
     print(header)
     print("-" * len(header))
-    for (label, conc), w in results.items():
-        hr = f"{w.hit_rate * 100:.1f}%" if w.hit_rate is not None else "n/a"
-        print(f"{label:<14}{conc:>6}{w.created:>9}{w.reused:>8}{hr:>10}")
+    prev_hr: float | None = None
+    degraded = False
+    for conc in concurrencies:
+        w = results[conc]
+        hr = w.hit_rate
+        hr_s = f"{hr * 100:.1f}%" if hr is not None else "n/a"
+        print(f"{label:<14}{conc:>6}{w.created:>9}{w.reused:>8}{hr_s:>10}")
+        if hr is not None and prev_hr is not None and hr < prev_hr:
+            degraded = True
+        if hr is not None:
+            prev_hr = hr
+    print()
+    if degraded:
+        print(
+            "hit rate DECREASES somewhere in this sweep as concurrency "
+            "rises -- the single-slot contention the ring-sizing row "
+            "expects. Use these per-conc numbers, not just the "
+            "lowest-vs-highest self-check comparison, to size the ring."
+        )
+    else:
+        print(
+            "hit rate did NOT decrease anywhere across this per-cell "
+            "sweep despite the self-check proving it fell materially "
+            "from the lowest to the highest concurrency -- re-check "
+            "before using these numbers to size the ring; a single-slot "
+            "cache should degrade as concurrency rises."
+        )
 
 
 def main() -> int:
@@ -663,7 +936,7 @@ def main() -> int:
 
     print_release_table(arms, concurrencies, samples)
 
-    debug_results: dict[tuple[str, int], WitnessSample] = {}
+    debug_results: dict[int, WitnessSample] = {}
     if args.debug_binary:
         debug_bin = pathlib.Path(args.debug_binary).resolve()
         if not debug_bin.exists():
@@ -675,15 +948,18 @@ def main() -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         debug_arm = Arm(label="debug", binary=debug_bin)
-        for conc in concurrencies:
-            debug_results[(debug_arm.label, conc)] = run_debug_pass(
+        try:
+            debug_results = run_debug_pass(
                 debug_arm,
-                conc,
+                concurrencies,
                 args.duration,
                 args.workers,
-                args.base_port + len(arms) + 1,
+                args.base_port + len(arms) * 2 + 2,
             )
-        print_debug_table(debug_results)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print_debug_table(debug_arm.label, debug_results, concurrencies)
     else:
         print()
         print(
@@ -720,8 +996,7 @@ def main() -> int:
                 for arm in arms
             },
             "debug": {
-                f"{label}@{conc}": dataclasses.asdict(w)
-                for (label, conc), w in debug_results.items()
+                str(conc): dataclasses.asdict(w) for conc, w in debug_results.items()
             }
             if debug_results
             else None,
