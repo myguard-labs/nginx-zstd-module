@@ -1431,9 +1431,10 @@ jobs:
           # must actually ENGAGE (asserted from the debug witnesses -- a
           # cache that never hits passes every other test in this file),
           # and a reused context must carry no residue into the next
-          # response. Also pins the level partition: the retained workspace
-          # is compression-level-driven and never shrinks, so a location at
-          # a different zstd_comp_level must not reuse the cached context.
+          # response. Also pins the profile partition: the retained
+          # workspace is driven by zstd_comp_level, zstd_long AND
+          # zstd_window_log and never shrinks, so a location differing in
+          # any of the three must not reuse the cached context.
           python3 ci/tools/test_cctx_reuse.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18116

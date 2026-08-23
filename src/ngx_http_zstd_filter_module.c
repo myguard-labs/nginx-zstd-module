@@ -354,19 +354,43 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
  *
  * Why there is no runtime memory cap: ZSTD_sizeof_CCtx() does not shrink on
  * reset, so an unbounded cache would pin each worker's RSS at its
- * largest-ever footprint. Measured, the retained workspace is driven by the
- * COMPRESSION LEVEL, not by windowLog or by a dcz raw prefix (level 1 ->
- * 582 KB, level 19 -> 85 MB, and returning to level 1 keeps the 85 MB;
- * windowLog 20 vs 27 and a 1 MB refPrefix all leave it unchanged at a fixed
- * level). zstd_comp_level is fixed at config load, and zstd_max_cctx_memory
- * already asserts that level's estimated footprint against the operator's
- * budget at config time. So the cached context's high-water mark is exactly
- * the figure config load already vetted, and pinning the cache to one level
- * keeps it there. A location with a different
- * zstd_comp_level does not reuse the cache; it takes the per-request path.
+ * largest-ever footprint. The cache is therefore keyed on the COMPLETE set
+ * of parameters that drive that workspace, and every one of them is fixed at
+ * config load: zstd_comp_level, zstd_long and zstd_window_log.
+ *
+ * An earlier revision keyed on the level alone, on a measurement that said
+ * windowLog did not move ZSTD_sizeof_CCtx() at a fixed level. That
+ * measurement was taken with a known pledged source size, which clamps the
+ * window to the input; it does not hold on this module's path, where the
+ * body length is generally unknown to libzstd. Re-measured on libzstd 1.5.7
+ * with a streaming, unknown-size compression at level 6:
+ *
+ *     zstd_long  zstd_window_log   ZSTD_sizeof_CCtx()
+ *     off        (unset)                    5 498 401
+ *     off        20                         4 449 825
+ *     off        27                       137 618 977
+ *     on         (unset)                  154 551 841
+ *     on         20                         4 606 497
+ *     on         27                       154 551 841
+ *
+ * So both zstd_long and zstd_window_log move the retained workspace by more
+ * than thirty times at one level, and the growth is permanent: walking a
+ * context through the 154 MB profile and back to the 4 MB one leaves
+ * ZSTD_sizeof_CCtx() at 154 MB. Lending one worker context across locations
+ * with differing profiles would raise the worker's floor to the largest
+ * profile ever served and silently defeat a lower location's
+ * zstd_max_cctx_memory budget, which is computed from exactly these three
+ * values at config load.
+ *
+ * Keying on all three keeps the cached context's high-water mark equal to
+ * the figure config load already vetted for that profile. A location whose
+ * profile differs in any of the three does not reuse the cache; it takes the
+ * per-request path, which is the pre-existing safe behaviour.
  */
 static ZSTD_CCtx  *ngx_http_zstd_worker_cctx;
 static ngx_int_t   ngx_http_zstd_worker_cctx_level;
+static ngx_flag_t  ngx_http_zstd_worker_cctx_long_mode;
+static ngx_int_t   ngx_http_zstd_worker_cctx_window_log;
 static ngx_uint_t  ngx_http_zstd_worker_cctx_busy;
 
 
@@ -1775,15 +1799,18 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
 
     /*
      * Borrow the worker context when it is free and was built for this
-     * location's compression level. A level mismatch takes the per-request
-     * path rather than re-levelling the cache: the retained workspace is
-     * level-driven and never shrinks, so honouring a higher-level location
-     * here would raise the worker's floor for every subsequent request of
-     * every other location.
+     * location's complete memory-affecting profile: compression level, long
+     * mode and window log. A mismatch in any of the three takes the
+     * per-request path rather than re-parameterising the cache: the retained
+     * workspace is driven by all three and never shrinks, so honouring a
+     * higher-memory location here would raise the worker's floor for every
+     * subsequent request of every other location.
      */
     if (!ngx_http_zstd_worker_cctx_busy
         && ngx_http_zstd_worker_cctx != NULL
-        && ngx_http_zstd_worker_cctx_level == zlcf->level)
+        && ngx_http_zstd_worker_cctx_level == zlcf->level
+        && ngx_http_zstd_worker_cctx_long_mode == zlcf->long_mode
+        && ngx_http_zstd_worker_cctx_window_log == zlcf->window_log)
     {
         ctx->cctx = ngx_http_zstd_worker_cctx;
         borrowed = 1;
@@ -1807,6 +1834,8 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         if (ngx_http_zstd_worker_cctx == NULL) {
             ngx_http_zstd_worker_cctx = ctx->cctx;
             ngx_http_zstd_worker_cctx_level = zlcf->level;
+            ngx_http_zstd_worker_cctx_long_mode = zlcf->long_mode;
+            ngx_http_zstd_worker_cctx_window_log = zlcf->window_log;
             borrowed = 1;
         }
 

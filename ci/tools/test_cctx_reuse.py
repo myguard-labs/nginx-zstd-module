@@ -22,11 +22,15 @@ Two properties have to hold at once, and a test for either alone is worthless:
      context), this one proves the SEQUENTIAL case (the reused context must
      carry no residue from the previous response).
 
-Also pins the level-partition rule: a location with a different
-zstd_comp_level must NOT reuse a context cached for another level, because the
-retained workspace is level-driven and never shrinks. Without that partition a
-single level-19 location would raise the worker's memory floor for every
-request of every other location.
+Also pins the PROFILE-partition rule: a location whose memory-affecting
+profile differs must NOT reuse a context cached for another profile, because
+the retained workspace never shrinks on reset. The profile is all three of
+zstd_comp_level, zstd_long and zstd_window_log -- measured on libzstd 1.5.7,
+streaming at a fixed level 6 with an unknown pledged size, ZSTD_sizeof_CCtx()
+is 4.2 MB at window_log 20 and 131 MB at window_log 27, and 147 MB with
+zstd_long on and no explicit window. Keying on the level alone would let a
+single high-memory location raise the worker's floor for every request of
+every other location and silently defeat their zstd_max_cctx_memory budget.
 
 Needs an nginx built --with-debug: the reuse witnesses are debug log lines.
 """
@@ -158,8 +162,14 @@ def main() -> int:
 
         for rid in range(ROUNDS):
             (html / f"b{rid}").write_bytes(fixture(rid))
-        # Served by a location pinned to a different zstd_comp_level.
+        # Served by the three locations that must each take the per-request
+        # path: one differing only in zstd_comp_level, one differing only in
+        # zstd_long, one differing only in zstd_window_log. The latter two
+        # sit at the SAME level as the cached default on purpose -- under a
+        # level-only cache key they would wrongly borrow it.
         (alt / "b").write_bytes(fixture(999))
+        (alt / "long").write_bytes(fixture(998))
+        (alt / "wlog").write_bytes(fixture(997))
 
         lvl = args.log_level
         conf = root / "nginx.conf"
@@ -181,10 +191,23 @@ http {{
             error_log {root}/logs/error.log {lvl};
             alias {html}/;
         }}
-        location /alt/ {{
+        location /alt/b {{
             error_log {root}/logs/error.log {lvl};
-            alias {alt}/;
+            alias {alt}/b;
             zstd_comp_level 9;
+        }}
+        # Same compression level as the cached default context; differs
+        # only in a memory-affecting parameter. Each must create its own
+        # context rather than borrowing the cached one.
+        location /alt/long {{
+            error_log {root}/logs/error.log {lvl};
+            alias {alt}/long;
+            zstd_long on;
+        }}
+        location /alt/wlog {{
+            error_log {root}/logs/error.log {lvl};
+            alias {alt}/wlog;
+            zstd_window_log 20;
         }}
     }}
 }}
@@ -231,11 +254,14 @@ http {{
                     )
                     break
 
-            # A different zstd_comp_level must take the per-request path.
-            alt_want = fixture(999)
-            alt_got = decode(http_get(args.port, "/alt/b"))
-            if alt_got != alt_want:
-                failures.append("level-9 location: decoded body mismatch")
+            # Each differing memory profile must take the per-request path.
+            for path, rid, label in (
+                ("/alt/b", 999, "zstd_comp_level 9"),
+                ("/alt/long", 998, "zstd_long on"),
+                ("/alt/wlog", 997, "zstd_window_log 20"),
+            ):
+                if decode(http_get(args.port, path)) != fixture(rid):
+                    failures.append(f"{label} location: decoded body mismatch")
 
             # Flush the debug log before reading witnesses.
             time.sleep(0.3)
@@ -252,19 +278,24 @@ http {{
 
             # --- property 1: the cache actually engages ---
             #
-            # Exactly two contexts are ever created: the level-3 default one
-            # seeded by the first /b request, and the level-9 one the /alt
-            # location cannot borrow. Anything more means the cache is not
-            # holding across requests.
-            if args.log_level == "debug" and created != 2:
+            # Exactly four contexts are ever created: the default-profile one
+            # seeded by the first /b request, plus one each for the three
+            # /alt locations, none of which may borrow it. Fewer than four
+            # means the cache lent across differing memory profiles -- the
+            # bug this partition exists to prevent, and the two same-level
+            # locations are the ones a level-only key gets wrong. More than
+            # four means the cache is not holding across requests.
+            if args.log_level == "debug" and created != 4:
                 failures.append(
-                    f"expected exactly 2 'created cctx' witnesses "
-                    f"(one cached default-level, one for the level-9 "
-                    f"location that must not reuse it), saw {created} -- "
-                    f"the cache is not surviving across requests"
+                    f"expected exactly 4 'created cctx' witnesses (one "
+                    f"cached default profile, plus one each for the "
+                    f"zstd_comp_level / zstd_long / zstd_window_log "
+                    f"locations that must not reuse it), saw {created} -- "
+                    f"the cache is either lending across memory profiles or "
+                    f"not surviving across requests"
                 )
             # ROUNDS-1: the first /b request seeds the cache (counted as a
-            # create, not a reuse). The /alt request is a create too.
+            # create, not a reuse). Each /alt request is a create too.
             if args.log_level == "debug" and reused != ROUNDS - 1:
                 failures.append(
                     f"expected {ROUNDS - 1} 'reusing worker cctx' witnesses "
@@ -279,7 +310,7 @@ http {{
                 if args.log_level == "debug":
                     print(
                         f"  witnesses: {created} cctx created, {reused} "
-                        f"reused -- cache engaged and level-partitioned"
+                        f"reused -- cache engaged and profile-partitioned"
                     )
         finally:
             proc.terminate()
@@ -296,8 +327,9 @@ http {{
 
     print(
         f"OK: worker CCtx cache reused across {ROUNDS} sequential requests "
-        f"with no cross-request state bleed, and a different zstd_comp_level "
-        f"correctly took the per-request path"
+        f"with no cross-request state bleed, and a differing "
+        f"zstd_comp_level, zstd_long or zstd_window_log each correctly took "
+        f"the per-request path"
     )
     return 0
 
