@@ -334,6 +334,19 @@ Sets the minimum response size (in bytes) required for compression to apply. The
 > **Note:** The built-in default is `1024` bytes. Smaller responses often lose
 > their savings to zstd frame overhead while still consuming compression CPU.
 
+> **Caveat — chunked and proxied responses bypass this directive entirely.**
+> The threshold can only be applied when the body length is known up front, so
+> the check is skipped whenever `Content-Length` is absent — which is the normal
+> case for chunked transfer encoding and for most proxied upstreams. Such
+> responses are compressed regardless of how small they turn out to be, and a
+> body below the threshold can come out *larger* than the original: a 47-byte
+> chunked body under `zstd_min_length 1024` is returned as 56 bytes with
+> `Content-Encoding: zstd`. Enforcing the threshold on a streaming body would
+> require buffering the response until the threshold is decided, which changes
+> when headers may be sent; the directive deliberately does not do this. If a
+> small-response floor matters for an upstream, ensure the upstream sets
+> `Content-Length`, or disable compression for that location.
+
 **Example:**
 
 ```nginx
