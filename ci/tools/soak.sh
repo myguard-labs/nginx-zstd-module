@@ -194,19 +194,31 @@ worker() {
                     echo "BAD dcz $p"
                     bad=$((bad + 1))
                 fi
-            elif [ "$p" = "/bypass?nozstd=1" ]; then
-                # zstd_bypass is active on this path, so the response is
-                # uncompressed identity. No magic header, just accept it.
-                ok=$((ok + 1))
             elif [ "$dcz_want" -eq 1 ]; then
                 # Asked for dcz with a matching dictionary and a
                 # same-origin fetch, and got something that is neither a
                 # dcz frame nor a zstd frame.
                 echo "BAD dcz $p: negotiated request returned magic $magic"
                 bad=$((bad + 1))
+            elif [ "$ae" != "zstd" ]; then
+                # This request advertised only gzip (no zstd in
+                # Accept-Encoding), so the module correctly declined to
+                # compress on every path, identity is expected here.
+                ok=$((ok + 1))
+            elif [ "$p" = "/tiny" ]; then
+                # /tiny is a 50-byte fixture, deliberately below
+                # zstd_min_length 100 on location /. Identity is expected.
+                ok=$((ok + 1))
+            elif [ "$p" = "/bypass?nozstd=1" ]; then
+                # zstd_bypass is active on this path, so the response is
+                # uncompressed identity. No magic header, just accept it.
+                ok=$((ok + 1))
             else
-                # Unrecognized magic on a path that must serve a known encoding.
-                echo "BAD unknown magic $magic $p"
+                # Every other combination (ae advertised zstd, and the path
+                # is not sub-min_length or bypassed) must have compressed.
+                # Identity here is a real "we stopped compressing"
+                # regression, not a benign variant.
+                echo "BAD unknown magic $magic $p (Accept-Encoding: $ae)"
                 bad=$((bad + 1))
             fi
 
