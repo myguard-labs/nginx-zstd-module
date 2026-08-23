@@ -303,26 +303,29 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
                                         coding_len) == 0);
         is_star = (name_end - tok == 1 && tok[0] == '*');
 
-        /*
-         * A name that ran straight into a DQUOTE is not a list element:
-         * RFC 9110 12.5.3 `codings` is a token and '"' is not a tchar,
-         * so `zstd"x` advertises nothing. The scan above stops on '"'
-         * for the phantom-token guard, which leaves the stopping byte
-         * unexamined -- without this, `zstd"x` still compared equal and
-         * we compressed for a client that never offered zstd, diverging
-         * from nginx's own gzip filter (ngx_http_gzip_accept_encoding()
-         * requires ',', ';', ' ' or end after the name). The quote-aware
-         * element-skip below still swallows the rest of the element, so
-         * the phantom-token guard is unchanged.
-         */
-        if (p < end && *p == '"') {
-            is_coding = 0;
-            is_star = 0;
-        }
-
         /* Step over any OWS between the name and its ';' or ','. */
         while (p < end && (*p == ' ' || *p == '\t')) {
             p++;
+        }
+
+        /*
+         * Only ';' (parameters), ',' (next element) or end of field may
+         * follow a coding name. RFC 9110 12.5.3 makes `codings` a token,
+         * so anything else means this element is not the coding it looked
+         * like: `zstd"x` and `zstd "x` advertise nothing, and neither does
+         * `zstd x`. nginx's own ngx_http_gzip_accept_encoding() applies
+         * the same rule, so accepting these diverged from the sibling
+         * filter and compressed for clients that never offered zstd.
+         *
+         * The check must sit AFTER the OWS skip: the name scan stops on
+         * OWS as well as on '"', so testing the stopping byte alone
+         * catches `zstd"x` and misses everything hiding behind a space.
+         * The quote-aware element-skip below still swallows the rest of
+         * the element, so the phantom-token guard is unchanged.
+         */
+        if (p < end && *p != ';' && *p != ',') {
+            is_coding = 0;
+            is_star = 0;
         }
 
         q = 1000;       /* no parameters → q=1 */

@@ -2557,3 +2557,77 @@ sub { "zstd_bytes=" . length($_[0]) }
 zstd_bytes=3560
 --- no_error_log
 [error]
+
+
+
+=== TEST 97: junk after OWS following a coding name does not negotiate
+# The DQUOTE guard added for TEST 93 sat BEFORE the OWS skip, so it caught
+# `zstd"x` and missed everything hiding behind a space: `zstd "x` and plain
+# `zstd x` both still negotiated. RFC 9110 12.5.3 allows only ';', ',' or
+# end of field after a coding name, which is the same rule
+# ngx_http_gzip_accept_encoding() applies. Found by CodeRabbit on PR #142.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd "x
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 98: a bare token after OWS following a coding name does not negotiate
+# The no-quotes arm of TEST 97. `zstd x` is two tokens with no separator,
+# not a coding with a parameter, so the element offers nothing.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd x
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 99: OWS before ';' and ',' still negotiates
+# Guard against over-fixing TEST 97/98: OWS between the name and a real
+# separator is legal (RFC 9110 OWS), so these must still compress.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: gzip , zstd ;q=1
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]

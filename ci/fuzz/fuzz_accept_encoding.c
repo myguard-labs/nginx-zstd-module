@@ -118,17 +118,20 @@ ref_accepts(const uint8_t *d, size_t n)
                    && (d[ts] | 0x20) == 'z' && (d[ts+1] | 0x20) == 's'
                    && (d[ts+2] | 0x20) == 't' && (d[ts+3] | 0x20) == 'd');
 
+        while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
+
         /*
-         * A DQUOTE immediately after the name disqualifies the element,
-         * confidently: RFC 9110 12.5.3 `codings` is a token and '"' is
-         * not a tchar, so `zstd"x` offers no coding at all. Answering
-         * -1 (unsure) here instead would leave the whole class untested
-         * -- the differential asserts nothing on an unsure reference,
-         * which is exactly how the parser bug this encodes went unseen.
-         * Skip to the element separator, honouring quoting so a comma
-         * inside the quoted run does not start a phantom element.
+         * Only ';', ',' or end may follow a coding name (RFC 9110 12.5.3:
+         * `codings` is a token). Anything else -- `zstd"x`, `zstd "x`,
+         * `zstd x` -- means the element offers no coding, and the
+         * reference says so CONFIDENTLY rather than returning -1. An
+         * unsure reference makes the differential assert nothing in
+         * either direction, which is exactly how this class stayed
+         * invisible through 15.9M runs. Skip to the element separator,
+         * honouring quoting so a comma inside a quoted run does not
+         * start a phantom element.
          */
-        if (i < n && d[i] == '"') {
+        if (i < n && d[i] != ';' && d[i] != ',') {
             int  inq = 0;
 
             while (i < n && (inq || d[i] != ',')) {
@@ -144,8 +147,6 @@ ref_accepts(const uint8_t *d, size_t n)
             if (i < n) i++;                         /* consume the ',' */
             continue;                               /* contributes nothing */
         }
-
-        while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
 
         q = 1000;   /* no weight → q=1 */
 
