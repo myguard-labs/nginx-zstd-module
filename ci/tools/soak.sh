@@ -163,16 +163,20 @@ worker() {
         fi
         if curl -fsS "${hdrs[@]}" \
             "http://127.0.0.1:18222$p" -o "$body" 2>/dev/null; then
-            # If it came back zstd-encoded, it must decode cleanly.
+            # Every served response variant must be enumerated explicitly.
+            # Unrecognized magics are a hard failure, not a silent pass.
             #
-            # A dcz response starts with the skippable-frame magic
-            # 5e2a4d18, NOT 28b52ffd, so testing only for the zstd magic
-            # would let every dcz response fall through to the unchecked
-            # else-branch and count as ok without ever being decoded --
-            # a green soak that proves nothing about the path it was
-            # extended to cover. Decode dcz against the same dictionary
-            # the request advertised: that verifies the frame header, the
-            # refPrefix output and the dictionary content all agree.
+            # Legitimate response variants:
+            # 1. Plain zstd: magic 28b52ffd (all paths except /bypass?nozstd=1)
+            # 2. DCZ skippable frame: magic 5e2a4d18 (from /dcz with negotiation)
+            # 3. Identity/uncompressed: no magic (only /bypass?nozstd=1, which
+            #    has zstd_bypass active, so the response is not compressed)
+            #
+            # A dcz response starts with 5e2a4d18, NOT 28b52ffd, so testing
+            # only for the zstd magic would let every dcz response fall through
+            # and count as ok without ever being decoded. Decode dcz against
+            # the same dictionary the request advertised: that verifies the
+            # frame header, the refPrefix output and the dictionary content.
             magic="$(head -c4 "$body" | od -An -tx1 | tr -d ' ')"
             if [ "$magic" = "28b52ffd" ]; then
                 if zstd -dq -c "$body" >/dev/null 2>&1; then
@@ -190,6 +194,10 @@ worker() {
                     echo "BAD dcz $p"
                     bad=$((bad + 1))
                 fi
+            elif [ "$p" = "/bypass?nozstd=1" ]; then
+                # zstd_bypass is active on this path, so the response is
+                # uncompressed identity. No magic header, just accept it.
+                ok=$((ok + 1))
             elif [ "$dcz_want" -eq 1 ]; then
                 # Asked for dcz with a matching dictionary and a
                 # same-origin fetch, and got something that is neither a
@@ -197,7 +205,9 @@ worker() {
                 echo "BAD dcz $p: negotiated request returned magic $magic"
                 bad=$((bad + 1))
             else
-                ok=$((ok + 1))
+                # Unrecognized magic on a path that must serve a known encoding.
+                echo "BAD unknown magic $magic $p"
+                bad=$((bad + 1))
             fi
 
             # A negotiated request that came back as a plain zstd frame is
