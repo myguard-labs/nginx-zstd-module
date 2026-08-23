@@ -289,7 +289,8 @@ static ngx_int_t ngx_http_zstd_body_filter(ngx_http_request_t *r,
 static ngx_int_t ngx_http_zstd_filter_add_data(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
 static ngx_int_t ngx_http_zstd_filter_get_buf(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx);
+    ngx_http_zstd_ctx_t *ctx,
+    ngx_http_zstd_loc_conf_t *zlcf);
 static ngx_int_t ngx_http_zstd_set_param(ngx_http_request_t *r,
     ZSTD_CCtx *cctx, ZSTD_cParameter param, int value, const char *name);
 static ngx_int_t ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
@@ -1216,7 +1217,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
                 goto failed;
             }
 
-            rc = ngx_http_zstd_filter_get_buf(r, ctx);
+            rc = ngx_http_zstd_filter_get_buf(r, ctx, zlcf);
 
             if (rc == NGX_ERROR) {
                 goto failed;
@@ -1597,10 +1598,10 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
 
 static ngx_int_t
-ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
+ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
+    ngx_http_zstd_loc_conf_t *zlcf)
 {
-    ngx_chain_t               *cl;
-    ngx_http_zstd_loc_conf_t  *zlcf;
+    ngx_chain_t  *cl;
 
     /*
      * Keep using the current output buffer only if it still exists AND has
@@ -1619,8 +1620,6 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     if (ctx->out_buf != NULL && ctx->buffer_out.pos < ctx->buffer_out.size) {
         return NGX_OK;
     }
-
-    zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
 
     if (ctx->free) {
         cl = ctx->free;
