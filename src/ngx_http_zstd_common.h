@@ -73,6 +73,38 @@ ngx_http_zstd_skip_quoted(u_char *p, const u_char *end)
 
 
 /*
+ * Walk the up-to-three fractional digits of a "q=0.NNN" qvalue, starting
+ * right after the '.'. Advances *p past each digit consumed and returns
+ * the accumulated milli-units contribution (0..900, in multiples of 100,
+ * 10 or 1 as digits are consumed) via the return value. Bounded on both
+ * sides: the loop stops at `end`, and after three digits `scale` has hit
+ * 0 so a fourth or later digit byte is left unconsumed for the caller's
+ * trailing-junk check to reject. Pure digit-walk, no other qvalue state:
+ * splitting it out of ngx_http_zstd_eval_qvalue() shrinks that function's
+ * branching without changing what either side does.
+ */
+static ngx_int_t
+ngx_http_zstd_parse_q_fraction(const u_char *end, u_char **p)
+{
+    /* ngx_int_t (not int) so the digit*scale product widens before the
+     * add — avoids a theoretical int overflow CodeQL flags (the operands
+     * are tiny in practice). */
+    ngx_int_t  scale = 100;
+    ngx_int_t  frac = 0;
+    u_char    *q = *p;
+
+    while (q < end && *q >= '0' && *q <= '9' && scale > 0) {
+        frac += (*q - '0') * scale;
+        scale /= 10;
+        q++;
+    }
+
+    *p = q;
+    return frac;
+}
+
+
+/*
  * Evaluate the optional parameters of a coding token whose name has just
  * been consumed. `p` points at the ';' that introduces the parameters.
  * Returns the weight in milli-units (0..1000) — 1000 when no "q" parameter
@@ -146,23 +178,12 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
                 }
 
                 if (*p == '0') {
-                    /* ngx_int_t (not int) so the digit*scale product widens
-                     * before the add — avoids a theoretical int overflow
-                     * CodeQL flags (the operands are tiny in practice). */
-                    ngx_int_t  scale = 100;
-
                     p++;
                     q = 0;
 
                     if (p < end && *p == '.') {
                         p++;
-                        while (p < end && *p >= '0' && *p <= '9'
-                               && scale > 0)
-                        {
-                            q += (*p - '0') * scale;
-                            scale /= 10;
-                            p++;
-                        }
+                        q += ngx_http_zstd_parse_q_fraction(end, &p);
                     }
 
                 } else if (*p == '1') {

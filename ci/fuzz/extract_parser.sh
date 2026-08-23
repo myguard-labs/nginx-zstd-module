@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Slice the verbatim bodies of the Accept-Encoding parser out of the
-# shipped ../../src/ngx_http_zstd_common.h into generated_parser.inc. That is
-# both ngx_http_zstd_eval_qvalue() (the qvalue evaluator) and its caller
+# shipped ../../src/ngx_http_zstd_common.h into generated_parser.inc. That
+# is ngx_http_zstd_eval_qvalue() (the qvalue evaluator), its
+# ngx_http_zstd_parse_q_fraction() digit-walk helper, and its caller
 # ngx_http_zstd_accept_encoding(), in definition order so the .inc
 # compiles standalone.
 #
@@ -26,9 +27,11 @@ fi
 # closing brace at column 0 (nginx style: definitions close with a bare
 # `}` in col 1). The functions have two distinct return-type lines
 # (`static u_char *` for the skip_quoted helper, `static ngx_int_t` for the
-# two parsers), so match on the following definition line. Capture them in
-# source order (skip_quoted, then eval_qvalue, then accept_encoding) so the
-# generated .inc compiles without forward declarations.
+# rest), so match on the following definition line. Capture them in
+# source order (skip_quoted, then parse_q_fraction, then eval_qvalue --
+# which calls parse_q_fraction, so it must precede eval_qvalue in the
+# generated .inc -- then accept_encoding) so the generated .inc compiles
+# without forward declarations.
 # The leading sub() strips a CR so extraction also works from a Windows
 # checkout smudged to CRLF (core.autocrlf=true): the `$0 == "}"`
 # terminator and the anchored regexes below otherwise never match and
@@ -36,7 +39,7 @@ fi
 awk '
     { sub(/\r$/, "") }
     /^static (ngx_int_t|u_char \*)$/ { pending = 1; buf = $0 ORS; next }
-    pending && /^ngx_http_zstd_(skip_quoted|eval_qvalue|coding_weight|accept_encoding)\(/ {
+    pending && /^ngx_http_zstd_(skip_quoted|parse_q_fraction|eval_qvalue|coding_weight|accept_encoding)\(/ {
         capture = 1; pending = 0; print buf; print; next
     }
     pending { pending = 0; buf = "" }
@@ -47,6 +50,7 @@ awk '
 ' "$HEADER" >"$OUT"
 
 if ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" ||
+    ! grep -q 'ngx_http_zstd_parse_q_fraction' "$OUT" ||
     ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" ||
     ! grep -q 'ngx_http_zstd_coding_weight' "$OUT" ||
     ! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" ||
@@ -58,6 +62,6 @@ if ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" ||
 fi
 
 LINES=$(wc -l <"$OUT")
-echo "✓ extracted ngx_http_zstd_skip_quoted() + ngx_http_zstd_eval_qvalue()" \
-    "+ ngx_http_zstd_coding_weight() + ngx_http_zstd_accept_encoding()" \
-    "— $LINES lines -> $OUT"
+echo "✓ extracted ngx_http_zstd_skip_quoted() + ngx_http_zstd_parse_q_fraction()" \
+    "+ ngx_http_zstd_eval_qvalue() + ngx_http_zstd_coding_weight()" \
+    "+ ngx_http_zstd_accept_encoding() — $LINES lines -> $OUT"
