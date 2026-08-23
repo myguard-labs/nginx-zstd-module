@@ -51,6 +51,15 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
 #define NGX_HTTP_ZSTD_DCZ_HEADER_LEN  (8 + NGX_HTTP_ZSTD_SHA256_DIGEST_LEN)
 
 /*
+ * ngx_http_zstd_dcz_decode_digest()'s scratch/output buffer size. Must
+ * stay >= 48: an Available-Dictionary byte-sequence up to the 44-char
+ * length ceiling can carry unpadded base64 that decodes to 33 bytes
+ * (one past NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) before the post-decode
+ * length check runs, so the destination buffer must have that headroom.
+ */
+#define NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN  48
+
+/*
  * RFC 9842 §2.2.2: a dcz client guarantees a decode window of at least
  * max(8 MB, 1.25 x dictionary size). Never exceeding 2^23 (8 MB) keeps
  * every emitted frame inside the guarantee for any dictionary size, so
@@ -821,12 +830,73 @@ ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
  * weaken the lookup, which indexes public dictionary identities, but the
  * stronger claim is not one SHA-256 makes.)
  */
+/*
+ * Decode an RFC 8941 byte-sequence Available-Dictionary header value
+ * (":base64:") into a fixed-size digest buffer.
+ *
+ * Pulled out of ngx_http_zstd_dcz_negotiate() below as a pure function of
+ * its inputs: no ngx_http_request_t, no connection log, no config
+ * structures. That is deliberate -- it is the exact slice of the
+ * negotiation logic that parses attacker-controlled bytes (the base64
+ * length/prefix gate plus ngx_decode_base64() itself), and the
+ * request/config entanglement in the caller is what previously made it
+ * impossible to fuzz in isolation.
+ *
+ * `raw` is the full header value including the wrapping colons, exactly
+ * as ngx_http_zstd_dcz_negotiate() receives it in h->value. `out` must
+ * point at a buffer of at least NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN (48)
+ * bytes -- NOT just NGX_HTTP_ZSTD_SHA256_DIGEST_LEN (32) -- and receives
+ * the decoded digest on success. The larger size is load-bearing: the
+ * length gate below only bounds the base64 *text* to 44 characters, and
+ * an unpadded 44-character input (no trailing "=") decodes to 33 bytes,
+ * one past a tight 32-byte buffer, before the post-decode length check
+ * ever runs. A caller-supplied buffer smaller than
+ * NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN reintroduces that overflow.
+ *
+ * Returns NGX_OK when raw is a well-formed byte-sequence decoding to
+ * exactly NGX_HTTP_ZSTD_SHA256_DIGEST_LEN bytes (written to *out*),
+ * NGX_DECLINED otherwise (malformed byte-sequence framing, or a decoded
+ * length other than 32 bytes) -- *out* is left untouched on NGX_DECLINED.
+ */
+static ngx_int_t
+ngx_http_zstd_dcz_decode_digest(ngx_str_t raw,
+    u_char out[NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN])
+{
+    ngx_str_t   b64, decoded;
+
+    /*
+     * RFC 8941 byte sequence: colon-delimited standard base64. 32 bytes
+     * encode to 44 characters with padding (43 without); anything longer
+     * cannot be a SHA-256 and is rejected before decoding.
+     */
+    if (raw.len < 2
+        || raw.data[0] != ':'
+        || raw.data[raw.len - 1] != ':'
+        || raw.len - 2 > 44)
+    {
+        return NGX_DECLINED;
+    }
+
+    b64.data = raw.data + 1;
+    b64.len = raw.len - 2;
+
+    decoded.data = out;
+
+    if (ngx_decode_base64(&decoded, &b64) != NGX_OK
+        || decoded.len != NGX_HTTP_ZSTD_SHA256_DIGEST_LEN)
+    {
+        return NGX_DECLINED;
+    }
+
+    return NGX_OK;
+}
+
+
 static ngx_http_zstd_dcz_dict_t *
 ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     ngx_http_zstd_loc_conf_t *zlcf)
 {
-    u_char                     buf[48];
-    ngx_str_t                  b64, decoded;
+    u_char                     buf[NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN];
     ngx_uint_t                 i, nheaders;
     ngx_table_elt_t           *h, *ae;
     ngx_http_zstd_dcz_dict_t  *dicts;
@@ -869,7 +939,10 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     /*
      * RFC 8941 byte sequence: colon-delimited standard base64. 32 bytes
      * encode to 44 characters with padding (43 without); anything longer
-     * cannot be a SHA-256 and is rejected before decoding.
+     * cannot be a SHA-256 and is rejected before decoding. The framing
+     * check and ngx_decode_base64() call live in
+     * ngx_http_zstd_dcz_decode_digest() so that attacker-controlled-byte
+     * slice can be fuzzed independently of ngx_http_request_t.
      */
     if (h->value.len < 2
         || h->value.data[0] != ':'
@@ -882,14 +955,7 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
         return NULL;
     }
 
-    b64.data = h->value.data + 1;
-    b64.len = h->value.len - 2;
-
-    decoded.data = buf;
-
-    if (ngx_decode_base64(&decoded, &b64) != NGX_OK
-        || decoded.len != NGX_HTTP_ZSTD_SHA256_DIGEST_LEN)
-    {
+    if (ngx_http_zstd_dcz_decode_digest(h->value, buf) != NGX_OK) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd dcz: Available-Dictionary \"%V\" is not a "
                        "base64 SHA-256", &h->value);
@@ -935,7 +1001,7 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     dicts = zlcf->dcz_dicts->elts;
 
     for (i = 0; i < zlcf->dcz_dicts->nelts; i++) {
-        if (ngx_memcmp(dicts[i].hash, decoded.data,
+        if (ngx_memcmp(dicts[i].hash, buf,
                        NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) == 0)
         {
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,

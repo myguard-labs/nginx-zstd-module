@@ -288,8 +288,11 @@ jobs:
             printf 'FUZZ_SECS=3600\n' >> "$GITHUB_ENV"
           fi
 
-      - name: Build fuzz target
-        run: bash ci/fuzz/build.sh "$GITHUB_WORKSPACE/ci/fuzz/fuzz_accept_encoding"
+      - name: Build fuzz targets
+        run: |
+          bash ci/fuzz/build.sh \
+            "$GITHUB_WORKSPACE/ci/fuzz/fuzz_accept_encoding" \
+            "$GITHUB_WORKSPACE/ci/fuzz/fuzz_dcz"
 
       - name: Fuzz
         run: |
@@ -307,20 +310,39 @@ jobs:
           [ $rc -eq 0 ] || { echo "❌ fuzzer crash (exit $rc)"; exit 1; }
           echo "✓ no crashes in ${FUZZ_SECS}s"
 
+      - name: Fuzz dcz
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          set +e
+          ./fuzz_dcz \
+            -max_total_time="$FUZZ_SECS" \
+            -print_final_stats=1 \
+            -artifact_prefix=crash-dcz- \
+            corpus_dcz/
+          rc=$?
+          set -e
+          [ $rc -eq 0 ] || { echo "❌ dcz fuzzer crash (exit $rc)"; exit 1; }
+          echo "✓ no crashes in ${FUZZ_SECS}s"
+
       - name: Minimize + persist corpus
         if: success()
         run: |
           cd ci/fuzz
-          mkdir -p corpus-min
+          mkdir -p corpus-min corpus-dcz-min
           ./fuzz_accept_encoding -merge=1 corpus-min/ corpus/
           echo "merged: $(find corpus-min -type f | wc -l) units"
+          ./fuzz_dcz -merge=1 corpus-dcz-min/ corpus_dcz/
+          echo "dcz merged: $(find corpus-dcz-min -type f | wc -l) units"
 
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: fuzz-deep-crashes
-          path: ${{ github.workspace }}/ci/fuzz/crash-*
+          path: |
+            ${{ github.workspace }}/ci/fuzz/crash-*
+            ${{ github.workspace }}/ci/fuzz/crash-dcz-*
           retention-days: 30
 
       - name: Upload minimized corpus
@@ -328,7 +350,9 @@ jobs:
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: fuzz-corpus
-          path: ${{ github.workspace }}/ci/fuzz/corpus-min
+          path: |
+            ${{ github.workspace }}/ci/fuzz/corpus-min
+            ${{ github.workspace }}/ci/fuzz/corpus-dcz-min
           retention-days: 30
 
       - name: Notify Discord on failure

@@ -48,8 +48,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang
 
-      - name: Build fuzz target
-        run: bash ci/fuzz/build.sh "$GITHUB_WORKSPACE/ci/fuzz/fuzz_accept_encoding"
+      - name: Build fuzz targets
+        run: |
+          bash ci/fuzz/build.sh \
+            "$GITHUB_WORKSPACE/ci/fuzz/fuzz_accept_encoding" \
+            "$GITHUB_WORKSPACE/ci/fuzz/fuzz_dcz"
 
       # Replay every triaged past crash FIRST -- fast (each is one input)
       # and deterministic, so a reintroduced bug fails in seconds instead
@@ -89,10 +92,27 @@ jobs:
           [ $rc -eq 0 ] || { echo "❌ fuzzer crash (exit $rc)"; exit 1; }
           echo "✓ no crashes in 120s"
 
+      - name: Run dcz fuzzer (120s regression)
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          set +e
+          ./fuzz_dcz \
+            -max_total_time=120 \
+            -print_final_stats=1 \
+            -artifact_prefix=crash-dcz- \
+            corpus_dcz/
+          rc=$?
+          set -e
+          [ $rc -eq 0 ] || { echo "❌ dcz fuzzer crash (exit $rc)"; exit 1; }
+          echo "✓ no crashes in 120s"
+
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: fuzz-fast-crashes
-          path: ${{ github.workspace }}/ci/fuzz/crash-*
+          path: |
+            ${{ github.workspace }}/ci/fuzz/crash-*
+            ${{ github.workspace }}/ci/fuzz/crash-dcz-*
           retention-days: 14

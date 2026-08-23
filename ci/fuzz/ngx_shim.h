@@ -27,7 +27,16 @@ typedef uintptr_t  ngx_uint_t;
 typedef unsigned char u_char;
 
 #define NGX_OK        0
+#define NGX_ERROR    -1
 #define NGX_DECLINED -5
+
+/* src/ngx_http_zstd_sha256.h */
+#define NGX_HTTP_ZSTD_SHA256_DIGEST_LEN  32
+
+/* src/ngx_http_zstd_filter_module.c: ngx_http_zstd_dcz_decode_digest()'s
+ * output buffer size -- see that macro's definition for why it must
+ * exceed NGX_HTTP_ZSTD_SHA256_DIGEST_LEN. */
+#define NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN  48
 
 typedef struct {
     size_t  len;
@@ -102,6 +111,104 @@ ngx_strcasestrn(u_char *s1, char *s2, size_t n)
     } while (ngx_strncasecmp(s1, (u_char *) s2, n) != 0);
 
     return --s1;
+}
+
+/*
+ * src/core/ngx_string.c: ngx_decode_base64() and its shared decode core
+ * ngx_decode_base64_internal() (standard alphabet variant only, i.e. the
+ * "+/" table -- this module never calls the base64url or basic64
+ * NGX_ESCAPE variants). Faithful upstream copy: rejects the input up
+ * front unless its length is a multiple of 4 (dst->len is set from that
+ * check, exactly mirroring ngx_base64_decoded_length()'s ((len + 3) / 4)
+ * * 3 for a 4-aligned len), decodes 4 source bytes to 3 destination bytes
+ * per group, and treats '=' padding and any byte outside the alphabet as
+ * a hard decode failure (NGX_ERROR) rather than skipping it -- unlike
+ * some non-nginx base64 decoders, this is NOT lenient about embedded
+ * whitespace or padding placement. ngx_http_zstd_dcz_decode_digest()
+ * relies on exactly this strictness: a malformed byte sequence must
+ * decode-fail, not silently produce wrong bytes.
+ */
+static ngx_int_t
+ngx_decode_base64_internal(ngx_str_t *dst, ngx_str_t *src, const u_char *basis)
+{
+    size_t          len;
+    u_char         *d, *s;
+
+    for (len = 0; len < src->len; len++) {
+        if (src->data[len] == '=') {
+            break;
+        }
+
+        if (basis[src->data[len]] == 77) {
+            return NGX_ERROR;
+        }
+    }
+
+    if (len % 4 == 1) {
+        return NGX_ERROR;
+    }
+
+    s = src->data;
+    d = dst->data;
+
+    while (len > 3) {
+        *d++ = (u_char) (basis[s[0]] << 2 | basis[s[1]] >> 4);
+        *d++ = (u_char) (basis[s[1]] << 4 | basis[s[2]] >> 2);
+        *d++ = (u_char) (basis[s[2]] << 6 | basis[s[3]]);
+
+        s += 4;
+        len -= 4;
+    }
+
+    if (len > 1) {
+        *d++ = (u_char) (basis[s[0]] << 2 | basis[s[1]] >> 4);
+    }
+
+    if (len > 2) {
+        *d++ = (u_char) (basis[s[1]] << 4 | basis[s[2]] >> 2);
+    }
+
+    dst->len = (size_t) (d - dst->data);
+
+    return NGX_OK;
+}
+
+static const u_char ngx_base64_decode_table[] = {
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 62, 77, 77, 77, 63,
+    52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 77, 77, 77, 77, 77, 77,
+    77,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
+    15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 77, 77, 77, 77, 77,
+    77, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+    41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 77, 77, 77, 77, 77,
+
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77,
+    77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77, 77
+};
+
+static inline ngx_int_t
+ngx_decode_base64(ngx_str_t *dst, ngx_str_t *src)
+{
+    /*
+     * src/core/ngx_string.c: ngx_decode_base64() rejects input whose
+     * length is not a multiple of 4 -- the "=" padding is REQUIRED, not
+     * optional (unlike the "url" variant). This is exactly the strict
+     * gate the dcz Available-Dictionary path relies on: the fuzz seeds
+     * cover both the padded-32-byte-digest case (which is a multiple of
+     * 4) and unpadded/misaligned lengths (rejected here).
+     */
+    if (src->len % 4 != 0) {
+        return NGX_ERROR;
+    }
+
+    return ngx_decode_base64_internal(dst, src, ngx_base64_decode_table);
 }
 
 #endif /* NGX_ZSTD_FUZZ_SHIM_H */

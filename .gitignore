@@ -42,8 +42,11 @@ __pycache__/
 # Fuzzing build artifacts (seed corpus IS tracked; everything else is not)
 ci/fuzz/fuzz_accept_encoding
 ci/fuzz/generated_parser.inc
+ci/fuzz/fuzz_dcz
+ci/fuzz/generated_dcz.inc
 ci/fuzz/crash-*
 ci/fuzz/corpus-min/
+ci/fuzz/corpus-dcz-min/
 ci/fuzz/*.profraw
 # Local fuzz runs dump discovered units into corpus/; keep only the
 # curated NN_name seeds under version control.
