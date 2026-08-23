@@ -1,4 +1,3 @@
----
 id: c-unbounded-string-copy
 language: c
 severity: warning

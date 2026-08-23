@@ -1,4 +1,3 @@
----
 id: c-assign-in-if
 language: c
 severity: warning

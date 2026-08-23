@@ -1,4 +1,3 @@
----
 id: c-alloc-mul-overflow
 language: c
 severity: warning

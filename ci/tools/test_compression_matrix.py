@@ -100,8 +100,7 @@ def make_payload(kind: str, n: int) -> bytes:
     unit = (
         f"/* cell {n} */.c{n}{{color:#abcdef;margin:0 auto;padding:1px}}\n"
     ).encode()
-    body = (unit * (n // len(unit) + 1))[:n]
-    return body
+    return (unit * (n // len(unit) + 1))[:n]
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):

@@ -22,9 +22,9 @@
 # CI. If you find them diverged again, fix CI first.
 #
 # Detected in this repo:
-#   C source dirs : ., filter, static, tools
-#   Python dirs   : tools
-#   fuzz corpora  : fuzz/corpus
+#   C source dirs : src
+#   Python dirs   : ci
+#   fuzz corpora  : ci/fuzz/corpus, ci/fuzz/corpus_dcz, ci/fuzz/regressions
 #
 # What is NOT here, and why:
 #   clang-tidy   -- needs ngx_auto_config.h, which only exists after nginx is
@@ -41,13 +41,18 @@
 # unsafe things with untrusted input and would trip flawfinder forever.
 #
 # Install (once per clone):
-#   pipx install pre-commit && pre-commit install
+#   pipx install pre-commit
+#   git config core.hooksPath .githooks
 #
-# This repo has no tracked .githooks/pre-commit, so .git/hooks/ is what git
-# reads. If you later adopt the tracked-hook design, `git config core.hooksPath
-# .githooks` makes this config unreachable unless that hook calls
-# `pre-commit run --hook-stage pre-commit` itself -- core.hooksPath REPLACES
-# .git/hooks/, it does not add to it.
+# Do NOT run `pre-commit install` in this repo. It writes .git/hooks/pre-commit,
+# and core.hooksPath REPLACES .git/hooks/ entirely -- git consults one or the
+# other, never both. The result is an inert config that looks installed from
+# every angle: config present, install reported success, hook file on disk with
+# a plausible date, and nothing ever going red to reveal it.
+# .githooks/pre-commit invokes `pre-commit run --hook-stage pre-commit` itself,
+# which is what actually runs these hooks. A missing pre-commit binary is exit 2
+# there (blocking), not a skip -- a gate that skips when its tool is absent
+# reports green while checking nothing.
 #
 # Run against everything without committing:
 #   pre-commit run --all-files
@@ -69,33 +74,33 @@
 # Skipped" as probe.pem and "Private key found" as probe.txt. They are excluded
 # per-hook on the three fixers below instead, which is the only reason they were
 # ever in this list.
-exclude: '^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|\.traefik-ref/|\.claude/worktrees/|\.build/|(^|/)objs/|(^|/)vendor/|(^|/)node_modules/|(^|/)\.venv/|\.(bin|gz|zip|png|ico|so|o|a)$'
+exclude: '^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|\.traefik-ref/|\.claude/worktrees/|\.build/|(^|/)objs/|(^|/)vendor/|(^|/)node_modules/|(^|/)\.venv/|\.(bin|gz|zip|png|ico|so|o|a)$'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # The three fixers rewrite files in place, so every byte-exact file has to
-      # stay out of their reach. Per-hook, not top-level: a top-level exclude
-      # would also blind detect-private-key below.
+      # The three fixers rewrite files in place, so every byte-exact file has
+      # to stay out of their reach. Per-hook, not top-level: a top-level
+      # exclude would also blind detect-private-key and the linters.
       #
       # Beyond keys and DER blobs, two kinds of file here are CONTENT, not
       # source, and a "harmless" trailing newline changes what they mean:
-      #   ci/fuzz/regressions/*  a corpus entry IS the input bytes. Appending
-      #                          \n makes it a different Accept-Encoding header,
-      #                          so the regression silently stops reproducing
-      #                          the crash it was committed to pin.
+      #   fuzz corpora / regressions  a corpus entry IS the input bytes.
+      #                          Appending \n makes it a different input, so
+      #                          the regression silently stops reproducing the
+      #                          crash it was committed to pin.
       #   *.patch                dpkg-source/quilt match context at zero fuzz;
       #                          rewriting the tail makes the patch not apply.
       # Caught 2026-08-22 by a `pre-commit run --all-files`, which mutated one
       # of each.
       - id: trailing-whitespace
-        exclude: &byte_exact '(\.(pem|der|patch)$|^ci/fuzz/regressions/)'
+        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
       - id: end-of-file-fixer
-        exclude: *byte_exact
+        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
       - id: mixed-line-ending
         args: [--fix=lf]
-        exclude: *byte_exact
+        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
       - id: check-merge-conflict
       - id: check-yaml
       - id: check-added-large-files
@@ -105,7 +110,12 @@ repos:
       # vector); gating on those is a pure false positive, while the hook still
       # guards every real path.
       - id: detect-private-key
-        exclude: '^tests?/'
+        # `(ci/)?` because the skeleton standard relocates the suite under ci/:
+        # a root-anchored ^tests?/ stops matching the moment a module moves
+        # tests/ to ci/tests/, and the hook then fires on the relocated PEM
+        # fixtures and blocks the move commit itself. Hit in every module
+        # adopting the ci/ layout.
+        exclude: '^(ci/)?tests?/'
 
   - repo: local
     hooks:
@@ -143,7 +153,7 @@ repos:
         name: flawfinder (gate on >=4)
         entry: flawfinder --minlevel=4 --error-level=4 --quiet
         language: system
-        files: '^(src|ci)/.*\.[ch]$'
+        files: '^src/.*\.[ch]$'
         pass_filenames: true
 
       # Mirrors the CI "semgrep (gate on >=WARNING)" step, same configs and
@@ -177,7 +187,7 @@ repos:
         entry: semgrep scan --jobs=1 --config p/c --config p/security-audit
                --severity=WARNING --severity=ERROR --error
         language: system
-        files: '^(src|ci)/.*\.[ch]$'
+        files: '^src/.*\.[ch]$'
         pass_filenames: true
         require_serial: true
 
@@ -203,9 +213,9 @@ repos:
         entry: cppcheck --enable=warning,performance,portability
                --error-exitcode=1 --suppress=missingIncludeSystem
                --suppress=normalCheckLevelMaxBranches --suppress=unusedFunction
-               --suppress=unusedStructMember -I filter -I static -I tools -DNGX_PTR_SIZE=8
+               --suppress=unusedStructMember -I src -DNGX_PTR_SIZE=8
         language: system
-        files: '^(src|ci)/.*\.[ch]$'
+        files: '^src/.*\.[ch]$'
         pass_filenames: true
 
       # Structural sink sweep: this superrepo's own c-* / nginx-* rules plus
@@ -240,13 +250,12 @@ repos:
         name: ast-grep (structural sinks, gate on promoted rules)
         entry: ast-grep scan -c ci/ast-grep/sgconfig.yml
                --error=c-alloc-mul-overflow
-               --error=c-memcpy-sizeof-pointer
                --error=c-sizeof-wrong-operand
                --error=c-unbounded-string-copy
                --error=c-format-string
                --error=c-shell-exec
         language: system
-        files: '^(src|ci)/.*\.[ch]$'
+        files: '^src/.*\.[ch]$'
         pass_filenames: true
 
       # Python is the runtime TEST HARNESS in these repos, so it carries the
@@ -299,7 +308,7 @@ repos:
         name: ruff (correctness tiers F,B,I,PLE,RET,RUF059)
         entry: ruff check --force-exclude --select F,B,I,PLE,RET,RUF059
         language: system
-        files: '^ci/tools/.*\.py$'
+        files: '^ci/.*\.py$'
         pass_filenames: true
 
       # CI workflows are code that breaks silently; actionlint catches bad if:

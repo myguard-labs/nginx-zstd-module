@@ -1,4 +1,3 @@
----
 id: nginx-raw-malloc
 language: c
 severity: info
