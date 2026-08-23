@@ -154,7 +154,8 @@ jobs:
       # ci/fuzz/extract_static_probe.sh (see ci/tests/unit/run.sh header) so
       # a stale copy can never pass.
       - name: Pure-function unit tests (Accept-Encoding parser + frame probe)
-        run: bash "$GITHUB_WORKSPACE/ci/tests/unit/run.sh"
+        run: |
+          bash "$GITHUB_WORKSPACE/ci/tests/unit/run.sh"
           echo "✓ Python harness unit tests passed"
 
       # Audit sha e289021 F1/F7 regression coverage: no nginx build needed,
