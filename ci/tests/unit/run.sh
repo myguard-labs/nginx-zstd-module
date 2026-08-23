@@ -2,9 +2,11 @@
 # Copyright (C) 2026 Thijs Eilander
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# ci/tests/unit/run.sh -- build and run the Accept-Encoding parser unit tests.
+# ci/tests/unit/run.sh -- build and run the pure-function unit tests: the
+# Accept-Encoding parser (src/ngx_http_zstd_common.h) and the .zst
+# frame-header probe (src/ngx_http_zstd_static_module.c).
 #
-#   ci/tests/unit/run.sh            # regenerate the parser slice, build, run
+#   ci/tests/unit/run.sh            # regenerate both slices, build, run
 #   ci/tests/unit/run.sh clean      # remove build products
 #   COVERAGE=1 ci/tests/unit/run.sh # also instrument, so ci/tools/coverage.sh
 #                                   # can gcov src/ afterwards
@@ -44,9 +46,10 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../../.." && pwd)"
 FUZZ_DIR="$ROOT/ci/fuzz"
 BIN="$DIR/test_accept_encoding"
+PROBE_BIN="$DIR/test_static_probe"
 
 if [ "${1:-}" = "clean" ]; then
-    rm -f "$BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
+    rm -f "$BIN" "$PROBE_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
     echo "unit test binary removed"
     exit 0
 fi
@@ -83,3 +86,26 @@ echo "==> Running"
 # the job burns its whole 15-minute budget and the log never says which layer
 # failed.
 timeout 60s "$BIN"
+
+# ---------------------------------------------------------------------------
+# The .zst frame-header probe (src/ngx_http_zstd_static_module.c:
+# ngx_http_zstd_static_probe_frame). Same shape as the parser suite above:
+# extract the shipped function body first, so this binary can never link a
+# hand-copied drifted version. The probe is pure arithmetic over a fixed
+# 18-byte buffer -- no nginx tree, no libzstd, no filesystem -- so it belongs
+# in this cheapest layer too.
+# ---------------------------------------------------------------------------
+bash "$FUZZ_DIR/extract_static_probe.sh"
+
+echo "==> Building $PROBE_BIN with ${CC}"
+# shellcheck disable=SC2086
+$CC "${OWN_CFLAGS[@]}" -I"$FUZZ_DIR" -c "$DIR/test_static_probe.c" \
+    -o "$DIR/test_static_probe.o"
+# shellcheck disable=SC2086
+$CC "${LINK_EXTRA[@]}" -o "$PROBE_BIN" "$DIR/test_static_probe.o"
+
+echo "==> Running"
+# Bounded for the same reason as above; the probe has no loop that can run
+# away, but a timeout costs nothing and keeps the layer's failure mode
+# uniform.
+timeout 60s "$PROBE_BIN"

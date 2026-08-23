@@ -44,6 +44,7 @@ ci/fuzz/fuzz_accept_encoding
 ci/fuzz/generated_parser.inc
 ci/fuzz/fuzz_dcz
 ci/fuzz/generated_dcz.inc
+ci/fuzz/generated_static_probe.inc
 ci/fuzz/crash-*
 ci/fuzz/corpus-min/
 ci/fuzz/corpus-dcz-min/
@@ -55,5 +56,6 @@ ci/fuzz/corpus/*
 
 # Unit test build artifacts (source + run.sh IS tracked)
 ci/tests/unit/test_accept_encoding
+ci/tests/unit/test_static_probe
 ci/tests/unit/*.gcda
 ci/tests/unit/*.gcno

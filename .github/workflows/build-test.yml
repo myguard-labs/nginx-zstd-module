@@ -146,11 +146,14 @@ jobs:
           cd "$GITHUB_WORKSPACE/ci/tools"
           python3 -m unittest -v test_test_encoding test_test_package_artifact
 
-      # Cheapest test layer over the real Accept-Encoding decision function:
-      # no nginx build tree, no network, sub-second. Regenerates and links
-      # the shipped src/ngx_http_zstd_common.h via ci/fuzz/extract_parser.sh
-      # (see ci/tests/unit/run.sh header) so a stale copy can never pass.
-      - name: Accept-Encoding parser unit tests (real decision TU)
+      # Cheapest test layer over the real pure decision functions -- the
+      # Accept-Encoding parser and the .zst frame-header probe: no nginx
+      # build tree, no network, sub-second. Regenerates and links the
+      # shipped src/ngx_http_zstd_common.h and
+      # src/ngx_http_zstd_static_module.c via ci/fuzz/extract_parser.sh and
+      # ci/fuzz/extract_static_probe.sh (see ci/tests/unit/run.sh header) so
+      # a stale copy can never pass.
+      - name: Pure-function unit tests (Accept-Encoding parser + frame probe)
         run: bash "$GITHUB_WORKSPACE/ci/tests/unit/run.sh"
           echo "✓ Python harness unit tests passed"
 
