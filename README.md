@@ -10,8 +10,8 @@
 [![Windows build](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/windows-build.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/windows-build.yml)
 
 📖 **Background reading:**
-- [zstd nginx module: what it does, bugs fixed](https://deb.myguard.nl/2026/05/zstd-nginx-module-what-it-does-bugs-fixed/)
-- [nginx zstd vs brotli vs zlib-ng — a compression comparison](https://deb.myguard.nl/2026/05/nginx-zstd-vs-brotli-vs-zlib-ng-compression/)
+- [zstd nginx module: what it does, bugs fixed](https://deb.myguard.nl/articles/zstd-nginx-module-bugs-fixed/)
+- [nginx zstd vs brotli vs zlib-ng — a compression comparison](https://deb.myguard.nl/articles/nginx-zstd-vs-brotli-vs-zlib-ng-compression/)
 
 # zstd-nginx-module
 

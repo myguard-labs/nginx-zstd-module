@@ -2435,3 +2435,125 @@ sub {
 EARLY-CONTENT that must survive the match holdback https://very-long-replacement-host.example/path LATE-CONTENT after the match completes
 --- no_error_log
 [error]
+
+
+
+=== TEST 93: a coding name running straight into a DQUOTE does not negotiate
+# RFC 9110 12.5.3 `codings` is a token and '"' is not a tchar, so `zstd"x`
+# advertises no coding. The name scan stops on '"' for the phantom-token
+# guard, but the stopping byte went unexamined, so the truncated name still
+# compared equal and we compressed for a client that never offered zstd --
+# a parser differential against a strict intermediary, and a divergence from
+# nginx's own ngx_http_gzip_accept_encoding(), which requires ',', ';', ' '
+# or end after the name.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd"x
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 94: a DQUOTE-suffixed name followed by a quoted blob does not negotiate
+# The other half of TEST 93: `zstd"a,b"` hides a comma inside the quoted run.
+# The element must decline AND the quote-aware skip must swallow the whole
+# blob, so the bytes after the in-quote comma cannot start a phantom element.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd"a,b"
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 95: zstd_comp_level -1 is applied, not silently replaced
+# NGX_CONF_UNSET is -1, and -1 is a valid documented level (ZSTD_minCLevel()
+# ..-1). The old merge could not tell "operator asked for -1" from "nothing
+# configured", so it overwrote the request with the inherited server value.
+# This location inherits 9 from http_config and asks for -1. The COMPRESSED
+# SIZE is the oracle -- the response is chunked, so there is no
+# Content-Length to read; the body filter reports the byte count instead.
+# Level -1 is far cheaper than 9 and must produce a visibly larger body.
+# TEST 96 pins what an inherited 9 produces on the same fixture: pre-fix the
+# two were byte-for-byte identical, which is exactly what makes this pair a
+# negative control rather than a smoke test.
+--- http_config
+    zstd_comp_level 9;
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        zstd_comp_level -1;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- response_body_filters eval
+sub { "zstd_bytes=" . length($_[0]) }
+--- response_body chomp
+zstd_bytes=4796
+--- no_error_log
+[error]
+
+
+
+=== TEST 96: an inherited zstd_comp_level 9 is the control for TEST 95
+# Same fixture, same server-level 9, no location override -- so this is the
+# size TEST 95 must NOT produce. Keep the two in step: if the fixture or the
+# linked libzstd changes, both numbers move, and they must stay different.
+--- http_config
+    zstd_comp_level 9;
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- response_body_filters eval
+sub { "zstd_bytes=" . length($_[0]) }
+--- response_body chomp
+zstd_bytes=3560
+--- no_error_log
+[error]

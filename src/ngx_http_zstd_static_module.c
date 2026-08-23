@@ -142,8 +142,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     ngx_table_elt_t              *h;
     ngx_chain_t                   out;
     ngx_open_file_info_t          of;
-    ngx_http_core_loc_conf_t     *clcf;
-    ngx_http_zstd_static_conf_t  *zscf;
+    ngx_http_core_loc_conf_t           *clcf;
+    const ngx_http_zstd_static_conf_t  *zscf;
 
     if (!(r->method & (NGX_HTTP_GET|NGX_HTTP_HEAD))) {
         return NGX_DECLINED;
@@ -616,8 +616,6 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_zstd_static_conf_t *prev = parent;
     ngx_http_zstd_static_conf_t *conf = child;
 
-    ngx_http_core_loc_conf_t    *clcf;
-
     ngx_conf_merge_uint_value(conf->enable, prev->enable,
                               NGX_HTTP_ZSTD_STATIC_OFF);
 
@@ -645,6 +643,8 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
          * ngx_http_zstd_vary_handled_externally()), so
          * postconfiguration reports one summary warning.
          */
+        const ngx_http_core_loc_conf_t  *clcf;
+
         clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
         if (clcf != NULL && !clcf->gzip_vary) {
 

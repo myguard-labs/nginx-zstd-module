@@ -49,7 +49,7 @@
  * fires, so the caller's surrounding loop cannot stall.
  */
 static u_char *
-ngx_http_zstd_skip_quoted(u_char *p, u_char *end)
+ngx_http_zstd_skip_quoted(u_char *p, const u_char *end)
 {
     if (p >= end || *p != '"') {
         return p;
@@ -82,16 +82,16 @@ ngx_http_zstd_skip_quoted(u_char *p, u_char *end)
  * (the caller re-scans to the next ',').
  */
 static ngx_int_t
-ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
+ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
 {
-    u_char     *end = ae->data + ae->len;
-    ngx_int_t   q = 1000;   /* no q parameter → q=1 */
-    ngx_int_t   q_seen = 0; /* reject a second "q" parameter (RFC 9110) */
+    const u_char  *end = ae->data + ae->len;
+    ngx_int_t      q = 1000;   /* no q parameter → q=1 */
+    ngx_int_t      q_seen = 0; /* reject a second "q" parameter (RFC 9110) */
 
     while (p < end && *p == ';') {
 
-        u_char     *nstart, *nend;
-        ngx_int_t   is_q;
+        const u_char  *nstart, *nend;
+        ngx_int_t      is_q;
 
         p++;    /* skip ';' */
 
@@ -108,6 +108,16 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
             p++;
         }
         nend = p;
+
+        /*
+         * RFC 9110 has no empty-parameter production, so "zstd;;q=1" is
+         * malformed rather than "a skipped parameter followed by q=1".
+         * Reject it instead of silently resolving the element to q=1.
+         */
+        if (nend == nstart) {
+            return -1;
+        }
+
         is_q = (nend - nstart == 1
                 && (nstart[0] == 'q' || nstart[0] == 'Q'));
 
@@ -156,12 +166,12 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
                     }
 
                 } else if (*p == '1') {
-                    int  i = 0;
-
                     p++;
                     q = 1000;
 
                     if (p < end && *p == '.') {
+                        int  i = 0;
+
                         p++;
                         while (p < end && *p == '0' && i < 3) {
                             p++;
@@ -248,18 +258,19 @@ ngx_http_zstd_eval_qvalue(ngx_str_t *ae, u_char *p)
  * on that).
  */
 static ngx_int_t
-ngx_http_zstd_coding_weight(ngx_str_t *ae, const char *coding,
+ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
     size_t coding_len, ngx_uint_t allow_wildcard)
 {
-    u_char     *p   = ae->data;
-    u_char     *end = ae->data + ae->len;
-    ngx_int_t   coding_q = -1;   /* explicit `coding` weight, -1 = absent */
-    ngx_int_t   star_q = -1;     /* "*" wildcard weight,      -1 = absent */
+    u_char        *p   = ae->data;
+    const u_char  *end = ae->data + ae->len;
+    ngx_int_t      coding_q = -1; /* explicit `coding` weight, -1 = absent */
+    ngx_int_t      star_q = -1;   /* "*" wildcard weight,      -1 = absent */
 
     while (p < end) {
 
-        u_char     *tok, *name_end;
-        ngx_int_t   is_coding, is_star, q;
+        u_char        *tok;
+        const u_char  *name_end;
+        ngx_int_t      is_coding, is_star, q;
 
         /* Skip OWS and empty list elements (RFC 9110 allows stray
          * commas, e.g. ", ,zstd"). */
@@ -291,6 +302,23 @@ ngx_http_zstd_coding_weight(ngx_str_t *ae, const char *coding,
                      && ngx_strncasecmp(tok, (u_char *) coding,
                                         coding_len) == 0);
         is_star = (name_end - tok == 1 && tok[0] == '*');
+
+        /*
+         * A name that ran straight into a DQUOTE is not a list element:
+         * RFC 9110 12.5.3 `codings` is a token and '"' is not a tchar,
+         * so `zstd"x` advertises nothing. The scan above stops on '"'
+         * for the phantom-token guard, which leaves the stopping byte
+         * unexamined -- without this, `zstd"x` still compared equal and
+         * we compressed for a client that never offered zstd, diverging
+         * from nginx's own gzip filter (ngx_http_gzip_accept_encoding()
+         * requires ',', ';', ' ' or end after the name). The quote-aware
+         * element-skip below still swallows the rest of the element, so
+         * the phantom-token guard is unchanged.
+         */
+        if (p < end && *p == '"') {
+            is_coding = 0;
+            is_star = 0;
+        }
 
         /* Step over any OWS between the name and its ';' or ','. */
         while (p < end && (*p == ' ' || *p == '\t')) {
@@ -351,7 +379,7 @@ ngx_http_zstd_coding_weight(ngx_str_t *ae, const char *coding,
  * fuzz failure, not just a review nit.
  */
 static ngx_int_t
-ngx_http_zstd_accept_encoding(ngx_str_t *ae)
+ngx_http_zstd_accept_encoding(const ngx_str_t *ae)
 {
     ngx_int_t  q;
 

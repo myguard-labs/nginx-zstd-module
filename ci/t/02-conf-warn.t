@@ -356,3 +356,50 @@ static warn fixture
 GET /st/plain.txt
 --- no_error_log eval
 [qr/zstd_static is enabled but/, qr/\[error\]/]
+
+
+
+=== TEST 16: an empty zstd_dict_file is rejected at config load
+# A 0-byte trained dictionary used to load as a silent no-op: the read is
+# complete (0 == size) and ZSTD_createCDict(buf, 0, level) returns a VALID
+# CDict, so nginx started and compressed with no dictionary at all -- after
+# the operator had explicitly set zstd_dict_file_unsafe on. The dcz loader
+# has always rejected an empty file; both loaders now agree.
+--- http_config
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $TEST_NGINX_SERVER_ROOT/html/empty.dict;
+--- user_files
+>>> empty.dict
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+empty.dict" is empty
+--- no_error_log
+[alert]
+
+
+
+=== TEST 17: a duplicate zstd_comp_level is rejected when the first value is -1
+# Regression: NGX_CONF_UNSET is -1, and -1 is a valid documented level, so
+# the "is duplicate" guard tested the same value a real directive could
+# store. "zstd_comp_level -1; zstd_comp_level 5;" was therefore accepted
+# silently and 5 won. TEST 11 cannot catch this -- neither of its values is
+# the sentinel. The slot now tests NGX_HTTP_ZSTD_LEVEL_UNSET.
+--- config
+    location /dup {
+        zstd on;
+        zstd_comp_level -1;
+        zstd_comp_level 5;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+"zstd_comp_level" directive is duplicate
+--- no_error_log
+[alert]

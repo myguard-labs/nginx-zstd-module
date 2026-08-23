@@ -71,7 +71,7 @@ static const uint32_t  ngx_http_zstd_sha256_k[64] = {
 static void
 ngx_http_zstd_sha256_compress(ngx_http_zstd_sha256_t *c, const u_char *p)
 {
-    uint32_t    w[64], a, b, d, e, f, g, h, s0, s1, t1, cc, ch, maj;
+    uint32_t    w[64], a, b, d, e, f, g, h, s0, s1, cc;
     ngx_uint_t  i;
 
 #define ngx_http_zstd_rotr(x, n)  (((x) >> (n)) | ((x) << (32 - (n))))
@@ -100,6 +100,8 @@ ngx_http_zstd_sha256_compress(ngx_http_zstd_sha256_t *c, const u_char *p)
     h = c->state[7];
 
     for (i = 0; i < 64; i++) {
+        uint32_t  t1, ch, maj;
+
         s1 = ngx_http_zstd_rotr(e, 6) ^ ngx_http_zstd_rotr(e, 11)
              ^ ngx_http_zstd_rotr(e, 25);
         ch = (e & f) ^ (~e & g);
@@ -151,11 +153,11 @@ static void
 ngx_http_zstd_sha256_update(ngx_http_zstd_sha256_t *c, const u_char *data,
     size_t len)
 {
-    size_t  n;
-
     c->total += len;
 
     if (c->block_len) {
+        size_t  n;
+
         n = 64 - c->block_len;
         if (n > len) {
             n = len;

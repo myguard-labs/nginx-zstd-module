@@ -207,9 +207,19 @@ typedef struct {
 } ngx_http_zstd_ctx_t;
 
 
-typedef struct {
-    ngx_conf_post_handler_pt  post_handler;
-} ngx_http_zstd_comp_level_bounds_t;
+/*
+ * zstd_comp_level cannot use NGX_CONF_UNSET as its "not configured"
+ * marker: NGX_CONF_UNSET is -1, and -1 is itself a valid, documented
+ * compression level (ZSTD_minCLevel()..-1, see README). With the shared
+ * sentinel, "zstd_comp_level -1;" was indistinguishable from an absent
+ * directive, so the merge below silently replaced it with the inherited
+ * value or the default 3 -- and the duplicate-directive guard in
+ * ngx_conf_zstd_set_num_slot_with_negatives() could never fire for it.
+ * The value is out of band for every libzstd: ZSTD_minCLevel() is
+ * -131072 at its most extreme, far above the type minimum. nginx defines
+ * NGX_MAX_INT_T_VALUE but no signed minimum, so derive it.
+ */
+#define NGX_HTTP_ZSTD_LEVEL_UNSET  (-NGX_MAX_INT_T_VALUE - 1)
 
 
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
@@ -309,7 +319,7 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
 
 
-static ngx_http_zstd_comp_level_bounds_t  ngx_http_zstd_comp_level_bounds = {
+static ngx_conf_post_t  ngx_http_zstd_comp_level_bounds = {
     ngx_http_zstd_comp_level
 };
 
@@ -748,9 +758,9 @@ static ngx_table_elt_t *
 ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
     size_t len, ngx_uint_t *count)
 {
-    ngx_uint_t        i;
-    ngx_list_part_t  *part;
-    ngx_table_elt_t  *h, *found;
+    ngx_uint_t              i;
+    const ngx_list_part_t  *part;
+    ngx_table_elt_t        *h, *found;
 
     part = &r->headers_in.headers.part;
     h = part->elts;
@@ -806,7 +816,10 @@ ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
  *
  * Dictionary-ID is intentionally not parsed: it only matters when the
  * operator sets id= in Use-As-Dictionary, and the hash alone is a
- * complete, collision-free key for the lookup below.
+ * complete, collision-resistant key for the lookup below. (SHA-256 is
+ * collision-RESISTANT, not collision-free -- the distinction does not
+ * weaken the lookup, which indexes public dictionary identities, but the
+ * stronger claim is not one SHA-256 makes.)
  */
 static ngx_http_zstd_dcz_dict_t *
 ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
@@ -1951,7 +1964,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
      */
 
     conf->enable = NGX_CONF_UNSET;
-    conf->level = NGX_CONF_UNSET;
+    conf->level = NGX_HTTP_ZSTD_LEVEL_UNSET;
     conf->min_length = NGX_CONF_UNSET;
     conf->max_length = NGX_CONF_UNSET;
     conf->target_cblock_size = NGX_CONF_UNSET;
@@ -1972,6 +1985,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_zstd_loc_conf_t *conf = child;
 
     ngx_fd_t                    fd;
+    off_t                       fsize;
     size_t                      size;
     ssize_t                     n;
     char                       *rc;
@@ -1984,7 +1998,17 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     fd = NGX_INVALID_FILE;
 
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
-    ngx_conf_merge_value(conf->level, prev->level, 3);
+
+    /*
+     * Hand-rolled rather than ngx_conf_merge_value(): that macro tests
+     * against NGX_CONF_UNSET, which is a legal level here. See
+     * NGX_HTTP_ZSTD_LEVEL_UNSET above.
+     */
+    if (conf->level == NGX_HTTP_ZSTD_LEVEL_UNSET) {
+        conf->level = (prev->level == NGX_HTTP_ZSTD_LEVEL_UNSET)
+                      ? 3 : prev->level;
+    }
+
     ngx_conf_merge_value(conf->min_length, prev->min_length, 1024);
     ngx_conf_merge_value(conf->max_length, prev->max_length, NGX_CONF_UNSET);
     ngx_conf_merge_value(conf->target_cblock_size, prev->target_cblock_size, 0);
@@ -2100,19 +2124,45 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 goto close;
             }
 
-            size = ngx_file_size(&info);
+            /*
+             * Compare as off_t BEFORE narrowing to size_t: on an ILP32
+             * build with large-file support a >4 GiB dictionary wraps to
+             * a small size_t, slipping past the cap below and loading a
+             * truncated dictionary.
+             */
+            fsize = ngx_file_size(&info);
 
             /* Validate dictionary file size to prevent DoS
              * via memory exhaustion */
-            if (size > NGX_HTTP_ZSTD_MAX_DICT_SIZE) {
+            if (fsize > (off_t) NGX_HTTP_ZSTD_MAX_DICT_SIZE) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "dictionary file too large: %uz bytes "
+                                   "dictionary file too large: %O bytes "
                                    "(limit: %d bytes)",
-                                   size, NGX_HTTP_ZSTD_MAX_DICT_SIZE);
+                                   fsize, NGX_HTTP_ZSTD_MAX_DICT_SIZE);
 
                 rc = NGX_CONF_ERROR;
                 goto close;
             }
+
+            /*
+             * Reject an empty file rather than loading a do-nothing
+             * dictionary. ZSTD_createCDict(buf, 0, level) returns a
+             * VALID CDict, and ngx_read_fd(..., 0) returns 0 == size, so
+             * every completeness check downstream passes and the operator
+             * -- who had to set zstd_dict_file_unsafe on to get here --
+             * silently gets no dictionary at all. The dcz loader below
+             * has always rejected this; the two now agree.
+             */
+            if (fsize == 0) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "dictionary file \"%V\" is empty",
+                                   &zmcf->dict_file);
+
+                rc = NGX_CONF_ERROR;
+                goto close;
+            }
+
+            size = (size_t) fsize;
 
             buf = ngx_palloc(cf->pool, size);
             if (buf == NULL) {
@@ -2350,7 +2400,7 @@ close:
     }
 
     if (rc == NGX_CONF_OK && conf->enable) {
-        ngx_http_core_loc_conf_t  *clcf;
+        const ngx_http_core_loc_conf_t  *clcf;
 
         /*
          * The advice below is wrong when the compression_vary filter
@@ -2485,6 +2535,17 @@ ngx_http_zstd_dcz_dicts_hashed_variable(ngx_http_request_t *r,
 
     zmcf = ngx_http_get_module_main_conf(r, ngx_http_zstd_filter_module);
 
+    /*
+     * Consistency with merge_loc_conf(), filter_init() and both static-module
+     * sites, which all guard this. The main conf is present whenever the
+     * module is loaded, so this cannot fire today -- but a reader should not
+     * have to prove that from four other call sites to know it is safe.
+     */
+    if (zmcf == NULL) {
+        vv->not_found = 1;
+        return NGX_OK;
+    }
+
     vv->data = ngx_pnalloc(r->pool, NGX_INT_T_LEN);
     if (vv->data == NULL) {
         return NGX_ERROR;
@@ -2505,8 +2566,8 @@ static ngx_int_t
 ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data)
 {
-    ngx_uint_t            ratio_int, ratio_frac;
-    ngx_http_zstd_ctx_t  *ctx;
+    ngx_uint_t                  ratio_int, ratio_frac;
+    const ngx_http_zstd_ctx_t  *ctx;
 
     (void) data;
 
@@ -2618,10 +2679,11 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_zstd_loc_conf_t *zlcf = conf;
 
+    off_t                      fsize;
     size_t                     size;
     ssize_t                    n;
     ngx_fd_t                   fd;
-    ngx_str_t                 *value, path;
+    ngx_str_t                 *value, path, bytes;
     ngx_uint_t                 i, have_hash;
     u_char                     c, hi, lo;
     u_char                     hash[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN];
@@ -2718,21 +2780,28 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         goto failed;
     }
 
-    size = ngx_file_size(&info);
+    /*
+     * off_t comparison before the size_t narrowing: see the matching
+     * note in ngx_http_zstd_merge_loc_conf(). A >4 GiB file on ILP32
+     * would otherwise wrap under the cap.
+     */
+    fsize = ngx_file_size(&info);
 
-    if (size == 0) {
+    if (fsize == 0) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "dcz dictionary \"%V\" is empty", &path);
         goto failed;
     }
 
-    if (size > NGX_HTTP_ZSTD_MAX_DICT_SIZE) {
+    if (fsize > (off_t) NGX_HTTP_ZSTD_MAX_DICT_SIZE) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "dcz dictionary \"%V\" too large: %uz bytes "
+                           "dcz dictionary \"%V\" too large: %O bytes "
                            "(limit: %d bytes)",
-                           &path, size, NGX_HTTP_ZSTD_MAX_DICT_SIZE);
+                           &path, fsize, NGX_HTTP_ZSTD_MAX_DICT_SIZE);
         goto failed;
     }
+
+    size = (size_t) fsize;
 
     /*
      * Between the window cap (2^23) and the hard limit above the frame
@@ -2752,19 +2821,21 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                            &path, size);
     }
 
-    dict = ngx_array_push(zlcf->dcz_dicts);
-    if (dict == NULL) {
+    /*
+     * Build the entry in locals and push it only once the file has been
+     * read in full. Pushing first left a half-initialised element (NULL
+     * bytes.data, uninitialised hash) in zlcf->dcz_dicts on every error
+     * path below -- unreachable today because NGX_CONF_ERROR aborts the
+     * load before anything walks the array, but that is a non-local
+     * safety argument and the next reader should not have to rebuild it.
+     */
+    bytes.len = size;
+    bytes.data = ngx_palloc(cf->pool, size);
+    if (bytes.data == NULL) {
         goto failed;
     }
 
-    dict->file = path;
-    dict->bytes.len = size;
-    dict->bytes.data = ngx_palloc(cf->pool, size);
-    if (dict->bytes.data == NULL) {
-        goto failed;
-    }
-
-    n = ngx_read_fd(fd, (void *) dict->bytes.data, size);
+    n = ngx_read_fd(fd, (void *) bytes.data, size);
     if (n < 0) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                            ngx_read_fd_n " \"%V\" failed", &path);
@@ -2782,13 +2853,10 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    if (have_hash) {
-        ngx_memcpy(dict->hash, hash, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
-
-    } else {
+    if (!have_hash) {
         zmcf = ngx_http_conf_get_module_main_conf(cf,
                                                   ngx_http_zstd_filter_module);
-        ngx_http_zstd_dcz_dict_hash(dict->bytes.data, size, dict->hash,
+        ngx_http_zstd_dcz_dict_hash(bytes.data, size, hash,
                                     &zmcf->dcz_dicts_hashed);
     }
 
@@ -2802,8 +2870,8 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
      */
     dicts = zlcf->dcz_dicts->elts;
 
-    for (i = 0; i + 1 < zlcf->dcz_dicts->nelts; i++) {
-        if (ngx_memcmp(dicts[i].hash, dict->hash,
+    for (i = 0; i < zlcf->dcz_dicts->nelts; i++) {
+        if (ngx_memcmp(dicts[i].hash, hash,
                        NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) == 0)
         {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
@@ -2812,6 +2880,15 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             return NGX_CONF_ERROR;
         }
     }
+
+    dict = ngx_array_push(zlcf->dcz_dicts);
+    if (dict == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    dict->file = path;
+    dict->bytes = bytes;
+    ngx_memcpy(dict->hash, hash, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
 
     return NGX_CONF_OK;
 
@@ -2829,7 +2906,7 @@ failed:
 static char *
 ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
 {
-    ngx_int_t  *np = data;
+    const ngx_int_t  *np = data;
 
     (void)post;
 
@@ -3011,12 +3088,18 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
 
     ngx_int_t        *np;
     ngx_str_t        *value;
-    ngx_conf_post_t  *post;
 
 
     np = (ngx_int_t *) (p + cmd->offset);
 
-    if (*np != NGX_CONF_UNSET) {
+    /*
+     * NGX_HTTP_ZSTD_LEVEL_UNSET, not NGX_CONF_UNSET: this slot serves
+     * only zstd_comp_level, whose unset marker is out of band precisely
+     * because NGX_CONF_UNSET (-1) is a valid level. Testing the shared
+     * sentinel here let "zstd_comp_level -1; zstd_comp_level 5;" through
+     * as if the first line had never been parsed.
+     */
+    if (*np != NGX_HTTP_ZSTD_LEVEL_UNSET) {
         return (char *) "is duplicate";
     }
 
@@ -3042,7 +3125,8 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
     }
 
     if (cmd->post) {
-        post = cmd->post;
+        ngx_conf_post_t  *post = cmd->post;
+
         return post->post_handler(cf, post, np);
     }
 

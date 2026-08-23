@@ -118,6 +118,33 @@ ref_accepts(const uint8_t *d, size_t n)
                    && (d[ts] | 0x20) == 'z' && (d[ts+1] | 0x20) == 's'
                    && (d[ts+2] | 0x20) == 't' && (d[ts+3] | 0x20) == 'd');
 
+        /*
+         * A DQUOTE immediately after the name disqualifies the element,
+         * confidently: RFC 9110 12.5.3 `codings` is a token and '"' is
+         * not a tchar, so `zstd"x` offers no coding at all. Answering
+         * -1 (unsure) here instead would leave the whole class untested
+         * -- the differential asserts nothing on an unsure reference,
+         * which is exactly how the parser bug this encodes went unseen.
+         * Skip to the element separator, honouring quoting so a comma
+         * inside the quoted run does not start a phantom element.
+         */
+        if (i < n && d[i] == '"') {
+            int  inq = 0;
+
+            while (i < n && (inq || d[i] != ',')) {
+                if (d[i] == '\\' && inq) {
+                    if (i + 1 >= n) return -1;      /* dangling escape */
+                    i += 2;
+                    continue;
+                }
+                if (d[i] == '"') inq = !inq;
+                i++;
+            }
+            if (inq) return -1;                     /* unterminated quote */
+            if (i < n) i++;                         /* consume the ',' */
+            continue;                               /* contributes nothing */
+        }
+
         while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
 
         q = 1000;   /* no weight → q=1 */
@@ -150,6 +177,12 @@ ref_accepts(const uint8_t *d, size_t n)
                     i++;
                 }
                 pe = i;
+
+                /* empty parameter ("zstd;;q=1"): no such production in
+                 * RFC 9110, so the element is malformed. The parser
+                 * rejects it; stay confident and agree. */
+                if (pe == ps) return -1;
+
                 is_qp = (pe - ps == 1 && (d[ps] == 'q' || d[ps] == 'Q'));
 
                 while (i < n && (d[i] == ' ' || d[i] == '\t')) i++;
