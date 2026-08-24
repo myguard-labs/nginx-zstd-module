@@ -1204,7 +1204,7 @@ def main() -> int:
         type=int,
         default=6,
         help="zstd_comp_level pinned in the generated config for both "
-        "arms (default 6, matches the existing +79% measurement). "
+        "arms (default 6, matches the existing +79%% measurement). "
         "Pinned explicitly rather than left at each binary's compiled-in "
         "default so an A/B between two different binaries never mixes a "
         "level change into the change actually under measurement.",
