@@ -141,6 +141,20 @@ ngx_module_t  ngx_http_zstd_static_module = {
 #define NGX_HTTP_ZSTD_STATIC_FRAME_NOT_ZSTD    1
 #define NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED   2
 #define NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG  3
+#define NGX_HTTP_ZSTD_STATIC_FRAME_SKIP        4
+
+/*
+ * How many leading skippable frames the caller's walk (in the handler,
+ * below) will follow before giving up and declining. A dcz-style prefix
+ * (see README "Standards-based dictionary compression") is exactly ONE
+ * skippable frame — the 40-byte SHA-256 header — ahead of the real
+ * payload frame, so 4 is generous headroom for that shape plus the odd
+ * extra marker frame, while still bounding the walk to a handful of
+ * pread(2) calls: an attacker cannot turn this into an unbounded scan
+ * by chaining skippable frames, because each one past the bound is a
+ * hard decline, not a longer search.
+ */
+#define NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES   4
 
 
 /*
@@ -156,7 +170,11 @@ ngx_module_t  ngx_http_zstd_static_module = {
  * carry different log lines.
  *
  * On NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG the declared window is
- * stored through `window` for the caller's error message. `window` is
+ * stored through `window` for the caller's error message. On
+ * NGX_HTTP_ZSTD_STATIC_FRAME_SKIP the skippable frame's declared
+ * 4-byte little-endian skip length (RFC 8878 §3.2) is stored through
+ * `window` instead — same out-param, different unit, always read
+ * against the matching verdict so there is no ambiguity. `window` is
  * untouched on every other verdict.
  *
  * No I/O, no logging, no allocation, no request state: this is the
@@ -185,6 +203,34 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
     }
 
     /*
+     * Skippable frame (RFC 8878 §3.2): magic(4) + Frame_Size(4, little-
+     * endian) + Frame_Size bytes of opaque payload to skip. The
+     * declared window guarantee this probe exists for does not apply
+     * to a skippable frame directly — there is no window here, only a
+     * length to jump — so the caller does not get to serve on this
+     * verdict alone. It must resolve the skip, bounded, and probe
+     * whatever frame follows: an attacker-controlled skippable prefix
+     * must not be a way to dodge the window check on the frame that
+     * actually gets decoded (that was the bug: unconditionally OK-ing
+     * every skippable magic let a one-byte-longer file bypass the 8 MB
+     * guard entirely). TRUNCATED here, same as a regular frame, means
+     * "not enough bytes to decide" — the caller's fail-closed path is
+     * identical either way.
+     */
+    if (mw != ZSTD_MAGICNUMBER) {
+        if (n < 8) {
+            return NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED;
+        }
+
+        *window = ((uint64_t) hdr[4])
+                | ((uint64_t) hdr[5] << 8)
+                | ((uint64_t) hdr[6] << 16)
+                | ((uint64_t) hdr[7] << 24);
+
+        return NGX_HTTP_ZSTD_STATIC_FRAME_SKIP;
+    }
+
+    /*
      * Declared-window check (RFC 8878 §3.1.1.1) on regular frames —
      * see NGX_HTTP_ZSTD_STATIC_MAX_WINDOW for why: a frame declaring
      * more than 8 MB is rejected by every browser before decoding, so
@@ -193,19 +239,16 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
      * (the zstd filter, gzip_static or identity takes over) and puts
      * the actionable cause in the error log.
      *
-     * The check covers the LEADING frame only. A skippable leading
-     * frame is exempt (the real header sits after a variable-length
-     * skip), and in a concatenation of regular frames only the first
-     * is inspected: a regular frame's header does not declare its
+     * The check covers the LEADING regular frame reached after
+     * resolving any leading skippable frames (bounded, see the
+     * caller). In a concatenation of regular frames only the first is
+     * inspected: a regular frame's header does not declare its
      * compressed length, so walking the sequence would mean decoding
      * every block header in every frame — unbounded I/O for a
-     * serve-time guard. Multi-frame .zst web assets are pathological
-     * (no common tooling emits them); the README documents the
-     * leading-frame scope.
+     * serve-time guard. Multi-regular-frame .zst web assets are
+     * pathological (no common tooling emits them); the README
+     * documents that scope.
      */
-    if (mw != ZSTD_MAGICNUMBER) {
-        return NGX_HTTP_ZSTD_STATIC_FRAME_OK;
-    }
 
     if (n < 5) {
         return NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED;
@@ -455,11 +498,13 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
          * files return fewer bytes; each parse path checks it got what
          * that frame layout requires.
          */
-        u_char     hdrbuf[18];
-        u_char    *hdr;
-        size_t     want;
-        ssize_t    n;
-        uint64_t   window;
+        u_char       hdrbuf[18];
+        u_char      *hdr;
+        size_t       want;
+        ssize_t      n;
+        uint64_t     window, skip;
+        ngx_uint_t   frames;
+        off_t        pos;
 
         if (of.size < 4) {
             ngx_log_error(NGX_LOG_ERR, log, 0,
@@ -484,61 +529,126 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
             want = sizeof(hdrbuf);
         }
 
-        n = pread(of.fd, hdr, want, 0);
-        if (n < 4) {
-            if (of.is_directio) {
-                ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
-                              "zstd static: %uz-byte aligned probe on "
-                              "directio file \"%s\" returned %z — "
-                              "declining; check directio_alignment "
-                              "against the device geometry",
-                              want, path.data, n);
+        pos = 0;
+
+        /*
+         * Walk a bounded chain of leading skippable frames to reach the
+         * first regular frame, so the window guard below cannot be
+         * dodged by prepending one (see NGX_HTTP_ZSTD_STATIC_FRAME_SKIP
+         * and NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES). Each iteration
+         * pread()s at the current offset, exactly like the original
+         * single-shot probe did at offset 0; only the offset and the
+         * loop are new.
+         */
+        for (frames = 0; ; frames++) {
+
+            if (frames >= NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES) {
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "zstd static: \"%s\" has more than %ui "
+                              "leading skippable frames — declining "
+                              "rather than searching further for the "
+                              "first regular frame",
+                              path.data,
+                              (ngx_uint_t)
+                                  NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES);
                 return NGX_DECLINED;
             }
 
-            ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
-                          "zstd static: pread(\"%s\", frame header) "
-                          "returned %z", path.data, n);
-            return NGX_DECLINED;
-        }
+            n = pread(of.fd, hdr, want, pos);
+            if (n < 4) {
+                if (of.is_directio) {
+                    ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                                  "zstd static: %uz-byte aligned probe on "
+                                  "directio file \"%s\" returned %z — "
+                                  "declining; check directio_alignment "
+                                  "against the device geometry",
+                                  want, path.data, n);
+                    return NGX_DECLINED;
+                }
 
-        if (of.is_directio) {
-            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
-                           "zstd static: %uz-byte aligned probe on "
-                           "directio file \"%s\"", want, path.data);
-        }
+                ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
+                              "zstd static: pread(\"%s\", frame header) "
+                              "returned %z", path.data, n);
+                return NGX_DECLINED;
+            }
 
-        switch (ngx_http_zstd_static_probe_frame(hdr, (size_t) n, &window)) {
+            if (of.is_directio) {
+                ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
+                               "zstd static: %uz-byte aligned probe on "
+                               "directio file \"%s\"", want, path.data);
+            }
 
-        case NGX_HTTP_ZSTD_STATIC_FRAME_NOT_ZSTD:
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "zstd static: \"%s\" is not a zstd frame "
-                          "(leading bytes 0x%02xd%02xd%02xd%02xd)",
-                          path.data,
-                          (ngx_uint_t) hdr[0], (ngx_uint_t) hdr[1],
-                          (ngx_uint_t) hdr[2], (ngx_uint_t) hdr[3]);
-            return NGX_DECLINED;
+            switch (ngx_http_zstd_static_probe_frame(hdr, (size_t) n,
+                                                      &window))
+            {
 
-        case NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED:
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "zstd static: \"%s\" frame header truncated",
-                          path.data);
-            return NGX_DECLINED;
+            case NGX_HTTP_ZSTD_STATIC_FRAME_NOT_ZSTD:
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "zstd static: \"%s\" is not a zstd frame "
+                              "(leading bytes 0x%02xd%02xd%02xd%02xd)",
+                              path.data,
+                              (ngx_uint_t) hdr[0], (ngx_uint_t) hdr[1],
+                              (ngx_uint_t) hdr[2], (ngx_uint_t) hdr[3]);
+                return NGX_DECLINED;
 
-        case NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG:
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "zstd static: \"%s\" declares a %uL-byte "
-                          "decompression window, above the 8 MB limit "
-                          "browsers enforce for Content-Encoding: zstd "
-                          "(RFC 8878) — declining so a fallback "
-                          "encoding is used; recompress with a window "
-                          "log <= 23 (streaming encoders default to "
-                          "the compression level's window when not "
-                          "told the input size)",
-                          path.data, window);
-            return NGX_DECLINED;
+            case NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED:
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "zstd static: \"%s\" frame header truncated",
+                              path.data);
+                return NGX_DECLINED;
 
-        default:
+            case NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG:
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "zstd static: \"%s\" declares a %uL-byte "
+                              "decompression window, above the 8 MB limit "
+                              "browsers enforce for Content-Encoding: zstd "
+                              "(RFC 8878) — declining so a fallback "
+                              "encoding is used; recompress with a window "
+                              "log <= 23 (streaming encoders default to "
+                              "the compression level's window when not "
+                              "told the input size)",
+                              path.data, window);
+                return NGX_DECLINED;
+
+            case NGX_HTTP_ZSTD_STATIC_FRAME_SKIP:
+
+                /*
+                 * `window` carries the declared skip length here (see
+                 * the probe's doc comment). Prove the 8-byte skippable
+                 * header AND the full declared skip both fit within
+                 * of.size before trusting the jump — checked
+                 * arithmetic throughout, since `skip` is attacker-
+                 * controlled and 32-bit-wide enough to overflow a
+                 * 32-bit off_t/size_t add on its own.
+                 */
+                skip = window;
+
+                if ((uint64_t) pos > (uint64_t) of.size
+                    || (uint64_t) of.size - (uint64_t) pos < 8)
+                {
+                    ngx_log_error(NGX_LOG_ERR, log, 0,
+                                  "zstd static: \"%s\" skippable frame "
+                                  "header runs past end of file",
+                                  path.data);
+                    return NGX_DECLINED;
+                }
+
+                if (skip > (uint64_t) of.size - (uint64_t) pos - 8) {
+                    ngx_log_error(NGX_LOG_ERR, log, 0,
+                                  "zstd static: \"%s\" skippable frame "
+                                  "declares a %uL-byte skip past end of "
+                                  "file", path.data, skip);
+                    return NGX_DECLINED;
+                }
+
+                pos += (off_t) 8 + (off_t) skip;
+
+                continue;
+
+            default:
+                break;
+            }
+
             break;
         }
     }
