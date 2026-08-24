@@ -164,7 +164,6 @@ typedef struct {
     ZSTD_inBuffer                buffer_in;
     ZSTD_outBuffer               buffer_out;
 
-    ngx_http_request_t          *request;
     ZSTD_CCtx                   *cctx;
 
     /* dictionary negotiated for this response via Available-Dictionary;
@@ -767,7 +766,6 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     ngx_http_set_ctx(r, ctx, ngx_http_zstd_filter_module);
 
-    ctx->request = r;
     ctx->last_out = &ctx->out;
     ctx->dcz_dict = dcz;
 
