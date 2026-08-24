@@ -229,6 +229,19 @@ policy_ 1 provenance-cache-hit-skips-verify provenance
 # download token and were skipped wholesale rather than checked -- a gate
 # failing open. Same class for `curl -O` and `Invoke-WebRequest -OutFile`.
 policy_ 1 provenance-bare-wget-unverified provenance
+# One probe per spelling the DOWNLOAD_RE comment claims to cover. Without
+# these two, a regression in the curl -O or Invoke-WebRequest branch passes
+# the selftest while the comment still advertises them as handled.
+policy_ 1 provenance-curl-O-unverified provenance
+policy_ 1 provenance-iwr-outfile-unverified provenance
+# The ANCHOR half failing open, not the scoping half: a bare `sha256sum f`
+# prints a digest and compares nothing, yet used to satisfy TRUST_ANCHOR_RE.
+# provenance-verified-ok is the green control for a real comparison.
+policy_ 1 provenance-noncomparing-sha256 provenance
+# No archive at all: download a standalone binary, chmod +x, run it. The
+# tar/unzip patterns miss this entirely, yet it is the same privilege
+# boundary one step shorter.
+policy_ 1 provenance-exec-downloaded-binary provenance
 
 # A mistyped pool label in a schedule-only workflow. The trust half of the
 # runners check does not apply to a workflow no fork can reach, and skipping it

@@ -628,18 +628,46 @@ def check_cadence() -> int:
 # actual privilege boundary, not the download line above it.
 EXTRACT_OR_EXEC_RE = re.compile(
     r"(?<![\w-])tar\s+-?x|(?<![\w-])unzip\b|(?<![\w-])/tmp/actionlint\b"
+    # Direct execution of a fetched artifact, without any unpacking step in
+    # between: `chmod +x tool && ./tool`, or a bare `./tool` / `./tool/x`
+    # invocation. A standalone downloaded executable is the same privilege
+    # boundary as an unpacked tarball, and the tar/unzip patterns above miss
+    # it entirely. Deliberately textual and therefore approximate: this
+    # matches a relative-path invocation whether or not the file came from
+    # the network, which is safe here because the whole check is already
+    # scoped to jobs that DO fetch something (see DOWNLOAD_RE).
+    r"|(?<![\w./-])\./[\w.-]+"
 )
 
 # What counts as a trust-anchor assertion having been made ON THIS PATH
 # before the extract/exec point. Any one of:
 #   - a detached-signature check (gpg --verify)
-#   - a checksum comparison (sha256sum, and the pinned-hash variable naming
-#     convention this repo uses: *_SHA256)
+#   - a checksum COMPARISON -- `sha256sum -c`, or a digest captured into a
+#     variable that is then tested against a pinned `*_SHA256`
 #   - delegating to a helper this repo already verified for the SAME
 #     property (ci-build.sh, fetch-verified-nginx.sh)
+#
+# A bare `sha256sum tool.tgz` PRINTS a digest and compares nothing, and a
+# lone `FOO_SHA256:` env declaration is a pinned value nothing tests. Both
+# used to satisfy this regex, so a job could look anchored while validating
+# no bytes at all -- the anchor half failing open the same way the scoping
+# half did. Matching a comparison means an `if`/`test`/`[`/`||`/`&&` or a
+# `-c` check must appear with the digest, not merely the digest command.
 TRUST_ANCHOR_RE = re.compile(
-    r"gpg\b(?:\s+\S+)*\s+--\S*verify|sha256sum|_SHA256\b|ci-build\.sh|"
-    r"fetch-verified-nginx\.sh"
+    # detached signature
+    r"gpg\b(?:\s+\S+)*\s+--\S*verify"
+    # sha256sum -c / --check against a manifest
+    r"|sha256sum\b[^\n]*\s-(?:c\b|-check\b)"
+    # digest captured, then compared -- either order, same step or later
+    r"|sha256sum\b[^\n]*\n?[^\n]*(?:\bif\b|\btest\b|\[|!=|==|\|\||&&)"
+    # PowerShell: Get-FileHash captured, then compared (windows-build.yml:msvc
+    # does `$actual = (Get-FileHash ...).Hash` then `if ($actual -ne $s.sha)`).
+    # -ne/-eq are the comparison operators, not != / ==.
+    r"|Get-FileHash\b[\s\S]*?(?:-ne\b|-eq\b|\bif\b)"
+    r"|(?:\bif\b|\btest\b|\[|!=|==)[^\n]*_SHA256\b"
+    r"|_SHA256\b[^\n]*(?:!=|==|\|\||&&)"
+    # helpers whose own verification this repo already reviewed
+    r"|ci-build\.sh|fetch-verified-nginx\.sh"
 )
 
 # A step that only DOWNLOADS and does not itself extract or execute is not a
@@ -677,6 +705,14 @@ def check_provenance() -> int:
     byte, only that the job asserts one at all before it unpacks or runs
     something -- the gap this exists to close is "no check ran", not "the
     check that ran was subtly wrong".
+
+    Both halves have been tightened once already after review found them
+    failing open: the scoping regex missed bare `wget <url>` / `curl -O` /
+    `Invoke-WebRequest`, which skipped whole JOBS rather than passing them,
+    and the anchor regex accepted a non-comparing `sha256sum` or an untested
+    `*_SHA256` declaration. Each spelling has its own red fixture; add one
+    with any future widening, or the claim in these comments outruns what
+    the selftest actually proves.
     """
     errors: list[str] = []
     for path in workflows():
