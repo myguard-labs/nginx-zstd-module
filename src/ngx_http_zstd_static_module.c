@@ -897,6 +897,17 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
                    "zstd static: serving precompressed \"%s\"", path.data);
 
+    rc = ngx_http_send_header(r);
+
+    if (rc == NGX_ERROR || rc > NGX_OK) {
+        return rc;
+    }
+
+    /* Fast path for HEAD requests: no body buffer needed */
+    if (r->header_only) {
+        return NGX_OK;
+    }
+
     /* gzip_static parity: byte ranges address the SELECTED
      * REPRESENTATION (RFC 9110 §14.2) — here the .zst bytes on disk,
      * which a client can fetch, resume and concatenate coherently
@@ -916,12 +927,6 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     b->file = ngx_pcalloc(r->pool, sizeof(ngx_file_t));
     if (b->file == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    rc = ngx_http_send_header(r);
-
-    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) {
-        return rc;
     }
 
     b->file_pos = 0;
