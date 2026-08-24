@@ -1270,9 +1270,16 @@ ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
  *
  * Returns NGX_OK when raw is a well-formed byte-sequence decoding to
  * exactly NGX_HTTP_ZSTD_SHA256_DIGEST_LEN bytes (written to *out*),
- * NGX_DECLINED on malformed byte-sequence framing (missing colons, or
- * decoded length other than 32 bytes; *out* is left untouched),
- * NGX_ERROR on base64 decode failure; *out* is left untouched.
+ * NGX_DECLINED on malformed byte-sequence framing (bad length, or a
+ * missing leading/trailing colon) -- detected before decoding, so *out*
+ * is untouched -- and NGX_ERROR when the framing is well-formed but the
+ * payload is not a 32-byte base64 value (undecodable, or decoding to a
+ * length other than 32). On NGX_ERROR *out* may have been partially
+ * written by ngx_decode_base64() and its contents are unspecified; the
+ * caller must not read it unless NGX_OK was returned.
+ *
+ * The two failure values exist so ngx_http_zstd_dcz_negotiate() can log
+ * which half rejected the header; both are equally fail-closed.
  */
 static ngx_int_t
 ngx_http_zstd_dcz_decode_digest(ngx_str_t raw,
