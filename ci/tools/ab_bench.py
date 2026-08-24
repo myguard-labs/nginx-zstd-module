@@ -133,6 +133,16 @@ DEFAULT_ROUNDS = 3
 DEFAULT_DURATION = "10s"
 WARMUP_DURATION = "3s"
 
+# nginx retries bind() several times on "Address already in use" before
+# giving up and exiting -- measured at ~2.5s from spawn to exit on this
+# build. require_own_nginx_ready() waits at least this long past a
+# successful socket connect before trusting it, so a foreign listener
+# already on the port (which answers instantly, well before our nginx
+# would exit) cannot be mistaken for readiness. See that function's
+# docstring for the reproduction that caught the original 0.2s window
+# being too short.
+NGINX_BIND_RETRY_GRACE_S = 4.0
+
 # Body-size classes. 8 KB is where the worker-CCtx-cache win showed up
 # (+79%); 64 KB is where it was measured as zero because the compression
 # work itself dominates over context-creation overhead. Keeping both by
@@ -141,6 +151,16 @@ BODY_SIZES: dict[str, int] = {
     "8kb": 8 * 1024,
     "64kb": 64 * 1024,
 }
+
+# The debug pass drives ONE body-size class (the smaller one, where the
+# cache win is largest -- see the block above) rather than the full mix,
+# since it exists only to produce witness lines, not a throughput
+# comparison. Bound to BODY_SIZES itself, not a bare literal path, so a
+# future rename can't silently point this at a 404 (nginx would answer
+# 404, the debug pass would collect zero witnesses, and the hit rate
+# would misleadingly read "n/a" rather than erroring loudly).
+DEBUG_BODY = next(iter(BODY_SIZES))
+assert DEBUG_BODY in BODY_SIZES
 
 CREATE_WITNESS = "zstd: created cctx"
 REUSE_WITNESS = "zstd: reusing worker cctx"
@@ -169,7 +189,19 @@ PACE_DELAY_S = 0.004
 # the check that survived compares the HIT RATE at the lowest vs the
 # highest swept concurrency, since "decays toward 1/N" is a relative
 # claim about the hit rate and this is its negative control.
-CONTENTION_MIN_CREATED = 2
+#
+# CONTENTION_MIN_CREATED is NOT the discriminating check -- it is a
+# trivial sanity bound only (a run must produce at least this many
+# "created cctx" witnesses at the highest concurrency before the hit
+# rate at that point means anything at all, e.g. it rules out a
+# division on near-zero counts). All the actual discriminating power is
+# in CONTENTION_MIN_RELATIVE_RISE. A previous version of this comment
+# claimed the absolute floor alone was too weak and then set it to 2,
+# which is just as easily cleared by scheduling jitter as 1 was -- that
+# was wrong and is fixed here: on a genuinely contending run `created`
+# reached 8903 at 128 conn, so 20 is still a low bar relative to real
+# contention while still ruling out a near-empty sample.
+CONTENTION_MIN_CREATED = 20
 CONTENTION_MIN_RELATIVE_RISE = 1.5
 
 
@@ -226,15 +258,73 @@ def detect_module(binary: pathlib.Path, name: str) -> pathlib.Path | None:
     return sibling if sibling.exists() else None
 
 
-def wait_for_port(port: int, timeout: float = 10.0) -> bool:
-    deadline = time.time() + timeout
+def require_own_nginx_ready(
+    proc: subprocess.Popen, port: int, root: pathlib.Path, what: str
+) -> None:
+    """Block until `port` is accepting connections AND our own nginx
+    process is still alive -- accepting readiness from the socket alone
+    is not enough. If something else already holds `port`, our nginx
+    exits almost immediately with "Address already in use", but a bare
+    socket connect happily reaches the FOREIGN listener and reports
+    ready instantly, before our process has even been reaped: the
+    harness would then benchmark somebody else's server and report a
+    confident number for software it never started -- reproduced while
+    testing this exact fix, with a foreign HTTP server already bound to
+    the target port.
+
+    A single `proc.poll()` right after the socket connects is NOT
+    enough: it does not block, and nginx failing to bind is not
+    guaranteed to have been reaped by the OS in that exact instant, so
+    the race can still slip through. This polls both conditions
+    together over a short window instead of trusting one snapshot of
+    either.
+    """
+    deadline = time.time() + 10
+    ready = False
     while time.time() < deadline:
+        if proc.poll() is not None:
+            break
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                return True
+                ready = True
+                break
         except OSError:
-            time.sleep(0.1)
-    return False
+            time.sleep(0.05)
+    # A socket connect succeeding is NOT proof our process is the one
+    # answering: nginx retries bind() on "Address already in use"
+    # several times before giving up (measured: ~2.5s of retries before
+    # it actually exits), so a foreign listener already on the port
+    # answers wait_for_port() immediately while our nginx is still
+    # mid-retry, and a short grace window after "ready" is not long
+    # enough to distinguish the two -- reproduced while testing this
+    # exact fix. Once the socket is reachable, actively wait for our
+    # process to EITHER exit (bind failure) or survive past nginx's own
+    # bind-retry budget (genuine readiness), rather than trusting one
+    # snapshot.
+    if ready:
+        try:
+            proc.wait(timeout=NGINX_BIND_RETRY_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass  # still alive past the retry window -- genuinely ours
+    exited = proc.poll() is not None
+    if ready and not exited:
+        return
+    tail = ""
+    log = root / "stdout.log"
+    if log.exists():
+        tail = log.read_text("utf-8", "replace")[-2000:]
+    if exited:
+        raise RuntimeError(
+            f"{what}: our nginx process exited before/during the "
+            f"readiness wait on port {port} (exit code "
+            f"{proc.returncode}) -- if something else already held that "
+            f"port, a socket connect alone would otherwise have reached "
+            f"the FOREIGN listener and this run would have silently "
+            f"benchmarked someone else's server. Log tail:\n{tail}"
+        )
+    raise RuntimeError(
+        f"{what}: nginx never became ready on port {port}. Log tail:\n{tail}"
+    )
 
 
 def body_bytes(size: int) -> bytes:
@@ -334,6 +424,7 @@ def write_conf(
     arm: Arm,
     workers: int,
     log_level: str,
+    comp_level: int,
 ) -> pathlib.Path:
     load = ""
     filt = arm.filter_module or detect_module(
@@ -358,6 +449,12 @@ events {{ worker_connections 4096; }}
 http {{
     access_log off;
     zstd on;
+    # Pinned explicitly, not left at the compiled-in default: two arms
+    # can be two different binaries with two different defaults, and an
+    # unpinned level would mix a level change into the change under
+    # measurement. ci/tools/test_compression_matrix.py pins it for the
+    # same reason.
+    zstd_comp_level {comp_level};
     zstd_min_length 1;
     zstd_types application/octet-stream;
     server {{
@@ -394,6 +491,15 @@ def rss_monitor_start(master_pid: int, stop_path: pathlib.Path) -> subprocess.Po
     run without the harness process itself needing a thread juggling
     subprocess I/O. Writes the peak seen to `stop_path` on receipt of
     SIGTERM, then exits -- polled by the caller after wrk finishes.
+
+    `worker_processes` is fixed for the whole run, so the worker pid set
+    is resolved via `pgrep -P` ONCE, then reused for every 100ms /proc
+    read -- not re-forked on every poll. Forking a shell plus `pgrep` 10
+    times a second inside the measured window would add CPU noise on the
+    same machine the throughput itself is being measured on, undermining
+    the very number this monitor exists to collect. The pid set is only
+    re-resolved if a previously-known pid stops existing (a worker died
+    or reloaded mid-run), not on a fixed schedule.
     """
     script = f"""
 import os, signal, sys, time
@@ -403,13 +509,18 @@ def _stop(signum, frame):
     global stop
     stop = True
 signal.signal(signal.SIGTERM, _stop)
-while not stop:
+
+def resolve_pids():
     try:
         out = os.popen("pgrep -P {master_pid}").read()
-        pids = [int(x) for x in out.split() if x.strip()]
+        return [int(x) for x in out.split() if x.strip()]
     except Exception:
-        pids = []
+        return []
+
+pids = resolve_pids()
+while not stop:
     total = 0
+    stale = False
     for pid in pids:
         try:
             with open(f"/proc/{{pid}}/status") as fh:
@@ -418,8 +529,10 @@ while not stop:
                         total += int(line.split()[1])
                         break
         except (FileNotFoundError, ProcessLookupError):
-            pass
+            stale = True
     peak = max(peak, total)
+    if stale or not pids:
+        pids = resolve_pids()
     time.sleep(0.1)
 with open({str(stop_path)!r}, "w") as fh:
     fh.write(str(peak))
@@ -447,11 +560,34 @@ def parse_wrk_percentiles(text: str) -> tuple[float, float]:
     return p50, p99
 
 
+def parse_wrk_duration_s(duration: str) -> float:
+    """Parse a wrk `-d` duration string ("10s", "2m", "1h", or a bare
+    number of seconds) into seconds. Raises ValueError on anything else
+    -- callers treat that as a harness error, not a silent fallback,
+    since a duration wrk itself would reject is worth failing loudly on
+    before ever spawning the subprocess.
+    """
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)(s|m|h)?", duration.strip())
+    if not m:
+        raise ValueError(f"unparsable wrk duration: {duration!r}")
+    value = float(m.group(1))
+    unit = m.group(2) or "s"
+    return value * {"s": 1, "m": 60, "h": 3600}[unit]
+
+
 def run_wrk(
     url: str, connections: int, duration: str, threads: int
 ) -> tuple[float, float, float, int, int]:
     wrk_bin = shutil.which("wrk")
     assert wrk_bin
+    # The subprocess timeout must be derived from the user-supplied
+    # duration, not a fixed constant -- a fixed 120s timeout raises an
+    # uncaught subprocess.TimeoutExpired (main() only catches
+    # RuntimeError) the moment someone passes --duration longer than
+    # that, aborting the harness with a traceback instead of the
+    # documented harness-error path. The margin covers wrk's own
+    # connect/warmup/report overhead on top of the measured window.
+    timeout_s = parse_wrk_duration_s(duration) + 30
     proc = subprocess.run(
         [
             wrk_bin,
@@ -469,7 +605,7 @@ def run_wrk(
         capture_output=True,
         text=True,
         check=False,
-        timeout=120,
+        timeout=timeout_s,
     )
     out = proc.stdout
     rps_m = re.search(r"Requests/sec:\s*([\d.]+)", out)
@@ -486,48 +622,37 @@ def run_wrk(
 
 def bench_one(
     arm: Arm,
+    master_pid: int,
     root: pathlib.Path,
     port: int,
     body: str,
     conc: int,
     duration: str,
 ) -> BenchSample:
-    master = None
-    for _ in range(50):
-        master_pids = [
-            p
-            for p in subprocess.run(
-                ["pgrep", "-f", f"{arm.binary} -p {root}"],
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.split()
-        ]
-        if master_pids:
-            master = int(master_pids[0])
-            break
-        time.sleep(0.05)
+    # The config sets `daemon off; master_process on;`, so the Popen
+    # object's own pid already IS the master -- no need to re-derive it
+    # via `pgrep -f`, which depended on `pgrep` being installed and on
+    # arm.binary/root containing no regex metacharacters; a miss there
+    # silently left the RSS monitor never started and the table reported
+    # a false peakRSS(MB) of 0.0 instead of failing loudly.
     stop_file = root / f"rss.{body}.{conc}.peak"
-    monitor = None
-    if master is not None:
-        monitor = rss_monitor_start(master, stop_file)
+    monitor = rss_monitor_start(master_pid, stop_file)
 
     url = f"http://127.0.0.1:{port}/{body}"
     threads = min(conc, os.cpu_count() or 4)
     rps, p50, p99, requests, errors = run_wrk(url, conc, duration, threads)
 
     peak_rss = 0
-    if monitor is not None:
-        monitor.send_signal(signal.SIGTERM)
+    monitor.send_signal(signal.SIGTERM)
+    try:
+        monitor.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        monitor.kill()
+    if stop_file.exists():
         try:
-            monitor.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            monitor.kill()
-        if stop_file.exists():
-            try:
-                peak_rss = int(stop_file.read_text().strip() or "0")
-            except ValueError:
-                peak_rss = 0
+            peak_rss = int(stop_file.read_text().strip() or "0")
+        except ValueError:
+            peak_rss = 0
 
     return BenchSample(
         rps=rps,
@@ -546,6 +671,7 @@ def run_release_pass(
     duration: str,
     workers: int,
     base_port: int,
+    comp_level: int,
 ) -> dict:
     """Interleaved A/B rounds. Returns {arm_label: {conc: {body: [samples]}}}."""
     samples: dict[str, dict[int, dict[str, list[BenchSample]]]] = {
@@ -560,23 +686,20 @@ def run_release_pass(
     try:
         for i, arm in enumerate(arms):
             root = pathlib.Path(tempfile.mkdtemp(prefix=f"ab-bench-{arm.label}-"))
+            # mkdtemp gives 0700: run as root, workers drop to the
+            # compiled-in nginx user and cannot enter it -> 403s.
+            os.chmod(root, 0o755)
             workdirs.append(root)
             port = base_port + i * 2
             backend_port = port + 1
             backend = PacedBackend(backend_port, bodies)
             backend.start()
             backends.append(backend)
-            conf = write_conf(root, port, backend_port, arm, workers, "warn")
+            conf = write_conf(
+                root, port, backend_port, arm, workers, "warn", comp_level
+            )
             proc = start_nginx(arm, conf, root)
-            if not wait_for_port(port, timeout=10):
-                tail = ""
-                log = root / "stdout.log"
-                if log.exists():
-                    tail = log.read_text("utf-8", "replace")[-2000:]
-                raise RuntimeError(
-                    f"arm {arm.label!r}: nginx never became ready on port "
-                    f"{port}. Log tail:\n{tail}"
-                )
+            require_own_nginx_ready(proc, port, root, f"arm {arm.label!r}")
             procs[arm.label] = (proc, root, port)
 
         # Warmup: one short untimed-ish run per arm/body so the cache is
@@ -597,8 +720,10 @@ def run_release_pass(
                     # adjacent in wall-clock time rather than in two
                     # separate blocks.
                     for arm in arms:
-                        _proc, root, port = procs[arm.label]
-                        sample = bench_one(arm, root, port, body, conc, duration)
+                        proc, root, port = procs[arm.label]
+                        sample = bench_one(
+                            arm, proc.pid, root, port, body, conc, duration
+                        )
                         samples[arm.label][conc][body].append(sample)
     finally:
         for proc, _root, _port in procs.values():
@@ -621,6 +746,7 @@ def run_debug_pass(
     duration: str,
     workers: int,
     base_port: int,
+    comp_level: int,
 ) -> dict[int, WitnessSample]:
     """Separate pass, debug-level logging, only for engagement witnesses.
     Its own throughput is NOT reported -- see module docstring.
@@ -635,18 +761,23 @@ def run_debug_pass(
     Raises RuntimeError (a harness error, not a "slow result") if the
     workload never demonstrates genuine RELATIVE contention: the hit
     rate at the lowest swept concurrency must be materially higher than
-    at the highest (CONTENTION_MIN_RELATIVE_RISE), with at least
-    CONTENTION_MIN_CREATED "created cctx" witnesses at the highest
-    concurrency. An absolute `created > 1` floor alone is too weak, and
-    a relative created-fraction check saturates near 1.0 once
-    contention is heavy -- both were tried and rejected, see the
-    comment at the check itself. A flat or barely-falling hit rate
-    across the sweep is indistinguishable from a workload that never
-    contends, which is a broken measurement, not a real 100% hit rate.
-    See PacedBackend's docstring for why the workload needs pacing to
-    make genuine overlap possible at all.
+    at the highest (CONTENTION_MIN_RELATIVE_RISE) -- this ratio is the
+    actual discriminating check. CONTENTION_MIN_CREATED is only a
+    trivial sanity floor on the sample size at the highest concurrency,
+    not a second independent check; an absolute `created > 1` floor and
+    a relative created-fraction check were both tried as the REAL gate
+    and rejected (see the comment at CONTENTION_MIN_CREATED and the
+    check itself) -- the former cleared on scheduling jitter alone, the
+    latter saturates near 1.0 once contention is heavy. A flat or
+    barely-falling hit rate across the sweep is indistinguishable from
+    a workload that never contends, which is a broken measurement, not
+    a real 100% hit rate. See PacedBackend's docstring for why the
+    workload needs pacing to make genuine overlap possible at all.
     """
     root = pathlib.Path(tempfile.mkdtemp(prefix=f"ab-bench-debug-{arm.label}-"))
+    # mkdtemp gives 0700: run as root, workers drop to the compiled-in
+    # nginx user and cannot enter it -> 403s.
+    os.chmod(root, 0o755)
     bodies = {name: body_bytes(size) for name, size in BODY_SIZES.items()}
     backend_port = base_port + 1
     backend = PacedBackend(backend_port, bodies)
@@ -654,24 +785,22 @@ def run_debug_pass(
     try:
         backend.start()
         port = base_port
-        conf = write_conf(root, port, backend_port, arm, workers, "debug")
+        conf = write_conf(root, port, backend_port, arm, workers, "debug", comp_level)
         proc = start_nginx(arm, conf, root)
         try:
-            if not wait_for_port(port, timeout=10):
-                tail = ""
-                log = root / "stdout.log"
-                if log.exists():
-                    tail = log.read_text("utf-8", "replace")[-2000:]
-                raise RuntimeError(
-                    f"debug pass: nginx never became ready. Log tail:\n{tail}"
-                )
+            require_own_nginx_ready(proc, port, root, "debug pass")
             elog_path = root / "error.log"
             prev_created = 0
             prev_reused = 0
             for conc in concurrencies:
                 # Throughput-not-reported run purely to generate witness
                 # lines under realistic concurrent load.
-                run_wrk(f"http://127.0.0.1:{port}/8kb", conc, duration, min(conc, 4))
+                run_wrk(
+                    f"http://127.0.0.1:{port}/{DEBUG_BODY}",
+                    conc,
+                    duration,
+                    min(conc, 4),
+                )
                 time.sleep(0.3)  # let the debug log flush
                 elog = elog_path.read_text("utf-8", "replace")
                 total_created = len(re.findall(re.escape(CREATE_WITNESS), elog))
@@ -709,9 +838,12 @@ def run_debug_pass(
     # -> 3.1%, a 3.9x fall, because it is not pinned near a ceiling. The
     # check below requires the hit rate at the lowest swept concurrency
     # to be MEASURABLY HIGHER than at the highest -- "decays toward
-    # 1/N" is exactly this claim -- plus an absolute floor on `created`
-    # at the highest concurrency so a pass can't come from two
-    # single-digit witness counts dividing favourably.
+    # 1/N" is exactly this claim, and CONTENTION_MIN_RELATIVE_RISE is
+    # the sole discriminating threshold. CONTENTION_MIN_CREATED adds
+    # only a trivial sanity floor on `created` at the highest
+    # concurrency, so a pass can't come from two single-digit witness
+    # counts dividing favourably -- it does not by itself prove
+    # contention, the ratio above does.
     lo_conc, hi_conc = min(concurrencies), max(concurrencies)
     lo, hi = results.get(lo_conc), results.get(hi_conc)
     lo_hr = lo.hit_rate if lo is not None else None
@@ -758,13 +890,23 @@ def check_with_debug(binary: pathlib.Path) -> None:
 def print_release_table(
     arms: list[Arm], concurrencies: list[int], samples: dict
 ) -> None:
+    """Prints the release-pass table, including an `errors` column so a
+    partially-failing run (non-2xx/3xx responses, which wrk itself
+    counts inside "N requests in" alongside genuine successes) is
+    visible instead of silently averaged into the rps/latency numbers.
+    Any nonzero error count anywhere in the sweep gets a loud warning
+    after the table -- a confident-looking table measured on error
+    responses is the exact failure class this tool exists to avoid.
+    """
     header = (
         f"{'arm':<14}{'conc':>6}{'body':>7}{'rps(med)':>11}"
-        f"{'p50(ms)':>10}{'p99(ms)':>10}{'peakRSS(MB)':>13}{'rounds':>8}"
+        f"{'p50(ms)':>10}{'p99(ms)':>10}{'peakRSS(MB)':>13}"
+        f"{'errors':>8}{'rounds':>8}"
     )
     print(header)
     print("-" * len(header))
     medians: dict[str, dict[int, dict[str, float]]] = {}
+    any_errors = False
     for arm in arms:
         medians[arm.label] = {}
         for conc in concurrencies:
@@ -775,12 +917,25 @@ def print_release_table(
                 p50_med = statistics.median(s.p50_ms for s in sset)
                 p99_med = statistics.median(s.p99_ms for s in sset)
                 rss_peak = max((s.peak_rss_kb for s in sset), default=0) / 1024
+                total_errors = sum(s.errors for s in sset)
+                if total_errors > 0:
+                    any_errors = True
                 medians[arm.label][conc][body] = rps_med
                 print(
                     f"{arm.label:<14}{conc:>6}{body:>7}{rps_med:>11.1f}"
                     f"{p50_med:>10.2f}{p99_med:>10.2f}{rss_peak:>13.1f}"
-                    f"{len(sset):>8}"
+                    f"{total_errors:>8}{len(sset):>8}"
                 )
+        print()
+    if any_errors:
+        print(
+            "WARNING: non-2xx/3xx responses occurred somewhere in this "
+            "sweep (see the 'errors' column above). wrk counts those "
+            "inside its own request total, so the rps/p50/p99 numbers "
+            "for the affected cell(s) are measured PARTLY on error "
+            "responses, not on successful compression -- do not treat "
+            "them as a clean throughput measurement."
+        )
         print()
 
     if len(arms) == 2:
@@ -882,12 +1037,36 @@ def main() -> int:
         help="nginx worker_processes (default 1: the TODO rows this "
         "harness gates are about PER-WORKER cache behaviour)",
     )
+    ap.add_argument(
+        "--comp-level",
+        type=int,
+        default=6,
+        help="zstd_comp_level pinned in the generated config for both "
+        "arms (default 6, matches the existing +79% measurement). "
+        "Pinned explicitly rather than left at each binary's compiled-in "
+        "default so an A/B between two different binaries never mixes a "
+        "level change into the change actually under measurement.",
+    )
     ap.add_argument("--base-port", type=int, default=18400)
     ap.add_argument("--json", help="write machine-readable results here")
     args = ap.parse_args()
 
+    # Everything the scratch roots below create must stay readable by the
+    # workers when the harness runs as root (they drop to the compiled-in
+    # nginx user): a restrictive inherited umask would strip group/other
+    # bits from every fixture created here, 403ing the workers even with
+    # each scratch root itself chmod'd open -- same trap and same fix as
+    # ci/tools/test_compression_matrix.py.
+    os.umask(0o022)
+
     if shutil.which("wrk") is None:
         print("error: wrk not found on PATH", file=sys.stderr)
+        return 2
+
+    try:
+        parse_wrk_duration_s(args.duration)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
     concurrencies = [int(x) for x in args.concurrency.split(",") if x.strip()]
@@ -918,20 +1097,28 @@ def main() -> int:
             args.duration,
             args.workers,
             args.base_port,
+            args.comp_level,
         )
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    total_requests = sum(
-        s.requests
+    # Gate on SUCCESSFUL requests, not raw request count -- wrk's own
+    # "N requests in" total includes non-2xx/3xx responses, so an
+    # all-403 or all-502 run would otherwise clear this gate and print
+    # a full throughput table measured on nothing.
+    total_successful = sum(
+        max(s.requests - s.errors, 0)
         for arm in arms
         for conc in concurrencies
         for body in BODY_SIZES
         for s in samples[arm.label][conc][body]
     )
-    if total_requests == 0:
-        print("error: zero successful requests across the whole sweep", file=sys.stderr)
+    if total_successful == 0:
+        print(
+            "error: zero successful (non-error) requests across the whole sweep",
+            file=sys.stderr,
+        )
         return 1
 
     print_release_table(arms, concurrencies, samples)
@@ -955,6 +1142,7 @@ def main() -> int:
                 args.duration,
                 args.workers,
                 args.base_port + len(arms) * 2 + 2,
+                args.comp_level,
             )
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
