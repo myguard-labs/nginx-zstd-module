@@ -19,6 +19,40 @@
 #include "ngx_http_zstd_common.h"
 
 
+/*
+ * Whether the serve-time .zst frame probe is compiled in.
+ *
+ * The probe needs one thing from the platform: an OFFSET-EXPLICIT read
+ * that does NOT move the file position of the descriptor it is handed.
+ * That constraint is not cosmetic — the fd comes from
+ * ngx_open_cached_file() and is SHARED between every request currently
+ * serving the same file, so a read(2)+lseek pair here would corrupt the
+ * body another request is streaming (see the long comment at the probe
+ * call site).
+ *
+ *   POSIX    pread(2), when nginx's configure found it (NGX_HAVE_PREAD).
+ *            Without it we compile the probe out rather than fall back
+ *            to lseek+read — a build-time tripwire, since every modern
+ *            POSIX target has pread(2).
+ *   Win32    ngx_read_file(), whose Win32 implementation
+ *            (src/os/win32/ngx_files.c) issues ReadFile() with an
+ *            OVERLAPPED carrying the offset. An OVERLAPPED read does not
+ *            advance the HANDLE's file pointer, so it satisfies exactly
+ *            the same constraint pread(2) does. nginx's own abstraction
+ *            is used rather than a raw ReadFile() call so the platform
+ *            details (offset splitting, EOF mapping) stay upstream's.
+ *
+ * Deliberately NOT `ngx_read_file()` everywhere: on a POSIX build
+ * without NGX_HAVE_PREAD, ngx_read_file() IS the lseek+read pair this
+ * guard exists to avoid.
+ */
+#if (NGX_WIN32) || (NGX_HAVE_PREAD)
+#define NGX_HTTP_ZSTD_STATIC_HAVE_PROBE  1
+#else
+#define NGX_HTTP_ZSTD_STATIC_HAVE_PROBE  0
+#endif
+
+
 #define NGX_HTTP_ZSTD_STATIC_OFF        0
 #define NGX_HTTP_ZSTD_STATIC_ON         1
 #define NGX_HTTP_ZSTD_STATIC_ALWAYS     2
@@ -129,7 +163,7 @@ ngx_module_t  ngx_http_zstd_static_module = {
 };
 
 
-#if !(NGX_WIN32) && (NGX_HAVE_PREAD)
+#if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
 
 /*
  * Verdicts from ngx_http_zstd_static_probe_frame(). The caller maps each
@@ -297,7 +331,85 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
     return NGX_HTTP_ZSTD_STATIC_FRAME_OK;
 }
 
-#endif /* !NGX_WIN32 && NGX_HAVE_PREAD */
+
+/*
+ * The probe's only platform-dependent step: fetch up to `size` bytes
+ * from `offset` WITHOUT moving the descriptor's file position.
+ *
+ * Everything above this line — the magic check, the window arithmetic,
+ * the skippable-frame length — and everything the caller does with the
+ * verdicts is shared, byte for byte, between POSIX and Win32. Only the
+ * fetch differs, which is the point: a second copy of the verdict logic
+ * is how two platforms drift until one of them stops rejecting what the
+ * other rejects (that drift is precisely the hole this function closes:
+ * before it, Win32 served .zst files with no magic check, no window
+ * guard and no skippable-chain bound at all).
+ *
+ * Returns the byte count read, or -1 on error, matching pread(2)'s
+ * convention so the caller's short-read handling is unchanged. `log`
+ * and `name` are only used by the Win32 branch, which routes through
+ * ngx_read_file() and therefore needs an ngx_file_t to describe the
+ * descriptor (`name` only ever reaches ngx_read_file()'s own error log
+ * line); on POSIX both are unused.
+ */
+static ssize_t
+ngx_http_zstd_static_pread(ngx_fd_t fd, u_char *buf, size_t size,
+    off_t offset, ngx_log_t *log, ngx_str_t *name)
+{
+#if (NGX_WIN32)
+
+    ssize_t      n;
+    ngx_file_t   file;
+
+    /*
+     * A stack ngx_file_t borrowing the cached fd. The Win32
+     * ngx_read_file() passes an OVERLAPPED carrying the explicit
+     * offset to ReadFile(), so the read is positioned by argument
+     * rather than by the handle's own pointer, and the only offset it
+     * advances is file.offset — this local, discarded on return.
+     *
+     * That this is safe on a descriptor shared between concurrent
+     * requests is not a deduction from the API docs alone: nginx's own
+     * copy filter (src/core/ngx_output_chain.c, ngx_read_file() on
+     * src->file) reads every static file body through exactly this
+     * call, against exactly this open_file_cache descriptor, on every
+     * Windows build. If an OVERLAPPED read here could disturb another
+     * in-flight request on the same cached fd, Windows nginx could not
+     * serve static files at all.
+     */
+    ngx_memzero(&file, sizeof(ngx_file_t));
+
+    file.fd = fd;
+    file.log = log;
+    file.name = *name;
+
+    n = ngx_read_file(&file, buf, size, offset);
+
+    /*
+     * ngx_read_file() returns NGX_ERROR (-1) on failure, having already
+     * logged the ReadFile() error itself, and 0 at EOF. Both are short
+     * reads to the caller, which declines — fail closed. NGX_ERROR is
+     * -1 so the value passes through unchanged; assert that here rather
+     * than assume it, since the caller's `n < 4` test is what turns
+     * this into a decline.
+     */
+    if (n == NGX_ERROR) {
+        return -1;
+    }
+
+    return n;
+
+#else
+
+    (void) log;
+    (void) name;
+
+    return pread(fd, buf, size, offset);
+
+#endif
+}
+
+#endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */
 
 
 static ngx_int_t
@@ -446,7 +558,9 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         return NGX_HTTP_NOT_FOUND;
     }
 
-#if (NGX_HAVE_PREAD)
+#endif /* !NGX_WIN32 */
+
+#if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
     /*
      * Magic-number sanity check on the .zst file.
      *
@@ -455,12 +569,14 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * served with `Content-Encoding: zstd` and the client would get an
      * undecodable body — a confusing outage class that nginx's built-in
      * gzip_static also doesn't defend against. The probe is cheap (one
-     * pread(2) of the frame-header prefix at offset 0 — 18 bytes, or one
-     * aligned block under directio; pread is offset-explicit so it
-     * never moves the open_file_cache's shared fd position — using
-     * plain read(2) would do exactly that and corrupt subsequent
-     * requests serving the same cached fd). On mismatch we decline, so
-     * nginx falls back to serving the uncompressed original (or
+     * offset-explicit read of the frame-header prefix at offset 0 — 18
+     * bytes, or one aligned block under directio — via
+     * ngx_http_zstd_static_pread(): pread(2) on POSIX, ngx_read_file()
+     * on Win32, both of which take the offset as an argument and so
+     * never move the open_file_cache's shared fd position. Using plain
+     * read(2)/SetFilePointer would do exactly that and corrupt
+     * subsequent requests serving the same cached fd). On mismatch we
+     * decline, so nginx falls back to serving the uncompressed original (or
      * returns 404 if it is absent), and the operator sees a clear
      * error log line.
      *
@@ -468,16 +584,25 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * frame (ZSTD_MAGIC_SKIPPABLE_START..+0xF) are accepted, since
      * either is a valid leading frame in a zstd stream.
      *
-     * Gated by NGX_HAVE_PREAD: on platforms where nginx's configure
-     * could not find pread(2) we silently skip the probe rather than
-     * fall back to a read+lseek pair that would mutate the shared fd
-     * offset. Every modern POSIX target has it; this guard is
-     * essentially a build-time tripwire.
+     * Gated by NGX_HTTP_ZSTD_STATIC_HAVE_PROBE (see its definition):
+     * compiled in on Win32 and on any POSIX build whose configure found
+     * pread(2). On a POSIX build WITHOUT pread(2) the probe is skipped
+     * rather than degraded to a read+lseek pair that would mutate the
+     * shared fd offset — every modern POSIX target has it, so that
+     * branch is essentially a build-time tripwire.
+     *
+     * The probe deliberately runs on Win32 too. It used to be compiled
+     * out there, which meant a Windows build served ANY .zst with no
+     * magic check, no truncation check, no 8 MB window guard and no
+     * skippable-frame chain bound — a strictly weaker validation than
+     * the POSIX build, on a target the Windows build CI ships. The
+     * verdict logic is shared, so the two platforms cannot drift apart
+     * again; only the byte fetch differs.
      *
      * When the file was opened with O_DIRECT (of.is_directio, set by
      * ngx_open_cached_file when "directio <size>" is configured and the
      * file meets the threshold), the read must be block-aligned, so the
-     * probe preads one block of max(NGX_HTTP_ZSTD_STATIC_DIO_PROBE,
+     * probe reads one block of max(NGX_HTTP_ZSTD_STATIC_DIO_PROBE,
      * directio_alignment) bytes into an equally-aligned pool buffer —
      * honoring the operator's declared geometry the same way the core
      * copy filter does. The window check in particular must not be
@@ -487,7 +612,13 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * is DECLINED, not served: for a validation read, falling back to
      * another encoding is safer than certifying a file we could not
      * inspect, and the error log tells the operator which knob
-     * (directio_alignment) disagrees with the device.
+     * (directio_alignment) disagrees with the device. On Win32
+     * ngx_directio_on() is an upstream no-op stub, so of.is_directio
+     * only ever reflects the operator's "directio" directive there and
+     * the aligned path costs one pool allocation with no behavioural
+     * difference — it is left shared rather than forked, because a
+     * Win32-only bypass of this branch is exactly the kind of split
+     * that reintroduces the gap this change closes.
      */
     {
         /*
@@ -554,7 +685,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                 return NGX_DECLINED;
             }
 
-            n = pread(of.fd, hdr, want, pos);
+            n = ngx_http_zstd_static_pread(of.fd, hdr, want, pos, log,
+                                           &path);
             if (n < 4) {
                 if (of.is_directio) {
                     ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
@@ -566,9 +698,23 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                     return NGX_DECLINED;
                 }
 
+                /*
+                 * The primitive is named in the log because it is the
+                 * operator's first clue about which syscall to strace.
+                 * The POSIX text is preserved verbatim from before the
+                 * Win32 port so existing log tooling keeps matching;
+                 * Win32 names ReadFile() instead of claiming a pread(2)
+                 * it never issued.
+                 */
                 ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
-                              "zstd static: pread(\"%s\", frame header) "
-                              "returned %z", path.data, n);
+                              "zstd static: "
+#if (NGX_WIN32)
+                              "ReadFile"
+#else
+                              "pread"
+#endif
+                              "(\"%s\", frame header) returned %z",
+                              path.data, n);
                 return NGX_DECLINED;
             }
 
@@ -652,9 +798,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
             break;
         }
     }
-#endif /* NGX_HAVE_PREAD */
-
-#endif
+#endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */
 
     r->root_tested = !r->error_page;
 
@@ -734,9 +878,10 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     /* gzip_static parity: a zero-length file served in a subrequest
      * yields a buf with neither in_file nor last_buf — sync marks it
      * so the output chain doesn't reject it as a zero-size buf. Only
-     * reachable when the frame-header probe is compiled out (no
-     * pread(2) / NGX_WIN32); with the probe active, sub-4-byte files
-     * never get this far. */
+     * reachable when the frame-header probe is compiled out (a POSIX
+     * build whose configure found no pread(2) — see
+     * NGX_HTTP_ZSTD_STATIC_HAVE_PROBE); with the probe active, which
+     * now includes Win32, sub-4-byte files never get this far. */
     b->sync = (b->last_buf || b->in_file) ? 0 : 1;
 
     b->file->fd = of.fd;
