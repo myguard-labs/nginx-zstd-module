@@ -183,16 +183,6 @@ typedef struct {
     ngx_chain_t                 *out;
     ngx_chain_t                **last_out;
 
-    /*
-     * A chain link popped from ctx->free by get_buf, retained rather than
-     * returned to the pool, so the compress step can wrap ctx->out_buf in
-     * it directly instead of paying ngx_free_chain() here and
-     * ngx_alloc_chain_link() again in compress() for the same buffer. NULL
-     * when out_buf was freshly allocated (ngx_create_temp_buf path), in
-     * which case compress() allocates a link as before.
-     */
-    ngx_chain_t                 *pending_link;
-
     ngx_buf_t                   *in_buf;
     ngx_buf_t                   *out_buf;
     ngx_int_t                    bufs;
@@ -1620,15 +1610,9 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_AGAIN;
     }
 
-    if (ctx->pending_link != NULL) {
-        cl = ctx->pending_link;
-        ctx->pending_link = NULL;
-
-    } else {
-        cl = ngx_alloc_chain_link(r->pool);
-        if (cl == NULL) {
-            return NGX_ERROR;
-        }
+    cl = ngx_alloc_chain_link(r->pool);
+    if (cl == NULL) {
+        return NGX_ERROR;
     }
 
     b = ctx->out_buf;
@@ -1777,15 +1761,7 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         cl = ctx->free;
         ctx->free = ctx->free->next;
         ctx->out_buf = cl->buf;
-
-        /*
-         * Retain this link instead of freeing it: compress() will wrap
-         * this same out_buf in a chain link to emit it, so returning it to
-         * the pool here only to allocate an equivalent one there is a
-         * wasted free/acquire pair. cl->buf/cl->next are overwritten by
-         * whoever consumes pending_link, so nothing needs clearing now.
-         */
-        ctx->pending_link = cl;
+        ngx_free_chain(r->pool, cl);
 
         /*
          * ngx_chain_update_chains() resets pos/last on a recycled buffer but
@@ -3456,9 +3432,10 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             0x20, 0x00, 0x00, 0x00      /* frame content size: 32 */
         };
 
-        ngx_memcpy(dict->frame_header, magic, sizeof(magic));
-        ngx_memcpy(dict->frame_header + sizeof(magic), dict->hash,
-                   NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+        u_char  *p = dict->frame_header;
+
+        p = ngx_cpymem(p, magic, sizeof(magic));
+        ngx_memcpy(p, dict->hash, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
     }
 
     return NGX_CONF_OK;
