@@ -434,3 +434,58 @@ empty.dict" is empty
 "zstd_comp_level" directive is duplicate
 --- no_error_log
 [alert]
+
+
+
+=== TEST 18: both modules in one location emit exactly ONE Vary: Accept-Encoding
+# The duplicate-emission cell the G5 matrix missed, and it was REAL:
+# with "zstd_static on" + "zstd on" + gzip_vary off, a non-accepting
+# client made the static handler emit Vary and DECLINE, after which the
+# filter emitted it again on the identity response it also declined to
+# encode -- two identical field lines, breaking the exactly-one contract
+# ngx_http_zstd_vary_accept_encoding() exists to keep. Reproduced with
+# curl before the guard (2 lines), 1 after.
+#
+# The response_headers check below asserts the VALUE, which Test::Nginx
+# joins with ", " when a field repeats -- so a regression reads as
+# "Accept-Encoding, Accept-Encoding" and fails here rather than passing
+# a mere presence check. That is the whole point of this block.
+--- config eval
+"    location /test {
+        zstd_static on;
+        zstd on;
+        zstd_types text/plain;
+        root $::suite_dir;
+    }"
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: gzip
+--- response_headers
+!Content-Encoding
+Vary: Accept-Encoding
+--- no_error_log eval
+[qr/gzip_vary/, qr/\[error\]/]
+
+
+
+=== TEST 19: both modules, accepting client, still exactly ONE Vary
+# The other half of TEST 18: the zstd client takes the static sidecar
+# path, which emits Vary and then SERVES rather than declining. Same
+# exactly-one contract on the arm that actually returns a body.
+--- config eval
+"    location /test {
+        zstd_static on;
+        zstd on;
+        zstd_types text/plain;
+        root $::suite_dir;
+    }"
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Vary: Accept-Encoding
+--- no_error_log eval
+[qr/gzip_vary/, qr/\[error\]/]

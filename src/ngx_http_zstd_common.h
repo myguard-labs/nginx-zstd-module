@@ -532,7 +532,9 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
 static ngx_inline ngx_int_t
 ngx_http_zstd_vary_accept_encoding(ngx_http_request_t *r)
 {
-    ngx_table_elt_t           *v;
+    ngx_uint_t                 i;
+    ngx_table_elt_t           *v, *h;
+    ngx_list_part_t           *part;
     ngx_http_core_loc_conf_t  *clcf;
 
     r->gzip_vary = 1;
@@ -542,6 +544,57 @@ ngx_http_zstd_vary_accept_encoding(ngx_http_request_t *r)
     if (clcf != NULL && clcf->gzip_vary) {
         /* nginx's header filter emits the line from r->gzip_vary */
         return NGX_OK;
+    }
+
+    /*
+     * Idempotence, and it is NOT theoretical: the filter and the static
+     * handler are separate modules that both reach this helper on one
+     * request. With "zstd_static on" + "zstd on" + "gzip_vary off", a
+     * non-accepting client makes the static handler emit the field and
+     * DECLINE, after which the filter emits it again on the identity
+     * response it then also declines to encode -- two identical Vary
+     * lines, breaking the exactly-one contract this function exists to
+     * keep. (Observed on PR #163 before this guard: `curl -H
+     * "Accept-Encoding: gzip"` returned two "Vary: Accept-Encoding"
+     * fields.)
+     *
+     * A request-local flag would need a ctx that the static handler
+     * does not own, so scan the response header list instead. It is
+     * short at this point (the modules run before most header-emitting
+     * filters) and this runs at most twice per response. Scanning also
+     * makes the helper safe against a Vary: Accept-Encoding pushed by
+     * any OTHER module, not just our own second call.
+     *
+     * The token compare is case-insensitive on both field name and
+     * value, per RFC 9110: field names are case-insensitive, and the
+     * field values here are header NAMES, which are too.
+     */
+    for (part = &r->headers_out.headers.part, h = part->elts, i = 0;
+         /* void */;
+         i++)
+    {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].hash == 0) {
+            continue;
+        }
+
+        if (h[i].key.len == sizeof("Vary") - 1
+            && ngx_strncasecmp(h[i].key.data, (u_char *) "Vary",
+                               sizeof("Vary") - 1) == 0
+            && h[i].value.len == sizeof("Accept-Encoding") - 1
+            && ngx_strncasecmp(h[i].value.data, (u_char *) "Accept-Encoding",
+                               sizeof("Accept-Encoding") - 1) == 0)
+        {
+            return NGX_OK;
+        }
     }
 
     v = ngx_list_push(&r->headers_out.headers);

@@ -1196,9 +1196,12 @@ purely "load the previous `.so` / previous nginx binary and reload":
 1. Keep the previously-known-good module `.so` (or full nginx binary).
 2. To disable instantly without a binary change: set `zstd off;` (and
    `zstd_static off;`) and `nginx -s reload` — responses immediately
-   serve identity; no client/cache corruption (compressed and
-   identity variants differ only by `Content-Encoding`, and the
-   automatic `Vary: Accept-Encoding` keeps caches correct).
+   serve identity; no client/cache corruption. The compressed and
+   identity responses are different representations — the body bytes
+   differ, not just the `Content-Encoding` field — and the automatic
+   `Vary: Accept-Encoding` is what keeps each in its own cache
+   variant, so a cache filled before the reload never hands a
+   compressed body to a client that did not ask for one.
 3. To revert the binary: restore the prior `.so`/binary, `nginx -t`,
    then `nginx -s reload`.
 
