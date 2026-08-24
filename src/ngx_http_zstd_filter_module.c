@@ -74,6 +74,17 @@ typedef struct {
     ngx_flag_t                   dict_unsafe;
 
     /*
+     * Trust policy for both dictionary loaders (zstd_dict_file and
+     * zstd_dcz_dict_file). Default off preserves existing deployments
+     * that point at a release symlink (a legitimate, common layout);
+     * "on" opens with O_NOFOLLOW and rejects a target writable by group
+     * or other, on the theory that a root master reloading on a timer
+     * should not snapshot bytes a less-privileged local writer can
+     * still influence. See ngx_http_zstd_open_dict_file().
+     */
+    ngx_flag_t                   dict_strict_path;
+
+    /*
      * Load-time SHA-256 computations over dcz dictionaries in THIS
      * configuration ($zstd_dcz_dicts_hashed). Cycle-owned on purpose:
      * a process-global static is reset and incremented while parsing a
@@ -353,6 +364,8 @@ static ngx_int_t ngx_http_zstd_acquire_cctx(ngx_http_request_t *r,
 static void ngx_http_zstd_exit_process(ngx_cycle_t *cycle);
 static char *ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static ngx_fd_t ngx_http_zstd_open_dict_file(ngx_conf_t *cf,
+    ngx_str_t *path, ngx_flag_t strict, ngx_file_info_t *info);
 static ngx_table_elt_t *ngx_http_zstd_find_request_header(
     ngx_http_request_t *r, const char *name, size_t len, ngx_uint_t *count);
 static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
@@ -604,6 +617,20 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       ngx_conf_set_flag_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
       offsetof(ngx_http_zstd_main_conf_t, dict_unsafe),
+      NULL },
+
+    /*
+     * Off by default: a standard release-symlink deployment (current ->
+     * /srv/releases/<n>/dict.bin) is a legitimate, common layout and
+     * must keep working with no directive at all. Applies to both
+     * zstd_dict_file and zstd_dcz_dict_file — see
+     * ngx_http_zstd_open_dict_file().
+     */
+    { ngx_string("zstd_dict_strict_path"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof(ngx_http_zstd_main_conf_t, dict_strict_path),
       NULL },
 
     { ngx_string("zstd_dcz_assume_secure_transport"),
@@ -2392,6 +2419,7 @@ ngx_http_zstd_create_main_conf(ngx_conf_t *cf)
     /* NGX_CONF_UNSET so ngx_conf_set_flag_slot does not mistake the
      * pcalloc'd 0 for an already-set value ("is duplicate"). */
     zmcf->dict_unsafe = NGX_CONF_UNSET;
+    zmcf->dict_strict_path = NGX_CONF_UNSET;
 
     return zmcf;
 }
@@ -2432,6 +2460,18 @@ ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf)
         ngx_sprintf(zmcf->dcz_dicts_hashed_str.data, "%ui",
                     zmcf->dcz_dicts_hashed)
         - zmcf->dcz_dicts_hashed_str.data;
+
+    /*
+     * Normalize here for anything that reads the flag AFTER this point
+     * (nothing currently does). ngx_http_zstd_dcz_dict_file() runs
+     * during ngx_conf_parse(), strictly BEFORE init_main_conf, so its
+     * own read of dict_strict_path treats NGX_CONF_UNSET (-1) as "not
+     * requested" directly rather than relying on this normalization —
+     * see ngx_http_zstd_open_dict_file()'s caller.
+     */
+    if (zmcf->dict_strict_path == NGX_CONF_UNSET) {
+        zmcf->dict_strict_path = 0;
+    }
 
     if (zmcf->dict_file.len == 0) {
         return NGX_CONF_OK;
@@ -2498,6 +2538,131 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->dcz_assume_secure = NGX_CONF_UNSET;
 
     return conf;
+}
+
+
+/*
+ * Shared open+validate path for both dictionary loaders (zstd_dict_file
+ * in ngx_http_zstd_merge_loc_conf() and zstd_dcz_dict_file() below).
+ *
+ * Rationale, both rows:
+ *
+ * 1. Non-regular inputs (G5 row "Reject non-regular dictionary inputs"):
+ *    neither loader used to test ngx_is_file() before reading. Pointing
+ *    zstd_dict_file at a FIFO opens read-only and then blocks the
+ *    config-parsing master in read(2) until a writer appears on the
+ *    other end -- "nginx -t" or a reload simply hangs. A directory or
+ *    device node instead reaches a confusing read/size error much
+ *    later. Opening with O_NONBLOCK where the platform has it (POSIX;
+ *    Win32's NGX_FILE_NONBLOCK is defined to 0, a no-op, since
+ *    CreateFile() has no non-blocking-open equivalent for a regular
+ *    path) means an open against a FIFO with no reader returns
+ *    immediately (ENXIO) instead of blocking, so the ordinary error
+ *    path below handles it as any other unopenable file -- no explicit
+ *    FIFO test needed. fstat() + ngx_is_file() then rejects anything
+ *    that did open (a directory opens fine on most platforms) before a
+ *    single byte is read.
+ *
+ * 2. Trust policy (G5 row "strict dictionary-path trust policy"): a
+ *    symlink or a group/world-writable target lets a less-privileged
+ *    local writer choose or mutate the bytes a root master snapshots
+ *    into every worker on the next reload. zstd_dict_strict_path on
+ *    (off by default -- a release-symlink deploy is a legitimate,
+ *    common layout and must keep working unconfigured) opens with
+ *    O_NOFOLLOW on POSIX (Win32 has no directive-level follow to
+ *    suppress here; ngx_is_link() on that platform is hardwired to 0,
+ *    see os/win32/ngx_files.h) so a symlink target is refused as a
+ *    symlink rather than transparently followed, and additionally
+ *    rejects a target writable by group or other. The open happens
+ *    once; every subsequent check and the eventual read run against
+ *    the returned fd, never by reopening the path, so a rename or
+ *    swap after this call cannot change which inode is loaded
+ *    (TOCTOU-safe by construction).
+ *
+ * On success returns an open fd with *info already populated by
+ * ngx_fd_info(); the caller reads from it and is responsible for
+ * closing it. On failure returns NGX_INVALID_FILE having already
+ * logged the reason and closed any fd it opened.
+ */
+static ngx_fd_t
+ngx_http_zstd_open_dict_file(ngx_conf_t *cf, ngx_str_t *path,
+    ngx_flag_t strict, ngx_file_info_t *info)
+{
+    ngx_fd_t  fd;
+
+#if (NGX_WIN32)
+
+    fd = ngx_open_file(path->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+
+#else
+
+    fd = ngx_open_file(path->data,
+                       NGX_FILE_RDONLY | NGX_FILE_NONBLOCK
+                       | (strict ? NGX_FILE_NOFOLLOW : 0),
+                       NGX_FILE_OPEN, 0);
+
+#endif
+
+    if (fd == NGX_INVALID_FILE) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_open_file_n " \"%V\" failed", path);
+        return NGX_INVALID_FILE;
+    }
+
+    if (ngx_fd_info(fd, info) == NGX_FILE_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_fd_info_n " \"%V\" failed", path);
+        ngx_close_file(fd);
+        return NGX_INVALID_FILE;
+    }
+
+    if (!ngx_is_file(info)) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"%V\" is not a regular file", path);
+        ngx_close_file(fd);
+        return NGX_INVALID_FILE;
+    }
+
+#if !(NGX_WIN32)
+
+    if (strict) {
+
+        /*
+         * O_NOFOLLOW above already refused a symlink at the leaf; this
+         * is the fstat()-side confirmation (ngx_is_link() on the fd's
+         * own info is always false for a fd that reached here purely
+         * because O_NOFOLLOW would have refused the open first -- kept
+         * as an explicit, self-documenting assertion of the property
+         * this function guarantees under strict mode rather than a
+         * live code path).
+         */
+        if (ngx_is_link(info)) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "\"%V\" is a symlink; refused by "
+                               "\"zstd_dict_strict_path on\" (a release-"
+                               "symlink deployment needs "
+                               "\"zstd_dict_strict_path off;\", the "
+                               "default)", path);
+            ngx_close_file(fd);
+            return NGX_INVALID_FILE;
+        }
+
+        if (ngx_file_access(info) & (S_IWGRP | S_IWOTH)) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "\"%V\" is writable by group or other; "
+                               "refused by \"zstd_dict_strict_path on\". "
+                               "Deploy dictionaries via an immutable, "
+                               "content-addressed path owned and "
+                               "writable only by the deploying "
+                               "principal", path);
+            ngx_close_file(fd);
+            return NGX_INVALID_FILE;
+        }
+    }
+
+#endif
+
+    return fd;
 }
 
 
@@ -2628,24 +2793,12 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
              * premature merge that used to pre-populate it was removed.)
              */
 
-            fd = ngx_open_file(zmcf->dict_file.data, NGX_FILE_RDONLY,
-                               NGX_FILE_OPEN, 0);
+            fd = ngx_http_zstd_open_dict_file(cf, &zmcf->dict_file,
+                                              zmcf->dict_strict_path,
+                                              &info);
 
             if (fd == NGX_INVALID_FILE) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                                   ngx_open_file_n " \"%V\" failed",
-                                   &zmcf->dict_file);
-
                 return NGX_CONF_ERROR;
-            }
-
-            if (ngx_fd_info(fd, &info) == NGX_FILE_ERROR) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                                   ngx_fd_info_n " \"%V\" failed",
-                                   &zmcf->dict_file);
-
-                rc = NGX_CONF_ERROR;
-                goto close;
             }
 
             /*
@@ -3342,17 +3495,22 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
     }
 
-    fd = ngx_open_file(path.data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
-    if (fd == NGX_INVALID_FILE) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                           ngx_open_file_n " \"%V\" failed", &path);
-        return NGX_CONF_ERROR;
-    }
+    zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
 
-    if (ngx_fd_info(fd, &info) == NGX_FILE_ERROR) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                           ngx_fd_info_n " \"%V\" failed", &path);
-        goto failed;
+    /*
+     * dict_strict_path is read raw here rather than via the normalized
+     * (0/1) value init_main_conf() produces: this directive handler
+     * runs during ngx_conf_parse(), strictly BEFORE init_main_conf (see
+     * ngx_http_zstd_open_dict_file()'s block comment), so
+     * zstd_dict_strict_path may still read as NGX_CONF_UNSET (-1) here
+     * regardless of directive order in the config file. Treat anything
+     * other than the explicit "on" (1) as off, matching the eventual
+     * normalized default.
+     */
+    fd = ngx_http_zstd_open_dict_file(cf, &path,
+                                      zmcf->dict_strict_path == 1, &info);
+    if (fd == NGX_INVALID_FILE) {
+        return NGX_CONF_ERROR;
     }
 
     /*
@@ -3429,8 +3587,6 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     if (!have_hash) {
-        zmcf = ngx_http_conf_get_module_main_conf(cf,
-                                                  ngx_http_zstd_filter_module);
         ngx_http_zstd_dcz_dict_hash(bytes.data, size, hash,
                                     &zmcf->dcz_dicts_hashed);
     }

@@ -40,6 +40,7 @@ This is a hardened fork: every push/PR is exercised against **nginx mainline**, 
     * [zstd_bypass](#zstd_bypass)
     * [zstd_bypass_vary](#zstd_bypass_vary)
     * [zstd_dict_file](#zstd_dict_file)
+    * [zstd_dict_strict_path](#zstd_dict_strict_path)
     * [zstd_dcz_dict_file](#zstd_dcz_dict_file)
     * [zstd_dcz_assume_secure_transport](#zstd_dcz_assume_secure_transport)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
@@ -808,6 +809,29 @@ http {
             add_header X-Zstd-Dict "api.dict-v1" always;
         }
     }
+}
+```
+
+---
+
+### zstd_dict_strict_path
+
+**Syntax:** `zstd_dict_strict_path on | off;`
+**Default:** `off`
+**Context:** `http`
+
+Both dictionary loaders ([`zstd_dict_file`](#zstd_dict_file) and [`zstd_dcz_dict_file`](#zstd_dcz_dict_file)) always reject a FIFO, socket, directory, device node, or empty file — a config-load error either way, `on` or `off`. This directive controls an *additional*, opt-in trust policy on top of that: with it `on`, both loaders also refuse a **symlink** and a target **writable by group or other**.
+
+> **Why it matters.** A root master reloads its configuration (`nginx -s reload` or a supervisor-driven SIGHUP) and re-reads every dictionary from disk at that moment. If the path is a symlink a less-privileged local writer can repoint, or the file itself is group/world-writable, that writer chooses or mutates the bytes the master snapshots into every worker on the next reload — without ever needing privilege to touch the running nginx process. `on` closes that: the file is opened with `O_NOFOLLOW` (refusing a symlink outright) and its mode is checked against `S_IWGRP|S_IWOTH` before a single byte is read, and the check runs against the **already-open file descriptor** — never by re-opening the path — so a rename or symlink swap after the check cannot smuggle in a different file (no TOCTOU window).
+
+> **Default is `off`.** A release-symlink layout (`/srv/current -> /srv/releases/<n>/`, with the dictionary loaded from a path through `current`) is a common, legitimate deployment pattern, and it depends on exactly the symlink indirection `on` refuses. Turning this on is a deliberate hardening step for operators who deploy dictionaries to an immutable, content-addressed path (e.g. a filename embedding the content hash) rather than through a movable symlink — do not enable it against an existing release-symlink deployment without first moving to that layout, or every reload will fail with `nginx -s reload` and the **old worker generation keeps serving** (a rejected reload never tears down the running cycle).
+
+**Example (hardened, content-addressed dictionary path):**
+
+```nginx
+http {
+    zstd_dict_strict_path on;
+    zstd_dcz_dict_file /srv/dicts/app-a1b2c3d4.bin;
 }
 ```
 
