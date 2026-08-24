@@ -94,9 +94,26 @@ jobs:
       # so a broken workflow fails fast and obviously.
       - name: Lint workflows (actionlint)
         run: |
+          set -euo pipefail
           ACTIONLINT_VERSION=1.7.7
+          # Pinned sha256 for the linux_amd64 release asset, computed once
+          # from an HTTPS fetch and cross-checked against the checksums.txt
+          # rhysd publishes alongside each release -- same "reviewed pin,
+          # verify before use" shape as ci/tools/ci-build.sh's NGINX_SHA256 /
+          # ANGIE_SHA256 tables. A version bump is a reviewed PR that updates
+          # this hash, not a runtime fetch of a fresher one.
+          ACTIONLINT_SHA256=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
           curl -fsSL -o /tmp/actionlint.tgz \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          actual="$(sha256sum /tmp/actionlint.tgz | awk '{print $1}')"
+          if [ "$actual" != "$ACTIONLINT_SHA256" ]; then
+            echo "✗ sha256 mismatch for actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" >&2
+            echo "  expected: $ACTIONLINT_SHA256" >&2
+            echo "  actual:   $actual" >&2
+            rm -f /tmp/actionlint.tgz
+            exit 1
+          fi
+          echo "✓ sha256 verified for actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           tar -xzf /tmp/actionlint.tgz -C /tmp actionlint
           /tmp/actionlint -color "$GITHUB_WORKSPACE"/.github/workflows/*.yml
           echo "✓ actionlint: workflows valid"
@@ -197,14 +214,16 @@ jobs:
           # headers but NOT the build system (no auto/configure), so it can
           # never produce ngx_auto_config.h; the old approach silently failed
           # and scan-build "passed" on incomplete headers (the CI2 complaint).
-          # Download + configure a real nginx source instead.
+          # Download + configure a real nginx source instead. Verified via
+          # ci/tools/fetch-verified-nginx.sh -- same PGP-against-vendored-key
+          # check the build matrix uses, so this download is no less trusted
+          # than the one that actually ships in the test binary.
           set -euo pipefail
           ver=$(curl -fsSL https://nginx.org/en/download.html \
             | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
             | sort -V | tail -1)
           echo "Using nginx $ver to generate lint headers"
-          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz"
-          tar -xzf "nginx-${ver}.tar.gz"
+          "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" "$ver"
           cd "nginx-${ver}"
           CC=gcc ./configure --with-compat \
             --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null
@@ -547,6 +566,28 @@ jobs:
         run: |
           wget -q -O "zstd-${OLD_ZSTD_VERSION}.tar.gz" \
             "https://github.com/facebook/zstd/releases/download/v${OLD_ZSTD_VERSION}/zstd-${OLD_ZSTD_VERSION}.tar.gz"
+
+      - name: Verify libzstd 1.4.x tarball sha256
+        # Runs on EVERY run, cache hit or fresh download -- a cached tarball
+        # from actions/cache is exactly as untrusted as a freshly-downloaded
+        # one until re-checked (same rule ci-build.sh's header documents for
+        # nginx/angie tarballs, audit sha e289021 F3). facebook/zstd does not
+        # publish a detached signature for release tarballs, so this is
+        # pinned sha256 only, computed once from an HTTPS fetch -- same
+        # approach as ci-build.sh's ANGIE_SHA256 table.
+        env:
+          ZSTD_145_SHA256: 98e91c7c6bf162bf90e4e70fdbc41a8188b9fa8de5ad840c401198014406ce9e
+        run: |
+          set -euo pipefail
+          actual="$(sha256sum "zstd-${OLD_ZSTD_VERSION}.tar.gz" | awk '{print $1}')"
+          if [ "$actual" != "$ZSTD_145_SHA256" ]; then
+            echo "✗ sha256 mismatch for zstd-${OLD_ZSTD_VERSION}.tar.gz" >&2
+            echo "  expected: $ZSTD_145_SHA256" >&2
+            echo "  actual:   $actual" >&2
+            rm -f "zstd-${OLD_ZSTD_VERSION}.tar.gz"
+            exit 1
+          fi
+          echo "✓ sha256 verified for zstd-${OLD_ZSTD_VERSION}.tar.gz"
 
       - name: Build libzstd 1.4.x to a private prefix
         run: |

@@ -117,6 +117,7 @@ policy_msg_() {
 policy_ 0 clean runners
 policy_ 0 clean ports
 policy_ 0 clean docs
+policy_ 0 clean provenance
 # Deliberately NO `policy_ 0 clean cadence`: the clean fixture has no
 # workflow_call member, so that line would assert green over an empty set --
 # vacuous, and indistinguishable from the check being broken. The green control
@@ -206,6 +207,22 @@ policy_ 1 secrets-undeclared secrets
 # first written: member requires it, caller wires nothing.
 policy_ 1 secrets-required-not-wired secrets
 policy_ 0 secrets-typed-ok secrets
+
+# A step downloads a tarball; a later step in the same job extracts it and
+# runs the unpacked configure with no gpg/sha256 trust-anchor assertion
+# anywhere in between -- the class this repo hit in build-test.yml/ci-deep.yml
+# after the ci-build.sh fix (a direct download/extract/execute path added
+# outside that already-verified helper). These run as a PAIR: the -ok fixture
+# is the same job with a sha256 comparison step inserted, so the red above is
+# not equally consistent with "any download in a job is flagged".
+policy_ 1 provenance-unverified-extract provenance
+policy_ 0 provenance-verified-ok provenance
+# The trap this check exists to close: the download step is gated
+# `cache-hit != 'true'`, so a cache HIT skips it entirely and a checker that
+# only looks for a download step present would read the job as having
+# nothing to verify. This must still go red -- a cached tarball is exactly as
+# untrusted as a fresh one until re-checked.
+policy_ 1 provenance-cache-hit-skips-verify provenance
 
 # A mistyped pool label in a schedule-only workflow. The trust half of the
 # runners check does not apply to a workflow no fork can reach, and skipping it

@@ -8,6 +8,7 @@
     ci/linter/workflow_policy.py docs        README <-> workflows drift
     ci/linter/workflow_policy.py cadence     one PR entry point per member
     ci/linter/workflow_policy.py secrets     typed per-member secrets, no inherit
+    ci/linter/workflow_policy.py provenance  extract/exec steps trust-anchored
 
 Each subcommand is wrapped by a ci/linter/lint-*.sh so run-all.sh picks it up by
 glob and a human can select it with LINT_ONLY. Exit: 0 clean, 1 findings,
@@ -608,6 +609,95 @@ def check_cadence() -> int:
 
 
 # --------------------------------------------------------------------------
+# provenance
+#
+# A step that extracts an archive or executes a downloaded artifact with no
+# nearby trust-anchor assertion is code execution on the self-hosted runner
+# the moment the origin, a release, or a poisoned actions/cache entry is
+# compromised -- audit sha e289021 F3, re-opened by direct-download steps
+# added after the ci-build.sh fix. A cache HIT is not exempt: a cached
+# tarball is exactly as untrusted as a fresh download until re-checked, so
+# this check does not care whether the step is gated by a
+# `cache-hit != 'true'` condition -- it looks at whether the JOB proves
+# trust somewhere before the extract/execute point, which a cache-skipped
+# download step cannot do on its own.
+
+# What counts as "this step unpacks or runs something fetched from outside
+# the repo". Deliberately textual (same _body()/_steps() shape as the ports
+# check): a `tar -xzf` or a direct `./configure`/binary invocation is the
+# actual privilege boundary, not the download line above it.
+EXTRACT_OR_EXEC_RE = re.compile(
+    r"(?<![\w-])tar\s+-?x|(?<![\w-])unzip\b|(?<![\w-])/tmp/actionlint\b"
+)
+
+# What counts as a trust-anchor assertion having been made ON THIS PATH
+# before the extract/exec point. Any one of:
+#   - a detached-signature check (gpg --verify)
+#   - a checksum comparison (sha256sum, and the pinned-hash variable naming
+#     convention this repo uses: *_SHA256)
+#   - delegating to a helper this repo already verified for the SAME
+#     property (ci-build.sh, fetch-verified-nginx.sh)
+TRUST_ANCHOR_RE = re.compile(
+    r"gpg\b(?:\s+\S+)*\s+--\S*verify|sha256sum|_SHA256\b|ci-build\.sh|"
+    r"fetch-verified-nginx\.sh"
+)
+
+# A step that only DOWNLOADS (wget/curl -o) and does not itself extract or
+# execute is not a finding on its own -- the extract/exec step downstream is
+# what this check anchors on. Restricting the scan to run: text that mentions
+# a download-shaped command keeps the check from firing on, say, a `tar -xzf`
+# of a repo-local artifact this job built itself (build-test.yml's ccache /
+# coverage tarballs never leave the runner and have no external origin to
+# forge).
+DOWNLOAD_RE = re.compile(r"\b(?:wget|curl)\b.*(?:-O\b|-o\b)|actions/cache@")
+
+
+def check_provenance() -> int:
+    """An extract/execute step with no trust-anchor assertion anywhere earlier
+    in the same job is unverified code execution on the self-hosted runner.
+
+    Scoped to jobs that show a download-shaped command (wget/curl writing a
+    file, or an actions/cache restore feeding one) SOMEWHERE in the job --
+    a job with no external fetch at all has nothing for this check to gate.
+    Within such a job, every extract/exec step must be preceded (same step or
+    an earlier one, in source order) by a trust-anchor assertion: this check
+    does not attempt to prove the anchor covers the SAME artifact byte for
+    byte, only that the job asserts one at all before it unpacks or runs
+    something -- the gap this exists to close is "no check ran", not "the
+    check that ran was subtly wrong".
+    """
+    errors: list[str] = []
+    for path in workflows():
+        doc = load(path)
+        for job, node in jobs(doc):
+            runs = _steps(node)
+            if not any(DOWNLOAD_RE.search(r) for r in runs):
+                continue
+            anchored = False
+            for i, run in enumerate(runs):
+                if TRUST_ANCHOR_RE.search(run):
+                    anchored = True
+                extract = EXTRACT_OR_EXEC_RE.search(run)
+                if extract is not None:
+                    # Same-step trust anchor still counts: a script/step
+                    # written as one shell block can verify then extract in
+                    # sequence, same as the ordering check's same-step case.
+                    if anchored or TRUST_ANCHOR_RE.search(run[: extract.start()]):
+                        continue
+                    errors.append(
+                        f"{path.name}:{job} step {i + 1} extracts or executes "
+                        "a downloaded artifact with no gpg/sha256 trust-anchor "
+                        "assertion earlier in the job -- verify before "
+                        "extraction/execution, cache-hit path included"
+                    )
+    return report(
+        "lint-ci-provenance",
+        errors,
+        "every download-then-extract/execute step is trust-anchored first",
+    )
+
+
+# --------------------------------------------------------------------------
 # secrets
 
 
@@ -764,6 +854,7 @@ COMMANDS = {
     "docs": check_docs,
     "cadence": check_cadence,
     "secrets": check_secrets,
+    "provenance": check_provenance,
 }
 
 

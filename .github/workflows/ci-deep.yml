@@ -406,9 +406,12 @@ jobs:
       - name: Build debug nginx + zstd module
         run: |
           set -euo pipefail
-          test -f "nginx-${NGINX_VERSION}.tar.gz" || wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
-            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; cd "nginx-${NGINX_VERSION}"
+          # PGP-verified against the vendored keys every run -- a runner-
+          # persisted tarball from a prior job is exactly as untrusted as a
+          # fresh download until re-checked (same "cache hit is not a trust
+          # boundary" rule as ci-build.sh, audit sha e289021 F3).
+          "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" "$NGINX_VERSION"
+          cd "nginx-${NGINX_VERSION}"
           ./configure \
             --with-compat --with-debug --with-threads --with-file-aio \
             --with-http_ssl_module --with-http_v2_module \
@@ -474,9 +477,12 @@ jobs:
       - name: Build debug nginx + zstd module
         run: |
           set -euo pipefail
-          test -f "nginx-${NGINX_VERSION}.tar.gz" || wget -q -O "nginx-${NGINX_VERSION}.tar.gz" \
-            "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
-          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"; cd "nginx-${NGINX_VERSION}"
+          # PGP-verified against the vendored keys every run -- a runner-
+          # persisted tarball from a prior job is exactly as untrusted as a
+          # fresh download until re-checked (same "cache hit is not a trust
+          # boundary" rule as ci-build.sh, audit sha e289021 F3).
+          "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" "$NGINX_VERSION"
+          cd "nginx-${NGINX_VERSION}"
           ./configure \
             --with-compat --with-debug --with-threads --with-file-aio \
             --with-http_ssl_module --with-http_v2_module \
@@ -545,8 +551,12 @@ jobs:
           set -euo pipefail
           ver=$(curl -fsSL https://nginx.org/en/download.html \
             | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
-          wget -q "https://nginx.org/download/nginx-${ver}.tar.gz"
-          tar -xzf "nginx-${ver}.tar.gz"; cd "nginx-${ver}"
+          # PGP-verified against the vendored keys, same as ci-build.sh and
+          # build-test.yml's scan-build header job -- an unchecked tarball
+          # here means clang-tidy/flawfinder analyze (and this job's later
+          # steps configure/execute) attacker-controlled source.
+          "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" "$ver"
+          cd "nginx-${ver}"
           CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" >/dev/null
           echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
       - name: flawfinder
