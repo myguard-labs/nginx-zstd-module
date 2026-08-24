@@ -67,6 +67,15 @@ http {
             zstd on;
             zstd_min_length 100;
             zstd_types text/plain;
+            # RFC 9842 section 8 restricts dcz to secure contexts, and
+            # this soak listener is plain HTTP -- the sanitizer and
+            # valgrind nginx builds it runs against have no
+            # ngx_http_ssl_module, so it cannot be anything else. The
+            # acknowledgement models the supported TLS-terminating-proxy
+            # deployment and keeps the dcz path (negotiation,
+            # ZSTD_CCtx_refPrefix, the 40-byte frame header) under the
+            # sanitizers, which is the whole point of exercising it here.
+            zstd_dcz_assume_secure_transport on;
             zstd_dcz_dict_file $WORK/html/dcz-dict;
             alias $WORK/html/dczbody;
         }
