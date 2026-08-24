@@ -76,6 +76,25 @@ jobs:
             echo "✓ all recorded regressions still pass"
           fi
 
+      # Same contract as the step above, for the dcz target. Kept as its
+      # own directory because the two targets take different input
+      # languages: an Accept-Encoding byte string is not an RFC 8941
+      # byte sequence, so replaying one corpus through the other target
+      # proves nothing and would only mask a rename.
+      - name: Replay recorded dcz crash regressions
+        run: |
+          set -euo pipefail
+          cd ci/fuzz
+          shopt -s nullglob
+          cases=(regressions_dcz/crash-*)
+          if [ "${#cases[@]}" -eq 0 ]; then
+            echo "no recorded dcz regressions yet (ci/fuzz/regressions_dcz/ is empty)"
+          else
+            echo "replaying ${#cases[@]} recorded dcz crash(es)"
+            ./fuzz_dcz "${cases[@]}"
+            echo "✓ all recorded dcz regressions still pass"
+          fi
+
       - name: Run fuzzer (120s regression)
         run: |
           set -euo pipefail

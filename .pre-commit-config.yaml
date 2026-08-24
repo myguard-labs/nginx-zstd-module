@@ -74,7 +74,7 @@
 # Skipped" as probe.pem and "Private key found" as probe.txt. They are excluded
 # per-hook on the three fixers below instead, which is the only reason they were
 # ever in this list.
-exclude: '^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|\.traefik-ref/|\.claude/worktrees/|\.build/|(^|/)objs/|(^|/)vendor/|(^|/)node_modules/|(^|/)\.venv/|\.(bin|gz|zip|png|ico|so|o|a)$'
+exclude: '^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/fuzz/regressions_dcz/|\.traefik-ref/|\.claude/worktrees/|\.build/|(^|/)objs/|(^|/)vendor/|(^|/)node_modules/|(^|/)\.venv/|\.(bin|gz|zip|png|ico|so|o|a)$'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -95,12 +95,12 @@ repos:
       # Caught 2026-08-22 by a `pre-commit run --all-files`, which mutated one
       # of each.
       - id: trailing-whitespace
-        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
+        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/fuzz/regressions_dcz/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
       - id: end-of-file-fixer
-        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
+        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/fuzz/regressions_dcz/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
       - id: mixed-line-ending
         args: [--fix=lf]
-        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
+        exclude: '(^ci/fuzz/corpus/|^ci/fuzz/corpus_dcz/|^ci/fuzz/regressions/|^ci/fuzz/regressions_dcz/|^ci/t/.*\.t$|\.(pem|der|patch)$)'
       - id: check-merge-conflict
       - id: check-yaml
       - id: check-added-large-files

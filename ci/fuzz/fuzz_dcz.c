@@ -80,8 +80,14 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     ngx_int_t rc = ngx_http_zstd_dcz_decode_digest(raw, out);
 
-    /* Result must be one of the two documented sentinels. */
-    if (rc != NGX_OK && rc != NGX_DECLINED) {
+    /*
+     * Result must be one of the three documented sentinels: NGX_OK,
+     * NGX_DECLINED (malformed byte-sequence framing, rejected before
+     * decoding) or NGX_ERROR (well-formed framing, payload is not a
+     * 32-byte base64 value). The caller distinguishes the two failure
+     * values only to select a diagnostic; both are equally fail-closed.
+     */
+    if (rc != NGX_OK && rc != NGX_DECLINED && rc != NGX_ERROR) {
         __builtin_trap();
     }
 
