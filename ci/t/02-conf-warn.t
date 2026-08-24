@@ -1,8 +1,16 @@
 use Test::Nginx::Socket;
 use File::Basename;
+use File::Spec;
 use lib 'lib';
 
 my $dirname = dirname(__FILE__);
+# Absolute path to the committed fixture dir (ci/t/suite, holding test +
+# test.zst). TEST 14 serves from here rather than "root ../suite": this
+# suite's servroot is created under /tmp in CI (build-test.yml, confwarn
+# step), so a relative climb out of the servroot escapes the workspace and
+# open() fails. 01-static.t can use ../suite only because its own servroot
+# is placed inside ci/t/.
+our $suite_dir = File::Spec->rel2abs("$dirname/suite");
 # local: this process is the test run, but perlcritic is right that a bare
 # assignment to %ENV leaks into anything that runs after it.
 local $ENV{'TEST_NGINX_PERL_PATH'} = "$ENV{'PWD'}/$dirname";
@@ -328,7 +336,7 @@ Vary: Accept-Encoding
 
 
 === TEST 14: zstd_static on without gzip_vary still emits Vary: Accept-Encoding
-# G5, static handler, on the DECLINE arm. ../suite holds test and
+# G5, static handler, on the DECLINE arm. ci/t/suite holds test +
 # test.zst, so this URI is Accept-Encoding-dependent; the client here
 # does not accept zstd, so the handler emits the Vary field and then
 # declines for the identity file to be served. That identity response
@@ -336,11 +344,18 @@ Vary: Accept-Encoding
 # and it must carry the field with no "gzip_vary on" configured — which
 # is what the old warning could only ask for. TEST 25 in 01-static.t is
 # the same arm WITH gzip_vary on.
---- config
-    location /test {
+#
+# The fixture dir is addressed by ABSOLUTE path ($::suite_dir), not as
+# "root ../suite": this suite's servroot is created under /tmp in CI
+# (build-test.yml, the confwarn step), so a relative climb out of the
+# servroot escapes the workspace entirely and open() fails with ENOENT.
+# 01-static.t can use ../suite only because its own servroot is placed
+# inside ci/t/ (build-test.yml:1307 vs :1290).
+--- config eval
+"    location /test {
         zstd_static on;
-        root ../suite;
-    }
+        root $::suite_dir;
+    }"
 --- request
 GET /test
 --- more_headers
