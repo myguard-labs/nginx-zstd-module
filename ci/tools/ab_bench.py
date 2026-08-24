@@ -183,26 +183,41 @@ REUSE_WITNESS = "zstd: reusing worker cctx"
 PACE_CHUNK = 512
 PACE_DELAY_S = 0.004
 
-# Self-check thresholds for the debug pass -- see run_debug_pass. An
-# absolute "created > 1" floor and a relative created-fraction rise
-# were both tried and rejected (see the comment at the check itself);
-# the check that survived compares the HIT RATE at the lowest vs the
-# highest swept concurrency, since "decays toward 1/N" is a relative
-# claim about the hit rate and this is its negative control.
-#
-# CONTENTION_MIN_CREATED is NOT the discriminating check -- it is a
-# trivial sanity bound only (a run must produce at least this many
-# "created cctx" witnesses at the highest concurrency before the hit
-# rate at that point means anything at all, e.g. it rules out a
-# division on near-zero counts). All the actual discriminating power is
-# in CONTENTION_MIN_RELATIVE_RISE. A previous version of this comment
-# claimed the absolute floor alone was too weak and then set it to 2,
-# which is just as easily cleared by scheduling jitter as 1 was -- that
-# was wrong and is fixed here: on a genuinely contending run `created`
-# reached 8903 at 128 conn, so 20 is still a low bar relative to real
-# contention while still ruling out a near-empty sample.
+# Self-check thresholds for the debug pass -- see
+# evaluate_contention_self_check(). Three prior versions of this check
+# were tried and defeated by real (not hypothetical) counterexamples,
+# each one caught by actually reproducing the failure rather than
+# reasoning about it:
+#   1. An ABSOLUTE `created > 1` floor -- too weak. Even a near-instant
+#      single-chunk send through the proxy hop picks up a handful of
+#      "created" witnesses from ordinary thread-scheduling jitter,
+#      which let a workload that barely contends pass silently.
+#   2. A RELATIVE rise in created-fraction (created / total) from the
+#      lowest to the highest concurrency -- wrong because
+#      created-fraction saturates near 1.0 once contention is heavy
+#      (measured: 87.8% -> 96.9%, only a 1.10x rise) and compresses all
+#      the signal into a narrow band exactly where resolution is
+#      needed.
+#   3. A RELATIVE fall in hit rate (`lo_hr >= hi_hr * RISE`) with only a
+#      floor on `created` at the HIGH end -- defeated by a workload
+#      where the cache never engages at all: hit rate 0.0 at every
+#      concurrency satisfies `0.0 >= 0.0 * 1.5` (True), and a total-miss
+#      run creates a context on every request, so `created` at the high
+#      end is enormous and clears any created-count floor trivially.
+#      Verified in the interpreter, not merely reasoned about; see
+#      test_contention_self_check_negative_control() below, which is
+#      the negative control this defect should have caught before it
+#      shipped twice.
+# The check that survived requires BOTH: an ABSOLUTE floor on the hit
+# rate at the LOWEST concurrency (the cache must demonstrably engage at
+# all when barely contended -- CONTENTION_MIN_LO_HIT_RATE), and a
+# STRICT relative fall to the highest concurrency (CONTENTION_MIN_RELATIVE_RISE,
+# compared with `>`, never `>=`, so equal values cannot pass).
+# CONTENTION_MIN_CREATED remains a trivial sanity bound on sample size
+# at the highest concurrency, not a second independent discriminator.
 CONTENTION_MIN_CREATED = 20
 CONTENTION_MIN_RELATIVE_RISE = 1.5
+CONTENTION_MIN_LO_HIT_RATE = 0.05
 
 
 @dataclasses.dataclass
@@ -340,31 +355,59 @@ def body_bytes(size: int) -> bytes:
 
 class PacedBackend(threading.Thread):
     """Mock upstream: sends chunked-transfer headers immediately, then
-    the body in PACE_CHUNK-sized pieces with a PACE_DELAY_S sleep
-    between each. One handler thread per accepted connection so it
+    the body either unpaced (`pace=False`, the whole body in one write)
+    or in PACE_CHUNK-sized pieces with a PACE_DELAY_S sleep between each
+    (`pace=True`). One handler thread per accepted connection so it
     scales to the harness's own concurrency sweep without becoming the
-    bottleneck itself.
+    bottleneck itself when unpaced.
 
-    This is what makes compression sessions overlap. Proxied through
-    nginx with `proxy_buffering off`, the filter processes each chunk as
-    it streams in rather than compressing one fully-buffered body in a
-    single event-loop turn -- so the worker-lifetime CCtx loan
-    (acquired at acquire_cctx, released only at request cleanup, per
+    Pacing is what makes compression sessions overlap for the DEBUG
+    pass. Proxied through nginx with `proxy_buffering off`, the filter
+    processes each chunk as it streams in rather than compressing one
+    fully-buffered body in a single event-loop turn -- so the
+    worker-lifetime CCtx loan (acquired at acquire_cctx, released only
+    at request cleanup, per
     src/ngx_http_zstd_filter_module.c:1847/:2896) stays held for the
     whole paced duration instead of being taken and returned before the
     next request is even accepted. A static, fully-buffered,
     known-length body completes inside one event-loop turn and can
     never contend, however high the connection count -- that was the
     workload bug this class exists to fix.
+
+    Pacing must NEVER be used for the RELEASE pass. PACE_CHUNK/PACE_DELAY_S
+    caps this backend at 512B/4ms = 128 KB/s PER CONNECTION -- a hard
+    ceiling both arms share equally. A caught defect: the release pass
+    was originally paced unconditionally, and its numbers (8 KB body:
+    ~115/~478/~1878 rps at 8/32/128 conn) matched the backend's own
+    theoretical ceiling (conn_count / stream_time) almost exactly --
+    the harness was measuring PacedBackend's sleep loop, never the zstd
+    filter, and would have reported "no regression" for a genuinely
+    slower build because the backend, not the filter, was always the
+    bottleneck. The release pass now runs `pace=False`; only the debug
+    pass (which exists for contention, not throughput -- see the module
+    docstring) is ever paced.
     """
 
-    def __init__(self, port: int, bodies: dict[str, bytes]) -> None:
+    def __init__(self, port: int, bodies: dict[str, bytes], pace: bool) -> None:
         super().__init__(daemon=True)
         self.port = port
         self.bodies = bodies
+        self.pace = pace
         self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.srv.bind(("127.0.0.1", port))
+        try:
+            self.srv.bind(("127.0.0.1", port))
+        except OSError as exc:
+            # A bare OSError here (e.g. "Address already in use") would
+            # otherwise propagate uncaught out of run_release_pass /
+            # run_debug_pass -- main() only catches RuntimeError, so a
+            # busy backend port would crash with a traceback instead of
+            # the documented harness-error path every other startup
+            # failure in this file follows.
+            self.srv.close()
+            raise RuntimeError(
+                f"PacedBackend: could not bind 127.0.0.1:{port}: {exc}"
+            ) from exc
         self.srv.listen(256)
         self._stopping = False
 
@@ -403,10 +446,13 @@ class PacedBackend(threading.Thread):
                 b"Transfer-Encoding: chunked\r\n"
                 b"Connection: close\r\n\r\n"
             )
-            for i in range(0, len(body), PACE_CHUNK):
-                piece = body[i : i + PACE_CHUNK]
-                conn.sendall(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
-                time.sleep(PACE_DELAY_S)
+            if self.pace:
+                for i in range(0, len(body), PACE_CHUNK):
+                    piece = body[i : i + PACE_CHUNK]
+                    conn.sendall(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+                    time.sleep(PACE_DELAY_S)
+            else:
+                conn.sendall(f"{len(body):x}\r\n".encode() + body + b"\r\n")
             conn.sendall(b"0\r\n\r\n")
         except OSError:
             pass
@@ -692,7 +738,11 @@ def run_release_pass(
             workdirs.append(root)
             port = base_port + i * 2
             backend_port = port + 1
-            backend = PacedBackend(backend_port, bodies)
+            # pace=False: the RELEASE pass measures real filter
+            # throughput. Pacing the backend would cap both arms at the
+            # same artificial ceiling and could mask a genuine
+            # regression -- see PacedBackend's docstring.
+            backend = PacedBackend(backend_port, bodies, pace=False)
             backend.start()
             backends.append(backend)
             conf = write_conf(
@@ -740,6 +790,69 @@ def run_release_pass(
     return samples
 
 
+def evaluate_contention_self_check(
+    results: dict[int, WitnessSample], concurrencies: list[int]
+) -> None:
+    """The debug pass's negative control on ITSELF, not on the module.
+
+    Raises RuntimeError (a harness error) unless the paced workload
+    demonstrably (a) makes the cache engage at all at the lowest swept
+    concurrency, and (b) shows that engagement fall STRICTLY as
+    concurrency rises to the highest. Both conditions are required --
+    see the CONTENTION_MIN_* comment block for the three prior versions
+    of this check and the real counterexample that defeated each one.
+
+    Pure and side-effect-free by design specifically so it can be
+    exercised directly by
+    test_contention_self_check_negative_control() below with synthetic
+    data, instead of only being reachable by actually running nginx.
+    """
+    lo_conc, hi_conc = min(concurrencies), max(concurrencies)
+    lo, hi = results.get(lo_conc), results.get(hi_conc)
+    lo_hr = lo.hit_rate if lo is not None else None
+    hi_hr = hi.hit_rate if hi is not None else None
+
+    hi_created_ok = hi is not None and hi.created >= CONTENTION_MIN_CREATED
+    # ABSOLUTE floor: the cache must demonstrably engage at ALL when
+    # barely contended. Without this, an all-miss run (hit rate 0.0 at
+    # every concurrency) satisfies a purely relative "0.0 >= 0.0 * 1.5"
+    # comparison -- that is not a benign edge case, it is the single
+    # most important failure this harness exists to catch (the cache
+    # never engaging) passing as a clean result.
+    lo_engages = lo_hr is not None and lo_hr > CONTENTION_MIN_LO_HIT_RATE
+    # STRICT relative fall: `>`, never `>=`, so two equal hit rates
+    # (including two equal zeros) cannot be read as "falling."
+    degrades = (
+        lo_hr is not None
+        and hi_hr is not None
+        and lo_hr > hi_hr * CONTENTION_MIN_RELATIVE_RISE
+    )
+
+    if len(concurrencies) < 2 or not hi_created_ok or not lo_engages or not degrades:
+        raise RuntimeError(
+            "harness self-check FAILED: the paced workload did not "
+            f"demonstrate genuine single-slot contention. At {lo_conc} "
+            f"conn the hit rate was "
+            f"{'n/a' if lo_hr is None else f'{lo_hr * 100:.1f}%'}; "
+            f"at {hi_conc} conn it was "
+            f"{'n/a' if hi_hr is None else f'{hi_hr * 100:.1f}%'} "
+            f"(need the {lo_conc}-conn rate > "
+            f"{CONTENTION_MIN_LO_HIT_RATE * 100:.0f}% -- the cache must "
+            f"engage at all when barely contended -- AND strictly > "
+            f"{CONTENTION_MIN_RELATIVE_RISE}x the {hi_conc}-conn rate, "
+            f"and >= {CONTENTION_MIN_CREATED} 'created cctx' witnesses "
+            f"at {hi_conc} conn). A single-slot worker cache can only "
+            "show a real hit rate when concurrent compressions "
+            "genuinely overlap and that overlap actually WORSENS as "
+            "concurrency rises -- a hit rate that never engages, or "
+            "that is flat or barely falling across the sweep, means "
+            "this run never demonstrated that, so any hit rate it "
+            "reported would be a workload artifact, not a measurement. "
+            "This is the harness's own negative control failing, not a "
+            "benign 100% (or 0%) hit rate."
+        )
+
+
 def run_debug_pass(
     arm: Arm,
     concurrencies: list[int],
@@ -758,21 +871,19 @@ def run_debug_pass(
     is something this pass can show directly, not just a single
     snapshot.
 
-    Raises RuntimeError (a harness error, not a "slow result") if the
-    workload never demonstrates genuine RELATIVE contention: the hit
-    rate at the lowest swept concurrency must be materially higher than
-    at the highest (CONTENTION_MIN_RELATIVE_RISE) -- this ratio is the
-    actual discriminating check. CONTENTION_MIN_CREATED is only a
-    trivial sanity floor on the sample size at the highest concurrency,
-    not a second independent check; an absolute `created > 1` floor and
-    a relative created-fraction check were both tried as the REAL gate
-    and rejected (see the comment at CONTENTION_MIN_CREATED and the
-    check itself) -- the former cleared on scheduling jitter alone, the
-    latter saturates near 1.0 once contention is heavy. A flat or
-    barely-falling hit rate across the sweep is indistinguishable from
-    a workload that never contends, which is a broken measurement, not
-    a real 100% hit rate. See PacedBackend's docstring for why the
-    workload needs pacing to make genuine overlap possible at all.
+    Delegates the self-check to evaluate_contention_self_check(), which
+    raises RuntimeError (a harness error, not a "slow result") unless
+    the paced workload demonstrates BOTH that the cache engages at all
+    at the lowest swept concurrency (an ABSOLUTE floor,
+    CONTENTION_MIN_LO_HIT_RATE) and that engagement STRICTLY falls to
+    the highest (CONTENTION_MIN_RELATIVE_RISE). Both are required: a
+    purely relative check alone was defeated by a workload where the
+    cache never engages at all (0.0 hit rate at every concurrency
+    trivially satisfies a relative "no worse than" comparison) -- see
+    the CONTENTION_MIN_* comment block for the full history of three
+    rejected check designs, each one defeated by a real counterexample.
+    See PacedBackend's docstring for why the workload needs pacing to
+    make genuine overlap possible at all.
     """
     root = pathlib.Path(tempfile.mkdtemp(prefix=f"ab-bench-debug-{arm.label}-"))
     # mkdtemp gives 0700: run as root, workers drop to the compiled-in
@@ -780,7 +891,10 @@ def run_debug_pass(
     os.chmod(root, 0o755)
     bodies = {name: body_bytes(size) for name, size in BODY_SIZES.items()}
     backend_port = base_port + 1
-    backend = PacedBackend(backend_port, bodies)
+    # pace=True: the DEBUG pass exists for CONTENTION (witness counts),
+    # not throughput, so the pacing that creates that contention is
+    # correct here -- see PacedBackend's docstring.
+    backend = PacedBackend(backend_port, bodies, pace=True)
     results: dict[int, WitnessSample] = {}
     try:
         backend.start()
@@ -821,59 +935,7 @@ def run_debug_pass(
         backend.stop()
         shutil.rmtree(root, ignore_errors=True)
 
-    # Self-check. Two things were tried and rejected before this one:
-    #   1. An ABSOLUTE `created > 1` floor -- too weak. Even a
-    #      near-instant single-chunk send through the proxy hop picks
-    #      up a handful of "created" witnesses from ordinary
-    #      thread-scheduling jitter, which let a workload that barely
-    #      contends pass silently.
-    #   2. A RELATIVE rise in created-fraction (created / total) from
-    #      the lowest to the highest concurrency -- also wrong, because
-    #      created-fraction saturates near 1.0 once contention is heavy
-    #      (measured: 87.8% -> 96.9%, only a 1.10x rise) and compresses
-    #      all the signal into a narrow band exactly where the ring row
-    #      needs resolution.
-    # The metric that actually has headroom is the HIT RATE itself
-    # (reused / total): on a genuinely contending run it dropped 12.2%
-    # -> 3.1%, a 3.9x fall, because it is not pinned near a ceiling. The
-    # check below requires the hit rate at the lowest swept concurrency
-    # to be MEASURABLY HIGHER than at the highest -- "decays toward
-    # 1/N" is exactly this claim, and CONTENTION_MIN_RELATIVE_RISE is
-    # the sole discriminating threshold. CONTENTION_MIN_CREATED adds
-    # only a trivial sanity floor on `created` at the highest
-    # concurrency, so a pass can't come from two single-digit witness
-    # counts dividing favourably -- it does not by itself prove
-    # contention, the ratio above does.
-    lo_conc, hi_conc = min(concurrencies), max(concurrencies)
-    lo, hi = results.get(lo_conc), results.get(hi_conc)
-    lo_hr = lo.hit_rate if lo is not None else None
-    hi_hr = hi.hit_rate if hi is not None else None
-    hi_created_ok = hi is not None and hi.created >= CONTENTION_MIN_CREATED
-    degrades = (
-        lo_hr is not None
-        and hi_hr is not None
-        and lo_hr >= hi_hr * CONTENTION_MIN_RELATIVE_RISE
-    )
-    if len(concurrencies) < 2 or not hi_created_ok or not degrades:
-        raise RuntimeError(
-            "harness self-check FAILED: the paced workload did not "
-            f"demonstrate genuine single-slot contention. At {lo_conc} "
-            f"conn the hit rate was "
-            f"{'n/a' if lo_hr is None else f'{lo_hr * 100:.1f}%'}; "
-            f"at {hi_conc} conn it was "
-            f"{'n/a' if hi_hr is None else f'{hi_hr * 100:.1f}%'} "
-            f"(need the {lo_conc}-conn rate >= "
-            f"{CONTENTION_MIN_RELATIVE_RISE}x the {hi_conc}-conn rate, "
-            f"and >= {CONTENTION_MIN_CREATED} 'created cctx' witnesses "
-            f"at {hi_conc} conn). A single-slot worker cache can only "
-            "show a real hit rate when concurrent compressions "
-            "genuinely overlap and that overlap actually WORSENS as "
-            "concurrency rises -- a flat or barely-falling hit rate "
-            "across the sweep means this run never demonstrated that, "
-            "so any hit rate it reported would be a workload artifact, "
-            "not a measurement. This is the harness's own negative "
-            "control failing, not a benign 100% hit rate."
-        )
+    evaluate_contention_self_check(results, concurrencies)
     return results
 
 
@@ -1004,11 +1066,111 @@ def print_debug_table(
         )
 
 
+def test_contention_self_check_negative_control() -> None:
+    """The self-check's OWN negative control -- exercises
+    evaluate_contention_self_check() directly with synthetic
+    WitnessSample data, no nginx involved. This exists because two
+    prior self-check designs each individually looked correct under
+    careful reading and both turned out to pass on real non-contending
+    input; "read the code carefully" is not a substitute for a test
+    that actually runs, so this is that test.
+
+    Asserts three things:
+      1. An all-zero-hit-rate run (the cache never engages at any
+         concurrency) is REJECTED. This is the specific defect that
+         defeated the second self-check design: `0.0 >= 0.0 * 1.5` is
+         True, so a purely relative "does the rate fall" comparison
+         passes on a workload that measured nothing at all.
+      2. A run whose hit rate is IDENTICAL at every concurrency (a
+         nonzero constant, not falling at all) is REJECTED -- proves
+         the inequality is strict, not `>=`.
+      3. A run with a genuine, large absolute-and-relative fall (the
+         real numbers measured on this harness: 12.2% -> 3.1%) is
+         ACCEPTED -- proves the check does not reject real contention
+         along with the broken cases above.
+
+    Called from `--self-test` (see main()), which runs this with no
+    nginx/wrk dependency and exits before touching any of that --
+    cheap enough to run on every invocation of this file as a smoke
+    check, and independent of whatever machine happens to run it.
+    """
+    concurrencies = [8, 32]
+
+    all_zero = {
+        8: WitnessSample(created=500, reused=0),
+        32: WitnessSample(created=2000, reused=0),
+    }
+    try:
+        evaluate_contention_self_check(all_zero, concurrencies)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError(
+            "self-check negative control FAILED: an all-zero hit rate "
+            "(the cache never engaged at ANY concurrency) was accepted "
+            "as a valid contention result. This is the exact defect "
+            "reported against the second self-check design -- fix "
+            "evaluate_contention_self_check(), do not weaken this test."
+        )
+
+    flat_nonzero = {
+        8: WitnessSample(created=100, reused=100),
+        32: WitnessSample(created=100, reused=100),
+    }
+    try:
+        evaluate_contention_self_check(flat_nonzero, concurrencies)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError(
+            "self-check negative control FAILED: an identical (flat, "
+            "non-falling) hit rate at every concurrency was accepted. "
+            "The relative-fall comparison must be a STRICT inequality "
+            "so two equal values cannot pass."
+        )
+
+    genuine_decay = {
+        8: WitnessSample(created=309, reused=2224),  # hit rate 87.8%
+        32: WitnessSample(created=1439, reused=47),  # hit rate 3.2%
+    }
+    evaluate_contention_self_check(genuine_decay, concurrencies)  # must not raise
+
+
+def run_self_test() -> int:
+    """Runs the in-process negative control above and reports the
+    result. No nginx, no wrk, no network -- exists so the self-check's
+    own correctness can be verified on every invocation of this file,
+    not just reasoned about. Exit code follows the harness-error
+    contract: 0 on pass, 1 on failure.
+    """
+    try:
+        test_contention_self_check_negative_control()
+    except AssertionError as exc:
+        print(f"SELF-TEST FAILED: {exc}", file=sys.stderr)
+        return 1
+    print(
+        "SELF-TEST OK: evaluate_contention_self_check() correctly "
+        "rejects an all-zero hit rate, correctly rejects a flat "
+        "non-falling hit rate, and correctly accepts a genuine decay."
+    )
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--arm-a", required=True, help="path/to/nginx[:label] for arm A")
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the self-check's own negative control (no nginx/wrk "
+        "needed) and exit -- verifies evaluate_contention_self_check() "
+        "correctly rejects a non-contending workload before trusting "
+        "it against real hardware.",
+    )
+    ap.add_argument(
+        "--arm-a", help="path/to/nginx[:label] for arm A (required unless --self-test)"
+    )
     ap.add_argument(
         "--arm-b", help="path/to/nginx[:label] for arm B (optional; enables A/B)"
     )
@@ -1050,6 +1212,13 @@ def main() -> int:
     ap.add_argument("--base-port", type=int, default=18400)
     ap.add_argument("--json", help="write machine-readable results here")
     args = ap.parse_args()
+
+    if args.self_test:
+        return run_self_test()
+
+    if not args.arm_a:
+        print("error: --arm-a is required unless --self-test is given", file=sys.stderr)
+        return 2
 
     # Everything the scratch roots below create must stay readable by the
     # workers when the harness runs as root (they drop to the compiled-in
