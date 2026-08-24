@@ -52,6 +52,21 @@
 #define NGX_HTTP_ZSTD_STATIC_HAVE_PROBE  0
 #endif
 
+/*
+ * Name of the offset-explicit read primitive, for operator-facing error
+ * text. Defined here rather than with an #if inside the ngx_log_error()
+ * argument list: a preprocessor directive among the arguments of a
+ * function-like macro is undefined behaviour (C11 6.10.3p11). gcc and
+ * mingw accept it silently, MSVC rejects it with C2121 -- which is why a
+ * mingw cross-build is not sufficient evidence that this file compiles
+ * on Windows. (Observed on MSVC x64 static, PR #162.)
+ */
+#if (NGX_WIN32)
+#define NGX_HTTP_ZSTD_STATIC_PREAD_NAME  "ReadFile"
+#else
+#define NGX_HTTP_ZSTD_STATIC_PREAD_NAME  "pread"
+#endif
+
 
 #define NGX_HTTP_ZSTD_STATIC_OFF        0
 #define NGX_HTTP_ZSTD_STATIC_ON         1
@@ -707,12 +722,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                  * it never issued.
                  */
                 ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
-                              "zstd static: "
-#if (NGX_WIN32)
-                              "ReadFile"
-#else
-                              "pread"
-#endif
+                              "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
                               "(\"%s\", frame header) returned %z",
                               path.data, n);
                 return NGX_DECLINED;
