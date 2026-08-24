@@ -483,6 +483,49 @@ http {
 > directive unset so the size always tracks the library — only write it
 > explicitly when you are deliberately overriding it.
 
+#### Aggregate bound on `number × size`
+
+`number` and `size` are each range-checked on their own by nginx core,
+but the **product** was not checked at all until this policy was added —
+a typo (`zstd_buffers 100000 100000;` instead of `100 100k;`) or a value
+inherited unchanged from an outer block could request an overflowing or
+merely enormous per-response output-chain pool, multiplied by every
+concurrent response under load.
+
+* **`number × size` overflowing the platform's `size_t`** is a hard
+  config-load error, unconditionally — there is no representable
+  acknowledgement for a product that cannot exist:
+
+  ```
+  nginx: [emerg] "zstd_buffers" (explicit directive) requests
+  9223372036854775807 buffers of 9223372036854775807 bytes each; that
+  product overflows the platform's size_t and cannot be a config any
+  operator meant to write
+  ```
+
+* **A representable-but-large product** (above **8 MB**, generous
+  headroom over both nginx's own `zstd_buffers 32 4k` default and this
+  module's own `2 × ZSTD_CStreamOutSize()` default) is a **warning**, not
+  an error — a config that loads today keeps loading after an upgrade:
+
+  ```
+  nginx: [warn] "zstd_buffers" (merged value) requests 1 x 8388609 bytes
+  = ~8388609 bytes of output-chain memory PER RESPONSE; that is on top
+  of the per-request compressor (CCtx) working set -- see the
+  "zstd_max_cctx_memory" advisory above for that figure -- and both are
+  multiplied by concurrent responses under load
+  ```
+
+  The total is **per response**; add it to the CCtx figure from the
+  [`zstd_max_cctx_memory`](#zstd_max_cctx_memory) advisory to size the
+  full per-request compressor + output-chain budget, then multiply by
+  expected concurrency.
+
+The check runs once the value is fully resolved (explicit, inherited
+from an outer block, or this module's own default) so all three sources
+are covered by the same bound; an explicit value that also happens to be
+the one that ends up in effect is warned about once, not twice.
+
 ---
 
 ### zstd_target_cblock_size

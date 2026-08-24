@@ -395,6 +395,10 @@ static char *ngx_http_zstd_check_num_int_max(ngx_conf_t *cf, void *post,
     void *data);
 static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *ngx_http_zstd_set_bufs_slot(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_http_zstd_check_bufs_product(ngx_conf_t *cf,
+    ngx_bufs_t *bufs, const char *ctx, ngx_flag_t advise);
 static void ngx_http_zstd_cleanup_dict(void *data);
 static void ngx_http_zstd_cleanup_cctx(void *data);
 static void ngx_http_zstd_release_cctx(void *data);
@@ -583,7 +587,7 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
 
     { ngx_string("zstd_buffers"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
-      ngx_conf_set_bufs_slot,
+      ngx_http_zstd_set_bufs_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, bufs),
       NULL },
@@ -2838,6 +2842,26 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_bufs_value(conf->bufs, prev->bufs,
                               2, zmcf->stream_out_size);
 
+    /*
+     * The parse-time slot (ngx_http_zstd_set_bufs_slot()) only sees an
+     * EXPLICIT "zstd_buffers" written at this exact location. A value
+     * this location inherited from an outer block via
+     * ngx_conf_merge_bufs_value() above, or the module's own computed
+     * default (2 x stream_out_size when nothing was written anywhere in
+     * the chain), never passes through that slot handler and so is
+     * otherwise never checked at all. Re-run the same product bound here
+     * so every value conf->bufs can hold by the time the filter reads it
+     * -- explicit, inherited, or defaulted -- has been validated exactly
+     * once.
+     */
+    if (rc == NGX_CONF_OK
+        && ngx_http_zstd_check_bufs_product(cf, &conf->bufs, "merged value",
+                                             1)
+           != NGX_CONF_OK)
+    {
+        rc = NGX_CONF_ERROR;
+    }
+
     if (conf->enable && zmcf->dict_file.len > 0) {
 
         if (prev->dict != NULL
@@ -4078,4 +4102,146 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
     }
 
     return NGX_CONF_OK;
+}
+
+
+/*
+ * Aggregate memory bound for "zstd_buffers number size" and its inherited
+ * value.
+ *
+ * ngx_conf_set_bufs_slot() (nginx core) parses each of the two arguments
+ * independently and rejects only a parse error or a zero -- it never looks
+ * at the product. ngx_conf_merge_bufs_value() (invoked from
+ * ngx_http_zstd_merge_loc_conf()) then either keeps an explicit value,
+ * inherits the parent's, or applies this module's own default
+ * (2 x ZSTD_CStreamOutSize()); none of those three paths re-validates the
+ * pair either. A typo ("zstd_buffers 100000 100000;" instead of
+ * "100 100k;") or an inherited value from an outer block can therefore
+ * request an overflowing or merely enormous per-response pool that nginx
+ * happily commits per concurrent response -- this directive sizes the
+ * OUTPUT chain nginx allocates from ngx_http_zstd_filter_module's own
+ * ngx_http_zstd_bufs_t path (see the merge site), separate from and
+ * additive with the per-request CCtx working set the
+ * "zstd_max_cctx_memory" advisory above already covers.
+ *
+ * NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES mirrors the CCtx advisory's shape:
+ * overflow is refused unconditionally (there is no representable size for
+ * which "the operator meant this"), and a representable-but-large product
+ * warns rather than fails, so a config that loads today keeps loading
+ * after an upgrade to this check. 8 MB is chosen generously above nginx's
+ * own "zstd_buffers 32 4k" default (128 KB) and this module's own
+ * 2 x CStreamOutSize() default (~256 KB at level 6): both stay silent, and
+ * only a config that requests substantially more per response is named.
+ * The warning states the total is PER RESPONSE and points at the CCtx
+ * section so an operator sizing worker RSS adds the two: this directive's
+ * total plus the up-to-NGX_HTTP_ZSTD_CCTX_SLOTS-times CCtx figure that
+ * "zstd_max_cctx_memory" (undocumented) or its advisory (documented above)
+ * reports.
+ */
+#ifndef NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES
+#define NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES  (8 * 1024 * 1024)
+#endif
+
+
+/*
+ * Shared by the parse-time slot (explicit "zstd_buffers") and the
+ * post-merge check (inherited or defaulted value): division-based
+ * overflow pre-check, then -- when "advise" is set -- an advisory-shaped
+ * threshold on the representable product. "ctx" names which of the two
+ * callers is reporting so the operator can tell an explicit typo from an
+ * inherited value without re-deriving it themselves.
+ *
+ * The overflow check always runs (both callers pass advise or not, but
+ * overflow is unconditional either way); the advisory WARN is emitted
+ * only from the merge-time caller ("advise" true), never from the
+ * parse-time slot. Every value ends up merged exactly once per location
+ * -- the merge site is what conf->bufs is actually read from at request
+ * time -- so gating the advisory there is what keeps a single explicit
+ * "zstd_buffers" from printing the same warning twice (once at parse,
+ * again at merge) while still failing an overflowing product at the
+ * earliest possible point.
+ */
+static char *
+ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
+    const char *ctx, ngx_flag_t advise)
+{
+    size_t  total;
+
+    if (bufs->num <= 0 || bufs->size == 0) {
+        /* Neither ngx_conf_set_bufs_slot() nor the module's own default
+         * can produce this; defend anyway rather than assume. */
+        return NGX_CONF_OK;
+    }
+
+    /*
+     * Division-based pre-check, not "num * size < num": bufs->num is a
+     * signed ngx_int_t, so a post-hoc "a * b < a" comparison on the
+     * wrapped product is itself operating on a signed overflow, which is
+     * undefined behaviour rather than merely wrong. Comparing against
+     * NGX_MAX_SIZE_T_VALUE / size first never multiplies past the type's
+     * range at all.
+     */
+    if ((size_t) bufs->num > NGX_MAX_SIZE_T_VALUE / bufs->size) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"zstd_buffers\" (%s) requests %i buffers of "
+                           "%uz bytes each; that product overflows the "
+                           "platform's size_t and cannot be a config any "
+                           "operator meant to write",
+                           ctx, bufs->num, bufs->size);
+        return NGX_CONF_ERROR;
+    }
+
+    if (!advise) {
+        return NGX_CONF_OK;
+    }
+
+    total = (size_t) bufs->num * bufs->size;
+
+    if (total > NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "\"zstd_buffers\" (%s) requests %i x %uz bytes "
+                           "= ~%uz bytes of output-chain memory PER "
+                           "RESPONSE; that is on top of the per-request "
+                           "compressor (CCtx) working set -- see the "
+                           "\"zstd_max_cctx_memory\" advisory above for "
+                           "that figure -- and both are multiplied by "
+                           "concurrent responses under load",
+                           ctx, bufs->num, bufs->size, total);
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * Wraps nginx's own ngx_conf_set_bufs_slot() rather than reimplementing
+ * argument parsing: nginx's parse/zero rejection and its exact error text
+ * for those cases are preserved verbatim, and this wrapper only adds the
+ * overflow check on the ngx_bufs_t that parse produced -- fast, hard
+ * feedback on an unrepresentable explicit value at the earliest possible
+ * point. It deliberately does NOT run the advisory-threshold warning
+ * (advise=0): the post-merge check below (ngx_http_zstd_merge_loc_conf())
+ * is the single owner of that warning, because it is the only point that
+ * also covers a value this location never wrote itself but inherited
+ * from an outer block, or the module's own computed default -- neither
+ * of which runs through this slot handler at all. Running the advisory
+ * here too would print it twice for the common case of an explicit
+ * large value that also survives to the merge unchanged.
+ */
+static char *
+ngx_http_zstd_set_bufs_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    char        *p = conf;
+    char        *rc;
+    ngx_bufs_t  *bufs;
+
+    rc = ngx_conf_set_bufs_slot(cf, cmd, conf);
+    if (rc != NGX_CONF_OK) {
+        return rc;
+    }
+
+    bufs = (ngx_bufs_t *) (p + cmd->offset);
+
+    return ngx_http_zstd_check_bufs_product(cf, bufs, "explicit directive",
+                                             0);
 }

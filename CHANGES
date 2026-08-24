@@ -1,5 +1,20 @@
 Changes with http-zstd
 
+    *) Feature: "zstd_buffers number size" now bounds the aggregate
+       number x size product at config load. The directive previously
+       delegated entirely to nginx core's ngx_conf_set_bufs_slot(),
+       which range-checks each argument but never the product, so a
+       typo ("zstd_buffers 100000 100000;" instead of "100 100k;") or a
+       value inherited unchanged from an outer block could request an
+       overflowing or merely enormous per-response output-chain pool.
+       An overflowing product is now a hard config-load error naming
+       both operands; a representable product above 8 MB is a warning
+       (never a failure) naming the total, marked as per-response, and
+       cross-referencing the "zstd_max_cctx_memory" advisory for the
+       other half of the per-request memory budget. The check covers an
+       explicit value, one inherited from an outer block, and the
+       module's own default alike.
+
     *) Bugfix: "nginx -t" no longer dies with SIGFPE when "zstd_long on"
        is combined with "zstd_max_cctx_memory". The config-load budget
        check calls ZSTD_estimateCStreamSize_usingCCtxParams(), which
