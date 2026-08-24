@@ -484,6 +484,14 @@ def main() -> int:
                 "accept-encoding" in vary_values(headers),
                 f"(vary: {vary_values(headers)!r})",
             )
+            check(
+                # Sec-Fetch-Site selects the representation (dcz is
+                # refused cross-site), so a shared cache must key on it
+                # or it serves one origin's variant to the other.
+                "plain variant varies on Sec-Fetch-Site",
+                "sec-fetch-site" in vary_values(headers),
+                f"(vary: {vary_values(headers)!r})",
+            )
 
             # -- the dcz happy path
             headers, dcz_body = fetch(
@@ -501,6 +509,11 @@ def main() -> int:
             check(
                 "dcz variant varies on Available-Dictionary",
                 "available-dictionary" in vary_values(headers),
+                f"(vary: {vary_values(headers)!r})",
+            )
+            check(
+                "dcz variant varies on Sec-Fetch-Site",
+                "sec-fetch-site" in vary_values(headers),
                 f"(vary: {vary_values(headers)!r})",
             )
             check(

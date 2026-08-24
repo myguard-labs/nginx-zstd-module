@@ -110,7 +110,7 @@ GET /t
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
 --- response_headers
 Content-Encoding: dcz
-Vary: Available-Dictionary
+Vary: Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -135,7 +135,7 @@ GET /t
 Accept-Encoding: zstd, dcz
 --- response_headers
 Content-Encoding: zstd
-Vary: Available-Dictionary
+Vary: Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -228,9 +228,15 @@ Content-Encoding: zstd
 
 
 
-=== TEST 7: Sec-Fetch-Site cross-site is refused
+=== TEST 7: Sec-Fetch-Site cross-site is refused, and still varies on it
 # RFC 9842 §8: dictionaries are same-origin-partitioned; compressing a
 # cross-site response against one leaks it. Falls back to plain zstd.
+# The REFUSAL path must carry "Vary: ... Sec-Fetch-Site" too: it is the
+# variant a shared cache would otherwise hand to a same-origin client
+# (dcz silently suppressed), and its counterpart is the dcz body handed
+# to a cross-site client, bypassing this gate entirely. Proven end to
+# end against a real proxy_cache in
+# ci/tools/test_dcz_cache_partition.py.
 --- config
     location /t {
         zstd on;
@@ -245,6 +251,7 @@ GET /t
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: cross-site"
 --- response_headers
 Content-Encoding: zstd
+Vary: Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -373,7 +380,7 @@ GET /t
 "Accept-Encoding: dcz\nAvailable-Dictionary: :$::bad_b64:"
 --- response_headers
 !Content-Encoding
-Vary: Available-Dictionary
+Vary: Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -460,7 +467,7 @@ GET /t
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
 --- response_headers
 Content-Encoding: dcz
-Vary: Available-Dictionary
+Vary: Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -748,7 +755,7 @@ GET /t
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: same-origin"
 --- response_headers
 Content-Encoding: dcz
-Vary: Available-Dictionary
+Vary: Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 

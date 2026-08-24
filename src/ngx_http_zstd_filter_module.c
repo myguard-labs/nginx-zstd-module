@@ -820,6 +820,21 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
      * declines for reasons invariant in Available-Dictionary; the two
      * paths after it are not invariant. Accept-Encoding itself is
      * already covered by gzip_vary above; caches union all Vary lines.
+     *
+     * Sec-Fetch-Site rides in the SAME header for exactly the same
+     * reason. ngx_http_zstd_dcz_negotiate() below refuses dcz for any
+     * Sec-Fetch-Site other than absent / "same-origin" / "none", which
+     * makes that request header a response-selection input: without it
+     * in Vary, a shared cache filled by a same-origin request hands the
+     * dcz representation to a cross-site request and bypasses the
+     * origin gate entirely, while the reverse fill order suppresses dcz
+     * for a legitimate same-origin client. It is pushed unconditionally
+     * in a dcz-configured location, not only on the paths that consult
+     * it: every return above is Sec-Fetch-Site-invariant, and the
+     * identity/plain-zstd fallbacks below are precisely the variants a
+     * cache must not reuse across the gate. Security decision inputs
+     * stay in Vary — a later optimisation that conditionalises the
+     * Available-Dictionary token must not drop this one.
      */
     if (zlcf->dcz_dicts != NULL && zlcf->dcz_dicts->nelts > 0) {
         ngx_table_elt_t  *v;
@@ -834,7 +849,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         v->next = NULL;
 #endif
         ngx_str_set(&v->key, "Vary");
-        ngx_str_set(&v->value, "Available-Dictionary");
+        ngx_str_set(&v->value, "Available-Dictionary, Sec-Fetch-Site");
     }
 
     /*

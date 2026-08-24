@@ -1506,6 +1506,14 @@ jobs:
           # and proof the dictionary engaged (dcz body < plain zstd).
           python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18106 --tls-port 18117 --insecure-port 18118
+          # Shared-cache partitioning of the dcz cross-origin decision:
+          # Sec-Fetch-Site selects the representation, so a real
+          # proxy_cache in front of the module must not serve the dcz
+          # variant to a cross-site request (or suppress it for a
+          # same-origin one). Runs the {same-origin, cross-site,
+          # absent} x {both fill orders} matrix end to end.
+          python3 ci/tools/test_dcz_cache_partition.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18120 --origin-port 18121
           echo "✓ RFC 9842 dcz end-to-end test passed"
 
       - name: Test summary
@@ -1680,6 +1688,14 @@ jobs:
           # frame header is hand-assembled — both lifetime/OOB classes.
           python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18089 --tls-port 18109 --insecure-port 18113
+          # Shared-cache partitioning of the dcz cross-origin decision:
+          # Sec-Fetch-Site selects the representation, so a real
+          # proxy_cache in front of the module must not serve the dcz
+          # variant to a cross-site request (or suppress it for a
+          # same-origin one). Runs the {same-origin, cross-site,
+          # absent} x {both fill orders} matrix end to end.
+          python3 ci/tools/test_dcz_cache_partition.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18122 --origin-port 18123
           # Baseline loaded-and-blocking control (PR2 step 22): the ASAN
           # binary is a static --add-module build, the shape this check
           # needs to prove the compiled-in `zstd on;` default is OFF.
@@ -1923,6 +1939,14 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" --port 19102 --backend-port 19103
           python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
             --port 19106 --tls-port 19107 --insecure-port 19108
+          # Shared-cache partitioning of the dcz cross-origin decision:
+          # Sec-Fetch-Site selects the representation, so a real
+          # proxy_cache in front of the module must not serve the dcz
+          # variant to a cross-site request (or suppress it for a
+          # same-origin one). Runs the {same-origin, cross-site,
+          # absent} x {both fill orders} matrix end to end.
+          python3 ci/tools/test_dcz_cache_partition.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19120 --origin-port 19121
 
       - name: Capture coverage (lcov) and enforce line-coverage floor
         run: |
