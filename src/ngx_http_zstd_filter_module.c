@@ -2738,6 +2738,268 @@ ngx_http_zstd_open_dict_file(ngx_conf_t *cf, ngx_str_t *path,
 }
 
 
+#if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
+
+/*
+ * Advisory threshold for the implicit (no zstd_max_cctx_memory) budget
+ * policy, in bytes of per-request compressor working set.
+ *
+ * The module retains up to NGX_HTTP_ZSTD_CCTX_SLOTS (4) contexts per
+ * worker, and ZSTD_sizeof_CCtx() does not shrink on reset, so the
+ * retained worker high-water mark is threshold x slots -- 128 MB at the
+ * value below. Multiply again by worker_processes for the box.
+ *
+ * Chosen from ZSTD_estimateCStreamSize_usingCCtxParams() measured on
+ * libzstd 1.5.7, streaming with unknown content size (the module's
+ * path), no zstd_window_log, no LDM:
+ *
+ *     zstd_comp_level   estimate      per worker (x4)
+ *      1                  1.3 MB           5.2 MB
+ *      3 (default)        3.5 MB          14.0 MB
+ *      6                  5.7 MB          23.0 MB
+ *      9                 16.7 MB          67.0 MB
+ *     11                 28.7 MB         115.0 MB
+ *     ---- 32 MB advisory threshold ----
+ *     12                 52.7 MB         211.0 MB
+ *     15                 68.7 MB         275.0 MB
+ *     19                 89.5 MB         358.0 MB
+ *     22                769.5 MB        3078.0 MB
+ *
+ * and with the specialist window/LDM levers at the DEFAULT level 3:
+ *
+ *     zstd_long on                     137.6 MB         550.6 MB
+ *     zstd_window_log 27               129.5 MB         518.0 MB
+ *     zstd_long on + window_log 20       2.6 MB          10.3 MB
+ *
+ * 32 MB therefore falls in the natural gap between level 11 (28.7 MB)
+ * and level 12 (52.7 MB): every level in the ordinary web-serving range
+ * stays silent, while every profile that reaches hundreds of MB per
+ * worker -- high levels, LDM, and a wide explicit window -- is named.
+ * It is not a directive: an operator who wants a real bound sets
+ * zstd_max_cctx_memory (hard failure), and one who has accepted the
+ * larger profile sets "zstd_max_cctx_memory 0" to acknowledge it.
+ */
+#ifndef NGX_HTTP_ZSTD_CCTX_ADVISORY_BYTES
+#define NGX_HTTP_ZSTD_CCTX_ADVISORY_BYTES  (32 * 1024 * 1024)
+#endif
+
+
+/*
+ * Compute libzstd's own estimate of the per-request streaming compressor
+ * working set for this location's configured profile.
+ *
+ * Single source of truth for both consumers -- the hard check against an
+ * explicit zstd_max_cctx_memory and the implicit advisory -- so the two
+ * cannot drift into disagreeing about what a profile costs. Every exit
+ * path frees the ZSTD_CCtx_params; a leak here would be per-location at
+ * config load.
+ *
+ * On success writes the estimate to *est and returns NGX_CONF_OK. On
+ * failure it has already logged an actionable diagnostic at
+ * NGX_LOG_EMERG and returns NGX_CONF_ERROR: a profile whose cost cannot
+ * be computed is a configuration we refuse to start on, not one we
+ * quietly stop measuring.
+ */
+static char *
+ngx_http_zstd_estimate_cctx_memory(ngx_conf_t *cf,
+    ngx_http_zstd_loc_conf_t *conf, size_t *est)
+{
+    ZSTD_CCtx_params  *cp;
+    size_t             srv;
+    size_t             e;
+
+    cp = ZSTD_createCCtxParams();
+    if (cp == NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "ZSTD_createCCtxParams() failed");
+        return NGX_CONF_ERROR;
+    }
+
+    srv = ZSTD_CCtxParams_init(cp, (int) conf->level);
+    if (ZSTD_isError(srv)) {
+        ZSTD_freeCCtxParams(cp);
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "ZSTD_CCtxParams_init(level=%i) failed: %s",
+                           conf->level, ZSTD_getErrorName(srv));
+        return NGX_CONF_ERROR;
+    }
+
+    if (conf->window_log > 0) {
+        srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_windowLog,
+                                           (int) conf->window_log);
+        if (ZSTD_isError(srv)) {
+            ZSTD_freeCCtxParams(cp);
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_CCtxParams_setParameter("
+                               "windowLog=%i) failed: %s",
+                               conf->window_log,
+                               ZSTD_getErrorName(srv));
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    if (conf->long_mode) {
+        ngx_int_t  ldm_wlog, ldm_hlog, ldm_rlog;
+
+        srv = ZSTD_CCtxParams_setParameter(
+                  cp, ZSTD_c_enableLongDistanceMatching, 1);
+        if (ZSTD_isError(srv)) {
+            ZSTD_freeCCtxParams(cp);
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_CCtxParams_setParameter("
+                               "enableLongDistanceMatching) failed: %s",
+                               ZSTD_getErrorName(srv));
+            return NGX_CONF_ERROR;
+        }
+
+        /*
+         * BLOCKER fix: ZSTD_estimateCStreamSize_usingCCtxParams()
+         * divides by params->ldmParams.hashRateLog. libzstd derives
+         * the LDM sub-parameters lazily, inside compression setup --
+         * a ZSTD_CCtx_params that has only had
+         * ZSTD_c_enableLongDistanceMatching set still carries
+         * hashRateLog == 0, so the estimator divides by zero and the
+         * whole process dies with SIGFPE during "nginx -t". Setting
+         * ZSTD_c_windowLog does not help: the divisor is unrelated to
+         * the window.
+         *
+         * There is no public "adjust these params the way you would
+         * internally" entry point, so we derive the same four values
+         * libzstd documents in zstd.h and push them explicitly. From
+         * the ZSTD_c_ldm* documentation:
+         *
+         *   - enabling LDM raises the default windowLog to 27
+         *     (128 MB) unless windowLog was expressly set;
+         *   - ldmHashLog     default = windowLog - 7, clamped to
+         *                    [ZSTD_LDM_HASHLOG_MIN,
+         *                     ZSTD_LDM_HASHLOG_MAX];
+         *   - ldmMinMatch    default = 64;
+         *   - ldmBucketSizeLog default = 3;
+         *   - ldmHashRateLog default = MAX(0, windowLog - ldmHashLog).
+         *
+         * Seeding these makes the estimate accurate rather than
+         * merely non-crashing. Measured against a real streaming
+         * ZSTD_CCtx compressing 256 MB with unknown content size
+         * (libzstd 1.5.7, level 3): seeded estimate 144328225 bytes
+         * vs. ZSTD_sizeof_CCtx() 144262689 -- 0.05% conservative.
+         * With "zstd_window_log 20": 2705953 vs. 2705441, 0.02%
+         * conservative. So the operator's budget still means what it
+         * says under LDM; we neither crash nor silently drop the
+         * bound, and we do not manufacture spurious rejections.
+         *
+         * Note that windowLog is pushed explicitly here even when the
+         * operator did not configure one: the estimator must see the
+         * same 27 that libzstd would default to under LDM, otherwise
+         * it would size for the level's much smaller default window
+         * and under-report by two orders of magnitude.
+         */
+
+        ldm_wlog = conf->window_log > 0 ? conf->window_log
+                                        : NGX_HTTP_ZSTD_LDM_WINDOWLOG;
+
+        ldm_hlog = ldm_wlog - 7;
+        if (ldm_hlog < ZSTD_LDM_HASHLOG_MIN) {
+            ldm_hlog = ZSTD_LDM_HASHLOG_MIN;
+        }
+        if (ldm_hlog > ZSTD_LDM_HASHLOG_MAX) {
+            ldm_hlog = ZSTD_LDM_HASHLOG_MAX;
+        }
+
+        ldm_rlog = ldm_wlog - ldm_hlog;
+        if (ldm_rlog < 0) {
+            ldm_rlog = 0;
+        }
+
+        srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_windowLog,
+                                           (int) ldm_wlog);
+        if (!ZSTD_isError(srv)) {
+            srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_ldmHashLog,
+                                               (int) ldm_hlog);
+        }
+        if (!ZSTD_isError(srv)) {
+            srv = ZSTD_CCtxParams_setParameter(
+                      cp, ZSTD_c_ldmMinMatch,
+                      NGX_HTTP_ZSTD_LDM_MINMATCH);
+        }
+        if (!ZSTD_isError(srv)) {
+            srv = ZSTD_CCtxParams_setParameter(
+                      cp, ZSTD_c_ldmBucketSizeLog,
+                      NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG);
+        }
+        if (!ZSTD_isError(srv)) {
+            srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_ldmHashRateLog,
+                                               (int) ldm_rlog);
+        }
+
+        if (ZSTD_isError(srv)) {
+            ZSTD_freeCCtxParams(cp);
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_CCtxParams_setParameter() failed "
+                               "while deriving the \"zstd_long\" "
+                               "parameters for the per-request "
+                               "compressor memory estimate: %s",
+                               ZSTD_getErrorName(srv));
+            return NGX_CONF_ERROR;
+        }
+
+        /*
+         * Defence in depth. The derivation above is the documented
+         * one, but it is libzstd's documentation rather than a
+         * contract enforced by a public API, and a future release
+         * could add a fifth divisor-bearing sub-parameter. Rather
+         * than risk another SIGFPE taking out "nginx -t", refuse the
+         * configuration if the estimate would still be computed from
+         * a zero divisor we know about.
+         */
+        if (ldm_rlog <= 0) {
+            ZSTD_freeCCtxParams(cp);
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "the per-request compressor memory "
+                               "estimate cannot be computed for this "
+                               "\"zstd_long\" profile: the derived LDM "
+                               "hash rate is zero (window_log %i). Raise "
+                               "\"zstd_window_log\" or disable "
+                               "\"zstd_long\"",
+                               (ngx_int_t) ldm_wlog);
+            return NGX_CONF_ERROR;
+        }
+    }
+
+#if ZSTD_VERSION_NUMBER >= 10506
+    if (conf->target_cblock_size > 0) {
+        srv = ZSTD_CCtxParams_setParameter(
+                  cp, ZSTD_c_targetCBlockSize,
+                  (int) conf->target_cblock_size);
+        if (ZSTD_isError(srv)) {
+            ZSTD_freeCCtxParams(cp);
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_CCtxParams_setParameter("
+                               "targetCBlockSize=%z) failed: %s",
+                               conf->target_cblock_size,
+                               ZSTD_getErrorName(srv));
+            return NGX_CONF_ERROR;
+        }
+    }
+#endif
+
+    e = ZSTD_estimateCStreamSize_usingCCtxParams(cp);
+    ZSTD_freeCCtxParams(cp);
+
+    if (ZSTD_isError(e)) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "ZSTD_estimateCStreamSize_usingCCtxParams() "
+                           "failed: %s", ZSTD_getErrorName(e));
+        return NGX_CONF_ERROR;
+    }
+
+    *est = e;
+
+    return NGX_CONF_OK;
+}
+
+#endif
+
+
 static char *
 ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 {
@@ -2774,7 +3036,19 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->target_cblock_size, prev->target_cblock_size, 0);
     ngx_conf_merge_value(conf->window_log, prev->window_log, 0);
     ngx_conf_merge_value(conf->long_mode, prev->long_mode, 0);
-    ngx_conf_merge_value(conf->max_cctx_memory, prev->max_cctx_memory, 0);
+    /*
+     * Merged to NGX_CONF_UNSET, not to 0, deliberately: the implicit
+     * advisory below has to tell "the operator never mentioned this
+     * directive" apart from "the operator wrote zstd_max_cctx_memory
+     * off", and ngx_conf_set_size_slot() stores the latter as 0. Folding
+     * UNSET to 0 here would collapse the two into one value and make the
+     * acknowledgement indistinguishable from silence -- the advisory
+     * would then either never fire or ignore "off". The only other
+     * reader is the explicit-budget check, which already tests
+     * "!= NGX_CONF_UNSET && > 0" and is unaffected.
+     */
+    ngx_conf_merge_value(conf->max_cctx_memory, prev->max_cctx_memory,
+                         NGX_CONF_UNSET);
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
     ngx_conf_merge_str_value(conf->bypass_vary, prev->bypass_vary, "");
 
@@ -3062,218 +3336,60 @@ close:
     }
 
     /*
-     * Per-request CCtx memory budget (config-load assertion).
+     * Per-request CCtx memory policy (config load).
      *
      * zstd's streaming compressor working set is dominated by the
      * compression-level *strategy* tables (chain/hash/search), not by
-     * the window alone — see the README. Lowering windowLog therefore
+     * the window alone -- see the README. Lowering windowLog therefore
      * does NOT meaningfully bound memory for high levels (level 22 at
-     * windowLog 20 still allocates ~640 MB). The honest, precise lever
-     * is to validate the configured parameters against the operator's
-     * budget at config load using libzstd's own estimator, and refuse
-     * to start if they exceed it. The directive does not silently tune
-     * anything — a too-tight budget is a hard error so operators see
-     * the misconfiguration up front instead of discovering it as a
-     * worker-RSS surprise under concurrency.
+     * windowLog 20 still estimates ~642 MB per context). The honest,
+     * precise lever is libzstd's own estimator, run at config load
+     * against the parameters this location actually merged.
+     *
+     * Two consumers, one estimate (ngx_http_zstd_estimate_cctx_memory()
+     * above computes it for both, so they cannot drift):
+     *
+     *   1. An explicit non-zero "zstd_max_cctx_memory" is a budget the
+     *      operator asked to be held to. Exceeding it is a hard error at
+     *      config load, unchanged: a too-tight budget is a
+     *      misconfiguration the operator should see up front rather than
+     *      discover as a worker-RSS surprise under concurrency.
+     *
+     *   2. No "zstd_max_cctx_memory" at all is the far more common case,
+     *      and it used to mean the estimator never ran -- so a later
+     *      "zstd_comp_level 22" or "zstd_long on" could quietly commit
+     *      hundreds of MB per concurrent response even though the module
+     *      already knew the number at config load. Compression enabled
+     *      with no explicit budget therefore now runs the same estimate
+     *      and WARNS when it exceeds NGX_HTTP_ZSTD_CCTX_ADVISORY_BYTES.
+     *
+     * Why the implicit path warns rather than fails: turning "nginx -t"
+     * from pass to fail on a configuration that works today would break
+     * running deployments on upgrade. The advisory names the number and
+     * the retained worker bound, and tells the operator the two ways to
+     * silence it -- an explicit budget (which restores the hard check)
+     * or an explicit "zstd_max_cctx_memory 0", which is the
+     * acknowledgement that the larger profile is intentional.
      *
      * The estimator API lives in libzstd's experimental section
-     * (ZSTDLIB_STATIC_API), so the check is compiled in only when the
+     * (ZSTDLIB_STATIC_API), so both paths are compiled in only when the
      * module is built with -DZSTD_STATIC_LINKING_ONLY against
      * libzstd >= 1.4.0 (the project's production and CI builds enable
-     * this). Without it, the directive is unsupported and rejected with
-     * an actionable error rather than silently no-op'd.
+     * this). Without it an explicit directive is rejected with an
+     * actionable error rather than silently no-op'd, and the implicit
+     * advisory simply does not run -- a non-static build must not
+     * pretend to be enforcing a bound it cannot compute.
      */
     if (rc == NGX_CONF_OK && conf->enable
         && conf->max_cctx_memory != NGX_CONF_UNSET
         && conf->max_cctx_memory > 0)
     {
 #if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
-        ZSTD_CCtx_params  *cp;
-        size_t             est;
-        size_t             srv;
+        size_t  est;
 
-        cp = ZSTD_createCCtxParams();
-        if (cp == NULL) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "ZSTD_createCCtxParams() failed");
-            return NGX_CONF_ERROR;
-        }
-
-        srv = ZSTD_CCtxParams_init(cp, (int) conf->level);
-        if (ZSTD_isError(srv)) {
-            ZSTD_freeCCtxParams(cp);
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "ZSTD_CCtxParams_init(level=%i) failed: %s",
-                               conf->level, ZSTD_getErrorName(srv));
-            return NGX_CONF_ERROR;
-        }
-
-        if (conf->window_log > 0) {
-            srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_windowLog,
-                                               (int) conf->window_log);
-            if (ZSTD_isError(srv)) {
-                ZSTD_freeCCtxParams(cp);
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "ZSTD_CCtxParams_setParameter("
-                                   "windowLog=%i) failed: %s",
-                                   conf->window_log,
-                                   ZSTD_getErrorName(srv));
-                return NGX_CONF_ERROR;
-            }
-        }
-
-        if (conf->long_mode) {
-            ngx_int_t  ldm_wlog, ldm_hlog, ldm_rlog;
-
-            srv = ZSTD_CCtxParams_setParameter(
-                      cp, ZSTD_c_enableLongDistanceMatching, 1);
-            if (ZSTD_isError(srv)) {
-                ZSTD_freeCCtxParams(cp);
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "ZSTD_CCtxParams_setParameter("
-                                   "enableLongDistanceMatching) failed: %s",
-                                   ZSTD_getErrorName(srv));
-                return NGX_CONF_ERROR;
-            }
-
-            /*
-             * BLOCKER fix: ZSTD_estimateCStreamSize_usingCCtxParams()
-             * divides by params->ldmParams.hashRateLog. libzstd derives
-             * the LDM sub-parameters lazily, inside compression setup --
-             * a ZSTD_CCtx_params that has only had
-             * ZSTD_c_enableLongDistanceMatching set still carries
-             * hashRateLog == 0, so the estimator divides by zero and the
-             * whole process dies with SIGFPE during "nginx -t". Setting
-             * ZSTD_c_windowLog does not help: the divisor is unrelated to
-             * the window.
-             *
-             * There is no public "adjust these params the way you would
-             * internally" entry point, so we derive the same four values
-             * libzstd documents in zstd.h and push them explicitly. From
-             * the ZSTD_c_ldm* documentation:
-             *
-             *   - enabling LDM raises the default windowLog to 27
-             *     (128 MB) unless windowLog was expressly set;
-             *   - ldmHashLog     default = windowLog - 7, clamped to
-             *                    [ZSTD_LDM_HASHLOG_MIN,
-             *                     ZSTD_LDM_HASHLOG_MAX];
-             *   - ldmMinMatch    default = 64;
-             *   - ldmBucketSizeLog default = 3;
-             *   - ldmHashRateLog default = MAX(0, windowLog - ldmHashLog).
-             *
-             * Seeding these makes the estimate accurate rather than
-             * merely non-crashing. Measured against a real streaming
-             * ZSTD_CCtx compressing 256 MB with unknown content size
-             * (libzstd 1.5.7, level 3): seeded estimate 144328225 bytes
-             * vs. ZSTD_sizeof_CCtx() 144262689 -- 0.05% conservative.
-             * With "zstd_window_log 20": 2705953 vs. 2705441, 0.02%
-             * conservative. So the operator's budget still means what it
-             * says under LDM; we neither crash nor silently drop the
-             * bound, and we do not manufacture spurious rejections.
-             *
-             * Note that windowLog is pushed explicitly here even when the
-             * operator did not configure one: the estimator must see the
-             * same 27 that libzstd would default to under LDM, otherwise
-             * it would size for the level's much smaller default window
-             * and under-report by two orders of magnitude.
-             */
-
-            ldm_wlog = conf->window_log > 0 ? conf->window_log
-                                            : NGX_HTTP_ZSTD_LDM_WINDOWLOG;
-
-            ldm_hlog = ldm_wlog - 7;
-            if (ldm_hlog < ZSTD_LDM_HASHLOG_MIN) {
-                ldm_hlog = ZSTD_LDM_HASHLOG_MIN;
-            }
-            if (ldm_hlog > ZSTD_LDM_HASHLOG_MAX) {
-                ldm_hlog = ZSTD_LDM_HASHLOG_MAX;
-            }
-
-            ldm_rlog = ldm_wlog - ldm_hlog;
-            if (ldm_rlog < 0) {
-                ldm_rlog = 0;
-            }
-
-            srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_windowLog,
-                                               (int) ldm_wlog);
-            if (!ZSTD_isError(srv)) {
-                srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_ldmHashLog,
-                                                   (int) ldm_hlog);
-            }
-            if (!ZSTD_isError(srv)) {
-                srv = ZSTD_CCtxParams_setParameter(
-                          cp, ZSTD_c_ldmMinMatch,
-                          NGX_HTTP_ZSTD_LDM_MINMATCH);
-            }
-            if (!ZSTD_isError(srv)) {
-                srv = ZSTD_CCtxParams_setParameter(
-                          cp, ZSTD_c_ldmBucketSizeLog,
-                          NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG);
-            }
-            if (!ZSTD_isError(srv)) {
-                srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_ldmHashRateLog,
-                                                   (int) ldm_rlog);
-            }
-
-            if (ZSTD_isError(srv)) {
-                ZSTD_freeCCtxParams(cp);
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "ZSTD_CCtxParams_setParameter() failed "
-                                   "while deriving the \"zstd_long\" "
-                                   "parameters for the "
-                                   "\"zstd_max_cctx_memory\" estimate: %s",
-                                   ZSTD_getErrorName(srv));
-                return NGX_CONF_ERROR;
-            }
-
-            /*
-             * Defence in depth. The derivation above is the documented
-             * one, but it is libzstd's documentation rather than a
-             * contract enforced by a public API, and a future release
-             * could add a fifth divisor-bearing sub-parameter. Rather
-             * than risk another SIGFPE taking out "nginx -t", refuse the
-             * configuration if the estimate would still be computed from
-             * a zero divisor we know about.
-             */
-            if (ldm_rlog <= 0) {
-                ZSTD_freeCCtxParams(cp);
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "\"zstd_max_cctx_memory\" cannot be "
-                                   "verified for this \"zstd_long\" "
-                                   "profile: the derived LDM hash rate is "
-                                   "zero (window_log %i). Raise "
-                                   "\"zstd_window_log\", disable "
-                                   "\"zstd_long\", or remove "
-                                   "\"zstd_max_cctx_memory\"",
-                                   (ngx_int_t) ldm_wlog);
-                return NGX_CONF_ERROR;
-            }
-        }
-
-#if ZSTD_VERSION_NUMBER >= 10506
-        if (conf->target_cblock_size > 0) {
-            srv = ZSTD_CCtxParams_setParameter(
-                      cp, ZSTD_c_targetCBlockSize,
-                      (int) conf->target_cblock_size);
-            if (ZSTD_isError(srv)) {
-                ZSTD_freeCCtxParams(cp);
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "ZSTD_CCtxParams_setParameter("
-                                   "targetCBlockSize=%z) failed: %s",
-                                   conf->target_cblock_size,
-                                   ZSTD_getErrorName(srv));
-                return NGX_CONF_ERROR;
-            }
-        }
-#endif
-
-        est = ZSTD_estimateCStreamSize_usingCCtxParams(cp);
-        ZSTD_freeCCtxParams(cp);
-
-        if (ZSTD_isError(est)) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "ZSTD_estimateCStreamSize_usingCCtxParams() "
-                               "failed: %s", ZSTD_getErrorName(est));
+        if (ngx_http_zstd_estimate_cctx_memory(cf, conf, &est)
+            != NGX_CONF_OK)
+        {
             return NGX_CONF_ERROR;
         }
 
@@ -3297,6 +3413,50 @@ close:
                            "\"zstd_window_log\" for a coarse window-based "
                            "bound");
         return NGX_CONF_ERROR;
+#endif
+    }
+
+    /*
+     * Implicit advisory: compression enabled, no explicit budget.
+     *
+     * "max_cctx_memory == 0" is reached two ways and they mean different
+     * things. NGX_CONF_UNSET means the operator never mentioned the
+     * directive anywhere in the inheritance chain -- that is the case
+     * this advisory exists for. A merged 0 that is NOT UNSET came from
+     * an explicit "zstd_max_cctx_memory 0", which is the operator
+     * acknowledging the profile. The two are only distinguishable
+     * because the merge above preserves NGX_CONF_UNSET instead of
+     * folding it to 0; see the note there.
+     */
+    if (rc == NGX_CONF_OK && conf->enable
+        && conf->max_cctx_memory == NGX_CONF_UNSET)
+    {
+#if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
+        size_t  est;
+
+        if (ngx_http_zstd_estimate_cctx_memory(cf, conf, &est)
+            != NGX_CONF_OK)
+        {
+            return NGX_CONF_ERROR;
+        }
+
+        if (est > NGX_HTTP_ZSTD_CCTX_ADVISORY_BYTES) {
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                               "the configured zstd parameters need ~%uz "
+                               "bytes of per-request compressor memory "
+                               "(zstd_comp_level %i); each worker retains "
+                               "up to %d such contexts, so worker RSS can "
+                               "reach ~%uz bytes, and that again per "
+                               "worker process. Set "
+                               "\"zstd_max_cctx_memory\" to a budget to "
+                               "have this enforced at config load, or "
+                               "\"zstd_max_cctx_memory 0\" to "
+                               "acknowledge the profile and silence this "
+                               "warning",
+                               est, conf->level,
+                               (int) NGX_HTTP_ZSTD_CCTX_SLOTS,
+                               est * NGX_HTTP_ZSTD_CCTX_SLOTS);
+        }
 #endif
     }
 
