@@ -1415,10 +1415,19 @@ jobs:
           # but wrong body). Fire many distinct concurrent requests
           # through one worker over reused keepalive connections; each
           # response must decode byte-exact to its OWN origin.
+          # --require-multi-slot additionally asserts, from the debug
+          # witnesses, that MORE THAN ONE ring slot was actually lent.
+          # Without it the byte-exactness oracle is satisfied by a build
+          # where every concurrent claimant falls through to a
+          # per-request context -- which is what the single-slot cache
+          # did, so the test would pass without ever exercising the
+          # concurrent slot borrowing the ring introduces. Only on this
+          # non-sanitized job: UBSAN cannot log at debug at all (see the
+          # --log-level warn note on the sanitizer jobs below).
           python3 ci/tools/test_concurrent_cctx_isolation.py \
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18098 --backend-port 18099 \
-            --concurrency 16 --rounds 6
+            --concurrency 16 --rounds 6 --require-multi-slot
           echo "✓ per-request CCtx isolation regression passed"
 
       - name: Run worker CCtx cache regression

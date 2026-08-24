@@ -429,6 +429,15 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
  * workspaces per worker, each at its own profile's vetted figure. It is a
  * compile-time constant rather than a directive so the bound is auditable
  * from the source and cannot be raised by configuration.
+ *
+ * Seeding is first-fit with no eviction, so with MORE distinct profiles than
+ * slots the ring is filled in arrival order and then frozen for the worker's
+ * life: the first profiles seen win, even if a later one turns out busier.
+ * That is deliberate -- never re-parameterising a slot is what keeps each
+ * slot's high-water mark at its own vetted figure -- but it does mean cache
+ * effectiveness past NGX_HTTP_ZSTD_CCTX_SLOTS profiles depends on startup
+ * traffic order. A profile that finds no slot is served correctly on the
+ * per-request path, the pre-existing safe behaviour.
  */
 #ifndef NGX_HTTP_ZSTD_CCTX_SLOTS
 #define NGX_HTTP_ZSTD_CCTX_SLOTS  4
@@ -3032,9 +3041,17 @@ ngx_http_zstd_release_cctx(void *data)
  *
  * Without this the cache is a live allocation at shutdown, which LeakSanitizer
  * and Valgrind both report -- this tree gates on both, so a "harmless" one-off
- * worker-lifetime leak would be a red CI job, not a footnote. Any request still
- * holding a loan has already had its pool destroyed by the time module exit
- * handlers run, so the context is unowned here.
+ * worker-lifetime leak would be a red CI job, not a footnote.
+ *
+ * A slot may still be BUSY here: ngx_worker_process_exit() runs every module's
+ * exit_process before it touches connections, and on the terminate path it
+ * runs straight out of the event loop with requests in flight -- their pools
+ * are not destroyed first, and on that path never are. Freeing a lent context
+ * is nonetheless unobservable, and that, not "the borrower is already gone",
+ * is why it is safe: the process exit()s immediately after these handlers, so
+ * no borrower's pool cleanup -- hence no ngx_http_zstd_release_cctx() -- ever
+ * runs again on the freed pointer. Anything that reintroduced an event-loop
+ * turn after this point would invalidate that reasoning, not merely slow it.
  */
 static void
 ngx_http_zstd_exit_process(ngx_cycle_t *cycle)
