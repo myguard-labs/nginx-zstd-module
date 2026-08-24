@@ -92,6 +92,21 @@ typedef struct {
      * summary warning from postconfiguration instead of per location.
      */
     ngx_uint_t                   vary_warn_suppressed;
+
+    /*
+     * Preformatted decimal representation of dcz_dicts_hashed,
+     * allocated during main-conf init. The variable handler returns
+     * this immutable buffer directly instead of allocating and calling
+     * ngx_sprintf on every request.
+     */
+    ngx_str_t                    dcz_dicts_hashed_str;
+
+    /*
+     * ZSTD_CStreamOutSize() result, computed once at init and cached
+     * in main conf. The constant-returning libzstd function is called
+     * once here instead of on every location merge.
+     */
+    size_t                       stream_out_size;
 } ngx_http_zstd_main_conf_t;
 
 
@@ -2121,6 +2136,13 @@ ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf)
 {
     ngx_http_zstd_main_conf_t *zmcf = conf;
 
+    /*
+     * Cache ZSTD_CStreamOutSize() once per cycle. The constant-returning
+     * libzstd function is called once here and reused in every location
+     * merge instead of calling it once per enabled location.
+     */
+    zmcf->stream_out_size = ZSTD_CStreamOutSize();
+
     if (zmcf->dict_file.len == 0) {
         return NGX_CONF_OK;
     }
@@ -2149,6 +2171,23 @@ ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf)
     if (ngx_conf_full_name(cf->cycle, &zmcf->dict_file, 1) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
+
+    /*
+     * Preformat $zstd_dcz_dicts_hashed once per cycle. The value is
+     * configuration-constant, so store the final decimal ngx_str_t in
+     * the cycle-owned main conf. The variable handler then returns this
+     * immutable buffer directly instead of allocating NGX_INT_T_LEN
+     * bytes and calling ngx_sprintf on every request.
+     */
+    zmcf->dcz_dicts_hashed_str.data = ngx_pnalloc(cf->pool,
+                                                   NGX_INT_T_LEN);
+    if (zmcf->dcz_dicts_hashed_str.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    zmcf->dcz_dicts_hashed_str.len = ngx_sprintf(
+        zmcf->dcz_dicts_hashed_str.data, "%ui",
+        zmcf->dcz_dicts_hashed) - zmcf->dcz_dicts_hashed_str.data;
 
     return NGX_CONF_OK;
 }
@@ -2264,32 +2303,32 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
      * resolved explicitly in the block below instead. See C2.
      */
 
+    zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
+
     /*
-     * Default the output buffer size to ZSTD_CStreamOutSize() — the
-     * encoder's own recommended output granularity (~128 KB). It is the
-     * documented minimum at which ZSTD_compressStream2() can flush a full
-     * internal block in a single call; with any smaller buffer zstd is
-     * forced to fragment a block across calls, costing extra
-     * compress round-trips and ngx_alloc_chain_link() churn per response.
-     * The previous 4 x 32 KB heuristic approximated this; using the API's
-     * value is the principled form and tracks libzstd if it ever changes.
+     * Default the output buffer size to the cached ZSTD_CStreamOutSize()
+     * value — the encoder's own recommended output granularity (~128 KB).
+     * It is the documented minimum at which ZSTD_compressStream2() can
+     * flush a full internal block in a single call; with any smaller
+     * buffer zstd is forced to fragment a block across calls, costing
+     * extra compress round-trips and ngx_alloc_chain_link() churn per
+     * response. The previous 4 x 32 KB heuristic approximated this; using
+     * the API's value is the principled form and tracks libzstd if it ever
+     * changes.
      *
      * Two such buffers: one being filled by the compressor while the
      * other is in flight down the output chain. This raises the
-     * per-request filter-memory floor to ~2 x ZSTD_CStreamOutSize()
+     * per-request filter-memory floor to ~2 x CStreamOutSize()
      * (~256 KB) from the prior ~128 KB — the deliberate cost of never
      * forcing zstd to mid-block flush. Operators who set zstd_buffers
      * explicitly are unaffected (the merge keeps their value), and can
      * tune it down if the memory trade is wrong for their workload.
      *
-     * ZSTD_CStreamOutSize() is a constant-returning libzstd call (no
-     * allocation, no per-call cost); it is evaluated once here at config
-     * merge, not per request.
+     * The constant-returning libzstd call is now cached at init_main_conf
+     * and reused here instead of being called once per location merge.
      */
     ngx_conf_merge_bufs_value(conf->bufs, prev->bufs,
-                              2, ZSTD_CStreamOutSize());
-
-    zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
+                              2, zmcf->stream_out_size);
 
     if (conf->enable && zmcf->dict_file.len > 0) {
 
@@ -2472,6 +2511,23 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 cln->handler = ngx_http_zstd_cleanup_dict;
                 cln->data = conf->dict;
             }
+
+            /*
+             * Free the config-pool source buffer now that the trained
+             * CDict has copied it. ZSTD_createCDict()/ZSTD_dlm_byCopy
+             * owns an independent copy after construction; the original
+             * buf is retained only for static-API ZSTD_dlm_byRef, which
+             * is handled separately in the static-API block above. Large
+             * pool allocations are reclaimable via ngx_pfree(), so this
+             * removes the backing bytes immediately (small pool chunks
+             * harmlessly remain). The static-API byRef path does NOT
+             * free: old workers keep the old cycle's pool and must
+             * retain their dictionary bytes until they exit.
+             */
+#if !defined(ZSTD_STATIC_LINKING_ONLY) || \
+    ZSTD_VERSION_NUMBER < 10400
+            ngx_pfree(cf->pool, buf);
+#endif
         }
     }
 
@@ -2756,13 +2812,8 @@ ngx_http_zstd_dcz_dicts_hashed_variable(ngx_http_request_t *r,
         return NGX_OK;
     }
 
-    vv->data = ngx_pnalloc(r->pool, NGX_INT_T_LEN);
-    if (vv->data == NULL) {
-        return NGX_ERROR;
-    }
-
-    vv->len = ngx_sprintf(vv->data, "%ui", zmcf->dcz_dicts_hashed)
-              - vv->data;
+    vv->data = zmcf->dcz_dicts_hashed_str.data;
+    vv->len = zmcf->dcz_dicts_hashed_str.len;
 
     vv->valid = 1;
     vv->no_cacheable = 0;
