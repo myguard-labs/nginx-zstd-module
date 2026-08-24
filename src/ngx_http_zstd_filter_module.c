@@ -193,7 +193,59 @@ typedef struct {
      * once here instead of on every location merge.
      */
     size_t                       stream_out_size;
+
+    /*
+     * Cycle-wide trained-dictionary registry for zstd_dict_file (dcz is
+     * unaffected — see ngx_http_zstd_dcz_dict_file() below, out of
+     * scope here).
+     *
+     * dict_file's raw bytes are read from disk exactly ONCE per cycle
+     * into dict_buf/dict_buf_size, on the first enabled location that
+     * needs a CDict at all (ngx_http_zstd_merge_loc_conf() below). Every
+     * later location — sibling or distinct-profile — reuses this same
+     * buffer instead of re-opening and re-reading the file.
+     *
+     * dict_registry then de-duplicates the CDict BUILD itself, keyed on
+     * the complete set of parameters that ZSTD_createCDict_advanced()
+     * bakes into a CDict's compression parameters: (level, window_log).
+     * Those two are the only inputs to cparams in the merge function
+     * (ZSTD_getCParams(level, ...) then an optional windowLog override) —
+     * long_mode/zstd_long is a separate CCtx frame parameter applied at
+     * request time via init_cctx and does NOT flow through refCDict, so
+     * it is correctly excluded from the key (see the "Long-distance
+     * matching" note at the CDict-build site). Two locations that agree
+     * on (level, window_log) always produce byte-identical CDicts from
+     * the same dict_buf, so sharing one is exact, not an approximation.
+     *
+     * Both dict_buf and every ZSTD_CDict entry are allocated outside
+     * cf->pool (raw bytes: ngx_palloc against cf->pool same as before;
+     * CDicts: libzstd's own allocator) but are freed exactly once at
+     * cycle teardown via ngx_pool_cleanup_t handlers registered against
+     * cf->pool the first time each is created — never per-location. This
+     * array itself lives in cf->pool alongside the main conf, so it is
+     * torn down with the same pool that owns every CDict's cleanup
+     * handler; dict_buf outlives every CDict that referenced it during
+     * construction (ZSTD_dlm_byCopy copies the bytes into libzstd's own
+     * allocation, so dict_buf is not read again after the last build —
+     * it is freed by ordinary cf->pool cleanup, not explicitly).
+     */
+    u_char                      *dict_buf;
+    size_t                       dict_buf_size;
+    ngx_array_t                 *dict_registry;  /* dict_entry_t entries */
 } ngx_http_zstd_main_conf_t;
+
+
+/*
+ * One entry in ngx_http_zstd_main_conf_t.dict_registry: a built CDict
+ * plus the complete key of parameters that affect its contents. See the
+ * registry field's comment above for why (level, window_log) is the
+ * complete key.
+ */
+typedef struct {
+    ngx_int_t                    level;
+    ngx_int_t                    window_log;
+    ZSTD_CDict                  *dict;
+} ngx_http_zstd_dict_entry_t;
 
 
 /*
@@ -3235,98 +3287,139 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     if (conf->enable && zmcf->dict_file.len > 0) {
 
-        if (prev->dict != NULL
-            && conf->level == prev->level
-            && conf->window_log == prev->window_log)
-        {
+        ngx_http_zstd_dict_entry_t  *entry, *new_entry;
+        ngx_uint_t                   i;
+
+        entry = NULL;
+
+        if (zmcf->dict_registry != NULL) {
+            ngx_http_zstd_dict_entry_t  *entries;
+
+            entries = zmcf->dict_registry->elts;
+
+            for (i = 0; i < zmcf->dict_registry->nelts; i++) {
+                if (entries[i].level == conf->level
+                    && entries[i].window_log == conf->window_log)
+                {
+                    entry = &entries[i];
+                    break;
+                }
+            }
+        }
+
+        if (entry != NULL) {
             /*
-             * Parent already loaded a CDict and every CDict-affecting
-             * parameter matches: reuse it to avoid redundant loading.
-             * window_log is part of the key because a CDict bakes in
-             * compression parameters; a child that changes it must not
-             * silently share the parent's.
+             * A location anywhere earlier in this cycle already built a
+             * CDict for this exact (level, window_log) — the complete
+             * key, see the registry field's comment above. Reuse it: no
+             * file read, no CDict build, whether that prior location was
+             * this one's parent or an unrelated sibling.
              */
-            conf->dict = prev->dict;
+            conf->dict = entry->dict;
 
         } else {
             /*
-             * No usable parent CDict, or this location changed a
-             * CDict-affecting parameter: load the dict fresh for this
-             * location's own parameters. (conf->dict is NULL here — the
-             * premature merge that used to pre-populate it was removed.)
+             * No registry entry for this profile yet: this is the first
+             * location in the cycle to need it. Load the raw dictionary
+             * bytes if no earlier profile has already done so (dict_buf
+             * is cycle-wide, independent of the profile), then build the
+             * CDict and register it under this key so every later
+             * location — sibling or descendant — reuses it.
              */
 
-            fd = ngx_http_zstd_open_dict_file(cf, &zmcf->dict_file,
-                                              zmcf->dict_strict_path,
-                                              &info);
+            if (zmcf->dict_buf == NULL) {
 
-            if (fd == NGX_INVALID_FILE) {
-                return NGX_CONF_ERROR;
+                fd = ngx_http_zstd_open_dict_file(cf, &zmcf->dict_file,
+                                                  zmcf->dict_strict_path,
+                                                  &info);
+
+                if (fd == NGX_INVALID_FILE) {
+                    return NGX_CONF_ERROR;
+                }
+
+                /*
+                 * Compare as off_t BEFORE narrowing to size_t: on an
+                 * ILP32 build with large-file support a >4 GiB
+                 * dictionary wraps to a small size_t, slipping past the
+                 * cap below and loading a truncated dictionary.
+                 */
+                fsize = ngx_file_size(&info);
+
+                /* Validate dictionary file size to prevent DoS
+                 * via memory exhaustion */
+                if (fsize > (off_t) NGX_HTTP_ZSTD_MAX_DICT_SIZE) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                       "dictionary file too large: %O "
+                                       "bytes (limit: %d bytes)",
+                                       fsize, NGX_HTTP_ZSTD_MAX_DICT_SIZE);
+
+                    rc = NGX_CONF_ERROR;
+                    goto close;
+                }
+
+                /*
+                 * Reject an empty file rather than loading a do-nothing
+                 * dictionary. ZSTD_createCDict(buf, 0, level) returns a
+                 * VALID CDict, and ngx_read_fd(..., 0) returns 0 == size,
+                 * so every completeness check downstream passes and the
+                 * operator -- who had to set zstd_dict_file_unsafe on to
+                 * get here -- silently gets no dictionary at all. The
+                 * dcz loader below has always rejected this; the two now
+                 * agree.
+                 */
+                if (fsize == 0) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                       "dictionary file \"%V\" is empty",
+                                       &zmcf->dict_file);
+
+                    rc = NGX_CONF_ERROR;
+                    goto close;
+                }
+
+                size = (size_t) fsize;
+
+                buf = ngx_palloc(cf->pool, size);
+                if (buf == NULL) {
+                    rc = NGX_CONF_ERROR;
+                    goto close;
+                }
+
+                n = ngx_read_fd(fd, (void *) buf, size);
+                if (n < 0) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                                       ngx_read_fd_n " %V\" failed",
+                                       &zmcf->dict_file);
+
+                    rc = NGX_CONF_ERROR;
+                    goto close;
+
+                } else if ((size_t) n != size) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                       ngx_read_fd_n " \"%V\" incomplete "
+                                       "read",
+                                       &zmcf->dict_file);
+
+                    rc = NGX_CONF_ERROR;
+                    goto close;
+                }
+
+                if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                                       ngx_close_file_n " \"%V\" failed",
+                                       &zmcf->dict_file);
+
+                    rc = NGX_CONF_ERROR;
+                    goto close;
+                }
+
+                fd = NGX_INVALID_FILE;
+
+                zmcf->dict_buf = buf;
+                zmcf->dict_buf_size = size;
             }
 
-            /*
-             * Compare as off_t BEFORE narrowing to size_t: on an ILP32
-             * build with large-file support a >4 GiB dictionary wraps to
-             * a small size_t, slipping past the cap below and loading a
-             * truncated dictionary.
-             */
-            fsize = ngx_file_size(&info);
-
-            /* Validate dictionary file size to prevent DoS
-             * via memory exhaustion */
-            if (fsize > (off_t) NGX_HTTP_ZSTD_MAX_DICT_SIZE) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "dictionary file too large: %O bytes "
-                                   "(limit: %d bytes)",
-                                   fsize, NGX_HTTP_ZSTD_MAX_DICT_SIZE);
-
-                rc = NGX_CONF_ERROR;
-                goto close;
-            }
-
-            /*
-             * Reject an empty file rather than loading a do-nothing
-             * dictionary. ZSTD_createCDict(buf, 0, level) returns a
-             * VALID CDict, and ngx_read_fd(..., 0) returns 0 == size, so
-             * every completeness check downstream passes and the operator
-             * -- who had to set zstd_dict_file_unsafe on to get here --
-             * silently gets no dictionary at all. The dcz loader below
-             * has always rejected this; the two now agree.
-             */
-            if (fsize == 0) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "dictionary file \"%V\" is empty",
-                                   &zmcf->dict_file);
-
-                rc = NGX_CONF_ERROR;
-                goto close;
-            }
-
-            size = (size_t) fsize;
-
-            buf = ngx_palloc(cf->pool, size);
-            if (buf == NULL) {
-                rc = NGX_CONF_ERROR;
-                goto close;
-            }
-
-            n = ngx_read_fd(fd, (void *) buf, size);
-            if (n < 0) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                                   ngx_read_fd_n " %V\" failed",
-                                   &zmcf->dict_file);
-
-                rc = NGX_CONF_ERROR;
-                goto close;
-
-            } else if ((size_t) n != size) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   ngx_read_fd_n " \"%V\" incomplete read",
-                                   &zmcf->dict_file);
-
-                rc = NGX_CONF_ERROR;
-                goto close;
-            }
+            buf = zmcf->dict_buf;
+            size = zmcf->dict_buf_size;
 
             /*
              * Bake the location's effective compression parameters into the
@@ -3345,7 +3438,9 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
              *
              * Long-distance matching is a separate CCtx frame parameter, not
              * part of ZSTD_compressionParameters, so refCDict does not override
-             * it; zstd_long keeps applying via the CCtx in init_cctx.
+             * it; zstd_long keeps applying via the CCtx in init_cctx — and is
+             * correctly excluded from the registry key above for the same
+             * reason.
              */
 #if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
             {
@@ -3404,21 +3499,41 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
             }
 
             /*
-             * Free the config-pool source buffer now that the trained
-             * CDict has copied it. ZSTD_createCDict()/ZSTD_dlm_byCopy
-             * owns an independent copy after construction; the original
-             * buf is retained only for static-API ZSTD_dlm_byRef, which
-             * is handled separately in the static-API block above. Large
-             * pool allocations are reclaimable via ngx_pfree(), so this
-             * removes the backing bytes immediately (small pool chunks
-             * harmlessly remain). The static-API byRef path does NOT
-             * free: old workers keep the old cycle's pool and must
-             * retain their dictionary bytes until they exit.
+             * Register this (level, window_log) -> CDict mapping in the
+             * cycle-wide registry so every other location at the same
+             * profile — reached before or after this one in the config
+             * tree — reuses this exact CDict instead of building its own.
+             * The registry array lives in cf->pool, same lifetime as the
+             * main conf and every CDict cleanup handler above.
              */
-#if !defined(ZSTD_STATIC_LINKING_ONLY) || \
-    ZSTD_VERSION_NUMBER < 10400
-            ngx_pfree(cf->pool, buf);
-#endif
+            if (zmcf->dict_registry == NULL) {
+                zmcf->dict_registry = ngx_array_create(cf->pool, 4,
+                                          sizeof(ngx_http_zstd_dict_entry_t));
+                if (zmcf->dict_registry == NULL) {
+                    rc = NGX_CONF_ERROR;
+                    goto close;
+                }
+            }
+
+            new_entry = ngx_array_push(zmcf->dict_registry);
+            if (new_entry == NULL) {
+                rc = NGX_CONF_ERROR;
+                goto close;
+            }
+
+            new_entry->level = conf->level;
+            new_entry->window_log = conf->window_log;
+            new_entry->dict = conf->dict;
+
+            /*
+             * dict_buf is cycle-wide now (zmcf->dict_buf), not freed
+             * here: a later location at a DIFFERENT profile still needs
+             * these same raw bytes to build its own CDict. It is
+             * reclaimed by ordinary cf->pool cleanup at cycle teardown,
+             * the same point every CDict's cleanup handler runs — no
+             * explicit free needed, and freeing it early here would be a
+             * use-after-free for the very next distinct profile.
+             */
         }
     }
 
