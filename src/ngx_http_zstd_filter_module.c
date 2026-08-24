@@ -224,10 +224,24 @@ typedef struct {
      * cf->pool the first time each is created — never per-location. This
      * array itself lives in cf->pool alongside the main conf, so it is
      * torn down with the same pool that owns every CDict's cleanup
-     * handler; dict_buf outlives every CDict that referenced it during
-     * construction (ZSTD_dlm_byCopy copies the bytes into libzstd's own
-     * allocation, so dict_buf is not read again after the last build —
-     * it is freed by ordinary cf->pool cleanup, not explicitly).
+     * handler.
+     *
+     * On the static-linking build (ZSTD_dlm_byRef, see the CDict-build
+     * site) every CDict entry REFERENCES dict_buf directly rather than
+     * copying it — libzstd reads dict_buf for the entire lifetime of
+     * each CDict, not just at construction. This is safe only because
+     * dict_buf and every CDict built from it share the same cf->pool
+     * lifetime and teardown order: ngx_destroy_pool() runs every
+     * registered cleanup handler (including each ZSTD_freeCDict() below)
+     * BEFORE releasing pool allocations, so dict_buf is still mapped for
+     * every ZSTD_freeCDict() call, and it is never freed while any CDict
+     * that references it is still alive. Across a reload, old worker
+     * processes keep the entire old cycle (and its pool) alive until
+     * they exit, so an old CDict's reference into the old cycle's
+     * dict_buf is never dangling. On the public-API fallback build
+     * (plain ZSTD_createCDict(), #else branch below) the CDict still
+     * copies the bytes, so dict_buf is not read again there after the
+     * last build on that path.
      */
     u_char                      *dict_buf;
     size_t                       dict_buf_size;
@@ -3460,7 +3474,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 }
 
                 conf->dict = ZSTD_createCDict_advanced(buf, size,
-                                 ZSTD_dlm_byCopy, ZSTD_dct_auto, cparams,
+                                 ZSTD_dlm_byRef, ZSTD_dct_auto, cparams,
                                  ZSTD_defaultCMem);
             }
 #else
@@ -3475,12 +3489,16 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
             /* Register cleanup handler to free dictionary when
              * config is destroyed.
-             * Note: Using ZSTD_createCDict() (copy mode) instead
-             * of _byReference() to avoid use-after-free during
-             * config reloads. Dictionary buffer is copied into
-             * ZSTD's internal memory so config pool cleanup can
-             * safely free the original buf without affecting
-             * in-flight compressions. */
+             * Note: on this (static-API) path the CDict is built
+             * ZSTD_dlm_byRef — it holds a reference into dict_buf, not
+             * a private copy, for its entire lifetime. This is safe
+             * across reload because dict_buf and the CDict share the
+             * same cf->pool: ngx_destroy_pool() runs this cleanup
+             * handler (ZSTD_freeCDict) before releasing any pool
+             * allocation, so dict_buf outlives every CDict built from
+             * it, and an old worker retains its whole old cycle (pool
+             * included) until it exits. See the dict_buf field comment
+             * above for the full argument. */
             {
                 ngx_pool_cleanup_t  *cln;
 
@@ -3537,9 +3555,15 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
              * here: a later location at a DIFFERENT profile still needs
              * these same raw bytes to build its own CDict. It is
              * reclaimed by ordinary cf->pool cleanup at cycle teardown,
-             * the same point every CDict's cleanup handler runs — no
-             * explicit free needed, and freeing it early here would be a
-             * use-after-free for the very next distinct profile.
+             * the same point every CDict's cleanup handler runs.
+             *
+             * On the static-API (byRef) path this is stronger than "a
+             * later build needs it too": every CDict already built from
+             * dict_buf keeps reading it for its entire remaining
+             * lifetime, not just until its own construction finishes.
+             * Freeing dict_buf early here would be a use-after-free for
+             * EVERY profile built from it so far, not only the next
+             * distinct one — see the dict_buf field comment above.
              */
         }
     }
