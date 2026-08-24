@@ -1506,6 +1506,15 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18104 --backend-port 18105
           echo "✓ window-cap + dictionary effect test passed"
+          # Config-load regression: "zstd_long on" + "zstd_max_cctx_memory"
+          # made nginx -t die with SIGFPE, because libzstd's estimator
+          # divides by an LDM sub-parameter that is only derived lazily
+          # during compression setup. ci/t/00-filter.t cannot cover this:
+          # its "--- must_die" cannot distinguish a crash from a
+          # diagnostic. This asserts on the exit status and its sign.
+          python3 ci/tools/test_ldm_budget_config.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18124
+          echo "✓ zstd_long + zstd_max_cctx_memory config validation passed"
 
       - name: Run RFC 9842 dcz end-to-end test
         timeout-minutes: 6
@@ -1947,6 +1956,8 @@ jobs:
           python3 ci/tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 19093
           python3 ci/tools/test_window_cap.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19104 --backend-port 19105
+          python3 ci/tools/test_ldm_budget_config.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19122
           python3 ci/tools/test_zstd_long_ldm.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19102 --backend-port 19103
           python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \

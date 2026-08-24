@@ -1,5 +1,22 @@
 Changes with http-zstd
 
+    *) Bugfix: "nginx -t" no longer dies with SIGFPE when "zstd_long on"
+       is combined with "zstd_max_cctx_memory". The config-load budget
+       check calls ZSTD_estimateCStreamSize_usingCCtxParams(), which
+       divides by the LDM hash rate. libzstd derives its long-distance
+       matching sub-parameters lazily during compression setup, so a
+       ZSTD_CCtx_params that had only had enableLongDistanceMatching set
+       still carried a zero divisor and the whole process died on a
+       floating-point exception during configuration testing. Setting
+       zstd_window_log did not avoid it. The four LDM sub-parameters are
+       now seeded with the defaults libzstd documents, which both removes
+       the crash and makes the estimate accurate for long mode: it is
+       within 0.05% of a real streaming compressor's measured footprint,
+       so the configured budget keeps its meaning instead of being
+       skipped. Because enabling long mode raises the default window to
+       128 MB, "zstd_long on" now needs a budget of roughly that size, or
+       an explicit zstd_window_log to bring it down.
+
     *) Security: dcz is now offered only in a secure context, as RFC 9842
        section 8 requires. The negotiation gate checked the dictionary
        hash, the main request, the request headers and the coding weight

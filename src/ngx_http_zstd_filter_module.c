@@ -259,6 +259,22 @@ typedef struct {
 #define NGX_HTTP_ZSTD_LEVEL_UNSET  (-NGX_MAX_INT_T_VALUE - 1)
 
 
+/*
+ * libzstd's documented defaults for the long-distance-matching
+ * sub-parameters (see the ZSTD_c_ldm* comments in zstd.h). They are
+ * derived lazily inside compression setup, so a ZSTD_CCtx_params that
+ * has only had ZSTD_c_enableLongDistanceMatching set still carries
+ * zeroes -- which makes ZSTD_estimateCStreamSize_usingCCtxParams()
+ * divide by zero. The config-load budget check seeds them explicitly.
+ *
+ * NGX_HTTP_ZSTD_LDM_WINDOWLOG is the window (128 MB) libzstd itself
+ * switches to when LDM is enabled without an explicit ZSTD_c_windowLog.
+ */
+#define NGX_HTTP_ZSTD_LDM_WINDOWLOG      27
+#define NGX_HTTP_ZSTD_LDM_MINMATCH       64
+#define NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG  3
+
+
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt  ngx_http_next_body_filter;
 
@@ -2878,6 +2894,8 @@ close:
         }
 
         if (conf->long_mode) {
+            ngx_int_t  ldm_wlog, ldm_hlog, ldm_rlog;
+
             srv = ZSTD_CCtxParams_setParameter(
                       cp, ZSTD_c_enableLongDistanceMatching, 1);
             if (ZSTD_isError(srv)) {
@@ -2886,6 +2904,119 @@ close:
                                    "ZSTD_CCtxParams_setParameter("
                                    "enableLongDistanceMatching) failed: %s",
                                    ZSTD_getErrorName(srv));
+                return NGX_CONF_ERROR;
+            }
+
+            /*
+             * BLOCKER fix: ZSTD_estimateCStreamSize_usingCCtxParams()
+             * divides by params->ldmParams.hashRateLog. libzstd derives
+             * the LDM sub-parameters lazily, inside compression setup --
+             * a ZSTD_CCtx_params that has only had
+             * ZSTD_c_enableLongDistanceMatching set still carries
+             * hashRateLog == 0, so the estimator divides by zero and the
+             * whole process dies with SIGFPE during "nginx -t". Setting
+             * ZSTD_c_windowLog does not help: the divisor is unrelated to
+             * the window.
+             *
+             * There is no public "adjust these params the way you would
+             * internally" entry point, so we derive the same four values
+             * libzstd documents in zstd.h and push them explicitly. From
+             * the ZSTD_c_ldm* documentation:
+             *
+             *   - enabling LDM raises the default windowLog to 27
+             *     (128 MB) unless windowLog was expressly set;
+             *   - ldmHashLog     default = windowLog - 7, clamped to
+             *                    [ZSTD_LDM_HASHLOG_MIN,
+             *                     ZSTD_LDM_HASHLOG_MAX];
+             *   - ldmMinMatch    default = 64;
+             *   - ldmBucketSizeLog default = 3;
+             *   - ldmHashRateLog default = MAX(0, windowLog - ldmHashLog).
+             *
+             * Seeding these makes the estimate accurate rather than
+             * merely non-crashing. Measured against a real streaming
+             * ZSTD_CCtx compressing 256 MB with unknown content size
+             * (libzstd 1.5.7, level 3): seeded estimate 144328225 bytes
+             * vs. ZSTD_sizeof_CCtx() 144262689 -- 0.05% conservative.
+             * With "zstd_window_log 20": 2705953 vs. 2705441, 0.02%
+             * conservative. So the operator's budget still means what it
+             * says under LDM; we neither crash nor silently drop the
+             * bound, and we do not manufacture spurious rejections.
+             *
+             * Note that windowLog is pushed explicitly here even when the
+             * operator did not configure one: the estimator must see the
+             * same 27 that libzstd would default to under LDM, otherwise
+             * it would size for the level's much smaller default window
+             * and under-report by two orders of magnitude.
+             */
+
+            ldm_wlog = conf->window_log > 0 ? conf->window_log
+                                            : NGX_HTTP_ZSTD_LDM_WINDOWLOG;
+
+            ldm_hlog = ldm_wlog - 7;
+            if (ldm_hlog < ZSTD_LDM_HASHLOG_MIN) {
+                ldm_hlog = ZSTD_LDM_HASHLOG_MIN;
+            }
+            if (ldm_hlog > ZSTD_LDM_HASHLOG_MAX) {
+                ldm_hlog = ZSTD_LDM_HASHLOG_MAX;
+            }
+
+            ldm_rlog = ldm_wlog - ldm_hlog;
+            if (ldm_rlog < 0) {
+                ldm_rlog = 0;
+            }
+
+            srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_windowLog,
+                                               (int) ldm_wlog);
+            if (!ZSTD_isError(srv)) {
+                srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_ldmHashLog,
+                                                   (int) ldm_hlog);
+            }
+            if (!ZSTD_isError(srv)) {
+                srv = ZSTD_CCtxParams_setParameter(
+                          cp, ZSTD_c_ldmMinMatch,
+                          NGX_HTTP_ZSTD_LDM_MINMATCH);
+            }
+            if (!ZSTD_isError(srv)) {
+                srv = ZSTD_CCtxParams_setParameter(
+                          cp, ZSTD_c_ldmBucketSizeLog,
+                          NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG);
+            }
+            if (!ZSTD_isError(srv)) {
+                srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_ldmHashRateLog,
+                                                   (int) ldm_rlog);
+            }
+
+            if (ZSTD_isError(srv)) {
+                ZSTD_freeCCtxParams(cp);
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "ZSTD_CCtxParams_setParameter() failed "
+                                   "while deriving the \"zstd_long\" "
+                                   "parameters for the "
+                                   "\"zstd_max_cctx_memory\" estimate: %s",
+                                   ZSTD_getErrorName(srv));
+                return NGX_CONF_ERROR;
+            }
+
+            /*
+             * Defence in depth. The derivation above is the documented
+             * one, but it is libzstd's documentation rather than a
+             * contract enforced by a public API, and a future release
+             * could add a fifth divisor-bearing sub-parameter. Rather
+             * than risk another SIGFPE taking out "nginx -t", refuse the
+             * configuration if the estimate would still be computed from
+             * a zero divisor we know about.
+             */
+            if (ldm_rlog <= 0) {
+                ZSTD_freeCCtxParams(cp);
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "\"zstd_max_cctx_memory\" cannot be "
+                                   "verified for this \"zstd_long\" "
+                                   "profile: the derived LDM hash rate is "
+                                   "zero (window_log %i). Raise "
+                                   "\"zstd_window_log\", disable "
+                                   "\"zstd_long\", or remove "
+                                   "\"zstd_max_cctx_memory\"",
+                                   (ngx_int_t) ldm_wlog);
                 return NGX_CONF_ERROR;
             }
         }

@@ -152,6 +152,23 @@ PROFILE_TUPLES: list[tuple[int, str, int]] = [
     (1, "off", 0),
 ]
 
+# The multi-profile workload's per-request memory budget.
+#
+# Two of the tuples above enable long-distance matching at a large window
+# (level 9 / windowLog 27 and level 12 / windowLog 30). zstd_max_cctx_memory
+# is validated at config load against libzstd's own estimator, and those two
+# profiles genuinely need ~156 MB and ~1.14 GB of per-request compressor
+# memory respectively -- so the 32m this workload used to emit is a budget
+# they cannot satisfy, and nginx correctly refuses the configuration.
+#
+# This workload measures config-LOAD COST as a function of the number of
+# distinct profiles; the budget is fixture shape, not the thing under
+# measurement. So it is raised to a value every tuple fits in rather than
+# dropping the LDM tuples, which would change what the benchmark measures.
+# Keep this above the largest estimate any PROFILE_TUPLES entry produces.
+# (nginx size values accept only k/m suffixes, so this is spelled in MB.)
+MULTI_PROFILE_BUDGET = "2048m"
+
 # The self-check's floor. Between the smallest and largest scale point, the
 # measured config-load cost must rise by at least this factor, or the harness
 # has not demonstrated that it can see config scale at all.
@@ -284,7 +301,7 @@ def generate_config(
                 f"        zstd_comp_level {level};\n"
                 f"        zstd_long {long_mode};\n"
                 f"{win}"
-                f"        zstd_max_cctx_memory 32m;\n"
+                f"        zstd_max_cctx_memory {MULTI_PROFILE_BUDGET};\n"
                 f"    }}\n"
             )
 
