@@ -44,7 +44,9 @@ static int negotiate_br(ngx_str_t v,u_char*out,const char**msg){ ngx_int_t rc=he
  *msg="accept";return 1; }
 int main(void){ init();
  const char*cases[]={"",":","::",":abc","abc:","AAAA",
-  ":QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNk:",            /* 44 valid ->32 */
+  ":AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=:",         /* 44 valid, decodes to 32 -> ACCEPT */
+  ":AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8:",          /* 43, unpadded valid -> ACCEPT */
+  ":QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNk:",            /* 40 valid b64, decodes to 30 */
   ":QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZQ==:",        /* >44 */
   ":QUJD:",                                                 /* valid b64 short */
   ":!!!!:",":====:",":QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph:", /* 36ch */
