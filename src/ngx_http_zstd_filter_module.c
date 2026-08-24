@@ -4587,20 +4587,21 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
      * later via ngx_conf_merge_str_value after parsing, so child blocks can
      * override parent values without error — normal nginx semantics. */
     if (zlcf->bypass_vary.data != NULL) {
-        return "is duplicate";
+        return (char *) "is duplicate";
     }
 
     /* ngx_conf_set_str_slot would just dup this; validate first. */
     value = &value[1];  /* Skip directive name, take the argument */
 
     if (value->len == 0) {
-        return "empty value";
+        return (char *) "empty value";
     }
 
     /* Bare wildcard is never valid: it disables shared caching and matches
      * any Vary field, defeating the purpose of naming a specific header. */
     if (value->len == 1 && value->data[0] == '*') {
-        return "invalid value: bare wildcard '*' disables shared caching";
+        return (char *)
+                   "invalid value: bare wildcard '*' disables shared caching";
     }
 
     /* Validate as a single RFC 9110 token. Per RFC 9110 §5.1:
@@ -4614,12 +4615,12 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
         /* List/parameter separators: reject to prevent ambiguous Vary. */
         if (c == ',' || c == ';') {
-            return "invalid value: comma or semicolon (not a token)";
+            return (char *) "invalid value: comma or semicolon (not a token)";
         }
 
         /* Quoted string: DQUOTE is never part of a token. */
         if (c == '"') {
-            return "invalid value: quoted string (not a token)";
+            return (char *) "invalid value: quoted string (not a token)";
         }
 
         /* tchar set per RFC 9110 §5.1. Accept all, including '*' in
@@ -4631,7 +4632,9 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
               || c == '-' || c == '.' || c == '^' || c == '_'
               || c == '`' || c == '|' || c == '~'))
         {
-            return "invalid value: not a valid field-name token (RFC 9110)";
+            return (char *)
+                       "invalid value: not a valid field-name token "
+                       "(RFC 9110)";
         }
     }
 
@@ -4641,7 +4644,7 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     zlcf->bypass_vary.data = ngx_pstrdup(cf->pool, value);
 
     if (zlcf->bypass_vary.data == NULL) {
-        return "allocation failed";
+        return (char *) "allocation failed";
     }
 
     return NGX_CONF_OK;

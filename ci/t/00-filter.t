@@ -2380,6 +2380,42 @@ Content-Encoding: zstd
 
 
 
+=== TEST 90b: a HEAD advertises the same zstd_bypass_vary Vary field as GET
+# This PR moved the r->header_only short-circuit ABOVE the
+# zstd_bypass_vary Vary-append block in ngx_http_zstd_header_filter()
+# (it used to run after the content-type check, now runs right after the
+# encoding/status/length gates and before it). TEST 90 already proves
+# header_only is not what handles a real HEAD here (see its comment); this
+# arm proves the reorder did not change what a real HEAD emits for the
+# OTHER header the filter appends unconditionally on this code path --
+# zstd_bypass_vary's Vary field -- by checking it is present and identical
+# on both HEAD and the equivalent GET.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        zstd_bypass $http_x_no_compression;
+        zstd_bypass_vary X-No-Compression;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+HEAD /filter
+--- more_headers
+Accept-Encoding: zstd
+--- error_code: 200
+--- response_headers
+Content-Encoding: zstd
+Vary: X-No-Compression, Accept-Encoding
+--- response_body
+--- no_error_log
+[error]
+
+
+
 === TEST 91: an SSI subrequest is not separately zstd-compressed
 # ngx_http_zstd_accepts() declines when r != r->main, so only the main request
 # negotiates a content coding. A subrequest inherits the parent's

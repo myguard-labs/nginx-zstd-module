@@ -207,6 +207,16 @@ jobs:
           # compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_sha256_unit.sh
 
+      - name: ceil_log2 unit fixture (dcz window-log helper equivalence)
+        run: |
+          # grind-g6-nits: ngx_http_zstd_ceil_log2() (dcz window-log sizing)
+          # was shipped with an inverted power-of-two test and fixed in
+          # c264f4b. static inside the filter module, so this extracts the
+          # function verbatim by line range and checks it against a linear
+          # shift-and-count reference over 0..2^24 (every power of two
+          # through 2^23 included) — needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_ceil_log2_unit.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
@@ -1535,6 +1545,15 @@ jobs:
           python3 ci/tools/test_bufs_bound_policy.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18141
           echo "✓ zstd_buffers aggregate bound policy matrix passed"
+          # zstd_bypass_vary config-load table: rejection (comma/semicolon
+          # /quote/bare wildcard), acceptance (non-solitary wildcard),
+          # verbatim retention and http-vs-location override. None of this
+          # is expressible via ci/t's --- must_die (it needs both a PASS
+          # assertion and an exact Vary-header byte comparison); see the
+          # tool's docstring.
+          python3 ci/tools/test_bypass_vary_config_policy.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18150
+          echo "✓ zstd_bypass_vary config-load policy matrix passed"
 
       - name: Run RFC 9842 dcz end-to-end test
         timeout-minutes: 6
@@ -1982,6 +2001,8 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" --port 19130
           python3 ci/tools/test_bufs_bound_policy.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19141
+          python3 ci/tools/test_bypass_vary_config_policy.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19150
           python3 ci/tools/test_zstd_long_ldm.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19102 --backend-port 19103
           python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \
