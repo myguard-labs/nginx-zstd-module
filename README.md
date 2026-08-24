@@ -630,10 +630,14 @@ clear message, never silently no-op'd.
 > workspace — `zstd_comp_level`, `zstd_long` and `zstd_window_log` — and
 > is never re-parameterised, so a slot's retained size stays at the
 > figure `zstd_max_cctx_memory` vetted for that profile at config load.
-> An idle worker therefore holds up to 4 workspaces, one per distinct
-> profile it has served, rather than releasing them between requests;
-> this is a floor well below the `worker_connections ×
-> zstd_max_cctx_memory` ceiling above, not an addition to it.
+> An idle worker therefore holds up to 4 workspaces rather than
+> releasing them between requests. Budget that constant, not the number
+> of configured profiles: a busy slot is skipped before its profile is
+> compared, so concurrent requests on a single profile can seed several
+> slots with that same profile. Each retained workspace stays at its own
+> profile's vetted figure, so this is a floor well below the
+> `worker_connections × zstd_max_cctx_memory` ceiling above, not an
+> addition to it.
 
 ---
 

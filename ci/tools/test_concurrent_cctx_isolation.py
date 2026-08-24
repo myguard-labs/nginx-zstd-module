@@ -197,6 +197,22 @@ def main() -> int:
     nginx = pathlib.Path(args.nginx_binary)
     if not nginx.exists():
         raise FileNotFoundError(nginx)
+
+    if args.require_multi_slot:
+        # The slot witnesses are ngx_log_debug2 lines, compiled out without
+        # --with-debug. Checked here rather than at the assertion: a
+        # non-debug build yields zero witnesses, which the multi-slot check
+        # would otherwise report as "the ring never lent two slots" -- an
+        # accusation against the module for what is a build-flavor problem.
+        v = subprocess.run(
+            [str(nginx), "-V"], capture_output=True, text=True, check=False
+        )
+        if "--with-debug" not in v.stderr:
+            raise RuntimeError(
+                "--require-multi-slot reads ngx_log_debug witnesses: this "
+                "tool needs an nginx built --with-debug, or drop the flag"
+            )
+
     mods = [
         m
         for m in (
