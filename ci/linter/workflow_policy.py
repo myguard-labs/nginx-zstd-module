@@ -642,14 +642,26 @@ TRUST_ANCHOR_RE = re.compile(
     r"fetch-verified-nginx\.sh"
 )
 
-# A step that only DOWNLOADS (wget/curl -o) and does not itself extract or
-# execute is not a finding on its own -- the extract/exec step downstream is
-# what this check anchors on. Restricting the scan to run: text that mentions
-# a download-shaped command keeps the check from firing on, say, a `tar -xzf`
+# A step that only DOWNLOADS and does not itself extract or execute is not a
+# finding on its own -- the extract/exec step downstream is what this check
+# anchors on. Restricting the scan to run: text that mentions a
+# download-shaped command keeps the check from firing on, say, a `tar -xzf`
 # of a repo-local artifact this job built itself (build-test.yml's ccache /
 # coverage tarballs never leave the runner and have no external origin to
 # forge).
-DOWNLOAD_RE = re.compile(r"\b(?:wget|curl)\b.*(?:-O\b|-o\b)|actions/cache@")
+#
+# Every spelling that WRITES A FILE from the network must appear here, not
+# just the `-O`/`-o` ones: `wget <url>` with no -O (the idiom four of this
+# repo's own jobs use), `curl -O`/`-OJ`, and PowerShell's
+# `Invoke-WebRequest -OutFile` (windows-build.yml) all fetch to disk. An
+# omitted spelling does not make the check lenient -- it makes the whole JOB
+# unscanned, so a future unverified copy of that idiom is invisible rather
+# than flagged. That is a gate failing open, so the scoping regex is
+# deliberately broader than the extract/exec one.
+DOWNLOAD_RE = re.compile(
+    r"\bwget\b|\bcurl\b(?:\s+\S+)*\s+-\S*[oO]\b|\bcurl\b[^\n]*\s-\S*O|"
+    r"Invoke-WebRequest\b|actions/cache@"
+)
 
 
 def check_provenance() -> int:

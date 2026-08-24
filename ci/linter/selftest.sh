@@ -223,6 +223,12 @@ policy_ 0 provenance-verified-ok provenance
 # nothing to verify. This must still go red -- a cached tarball is exactly as
 # untrusted as a fresh one until re-checked.
 policy_ 1 provenance-cache-hit-skips-verify provenance
+# The scoping regex must know every spelling that writes a file from the
+# network, not just `-O`/`-o`. A bare `wget "<url>"` is the idiom four of this
+# repo's own jobs use; while the regex required -O those jobs matched no
+# download token and were skipped wholesale rather than checked -- a gate
+# failing open. Same class for `curl -O` and `Invoke-WebRequest -OutFile`.
+policy_ 1 provenance-bare-wget-unverified provenance
 
 # A mistyped pool label in a schedule-only workflow. The trust half of the
 # runners check does not apply to a workflow no fork can reach, and skipping it
