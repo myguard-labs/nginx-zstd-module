@@ -620,6 +620,17 @@ server {
 }
 ```
 
+> **Interaction with `zstd_long`.** Enabling long-distance matching
+> raises libzstd's default window to 128 MB (`windowLog` 27) unless
+> `zstd_window_log` sets one explicitly, and adds the LDM hash table on
+> top. That is a large jump: level 3 costs ~3.6 MB per request without
+> `zstd_long` and ~144 MB with it. The budget check accounts for this —
+> it derives the same LDM sub-parameters libzstd would and estimates
+> against them, so `zstd_long on` with a budget below ~128 MB is
+> refused at config load rather than accepted and blown at runtime.
+> Pair `zstd_long on` with an explicit `zstd_window_log` to bring it
+> back down (level 3 with `zstd_window_log 20` costs ~2.7 MB).
+
 **Why a config-load assert and not a runtime cap.** The directive does
 **not** silently tune anything. A too-tight budget is a hard error so
 operators see the misconfiguration up front, instead of discovering it
