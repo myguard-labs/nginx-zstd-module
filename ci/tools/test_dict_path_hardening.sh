@@ -189,6 +189,25 @@ r=$(conf_test "    zstd_dict_strict_path on;
     zstd_dcz_dict_file $WORK/html/writable.dict;")
 check "world-writable, strict on (zstd_dcz_dict_file)" reject "$r"
 
+# ── Regression: zstd_dict_strict_path AFTER the dcz directive must not
+#    silently skip the check for a dictionary already loaded by that
+#    point. ngx_conf_parse() runs top-to-bottom, so a bare
+#    "zstd_dict_strict_path on" placed after zstd_dcz_dict_file used to
+#    read the flag as still-unset at load time and treat it as off --
+#    the dictionary loaded successfully with no error, which is the
+#    same as strict mode being silently ignored. init_main_conf() now
+#    rejects this ordering outright (a config-load error naming the
+#    file), which is what "reject" below actually verifies -- this is
+#    NOT the same case as the strict-on-BEFORE fixtures above, and
+#    without this case the ordering hazard has zero coverage.
+r=$(conf_test "    zstd_dcz_dict_file $WORK/html/writable.dict;
+    zstd_dict_strict_path on;")
+check "world-writable, strict on declared AFTER dcz directive (ordering)" reject "$r"
+
+r=$(conf_test "    zstd_dcz_dict_file $WORK/html/link.dict;
+    zstd_dict_strict_path on;")
+check "symlink, strict on declared AFTER dcz directive (ordering)" reject "$r"
+
 # ── Fixture: same world-writable file, strict off (default) accepts ───
 r=$(conf_test "    zstd_dict_file_unsafe on;
     zstd_dict_file $WORK/html/writable.dict;")

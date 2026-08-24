@@ -85,6 +85,29 @@ typedef struct {
     ngx_flag_t                   dict_strict_path;
 
     /*
+     * Set by ngx_http_zstd_dcz_dict_file() the first time it loads a
+     * dcz dictionary while dict_strict_path still reads as anything
+     * other than the explicit "on" (1) at that moment in the parse --
+     * i.e. every load that ran BEFORE a LATER "zstd_dict_strict_path
+     * on;" line could apply to it. ngx_conf_parse() runs top-to-bottom,
+     * so this is exactly the ordering hazard: nginx directives are
+     * conventionally order-independent, so an operator has no cue that
+     * this one must precede zstd_dcz_dict_file. Silently treating that
+     * dictionary as "strict passed" would fail OPEN -- confirmed live:
+     * a world-writable dictionary loaded with zstd_dict_strict_path on
+     * declared AFTER the dcz directive passed with no error. Rather
+     * than defer the strict-mode fstat() checks to init_main_conf()
+     * (which would mean re-opening every dcz dictionary by path a
+     * second time there, reintroducing exactly the TOCTOU window this
+     * helper exists to close), init_main_conf() rejects the ordering
+     * outright when it turns out to matter: see the check there.
+     */
+    ngx_flag_t                   dcz_dict_loaded_before_strict_on;
+
+    /* First such path, for the ordering-rejection error message. */
+    ngx_str_t                    dcz_dict_loaded_before_strict_on_file;
+
+    /*
      * Load-time SHA-256 computations over dcz dictionaries in THIS
      * configuration ($zstd_dcz_dicts_hashed). Cycle-owned on purpose:
      * a process-global static is reset and incremented while parsing a
@@ -2489,6 +2512,35 @@ ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf)
         zmcf->dict_strict_path = 0;
     }
 
+    /*
+     * Reject the ordering rather than silently accept an unchecked
+     * load: zstd_dcz_dict_file records (above) the first time it loads
+     * a dictionary while dict_strict_path did not yet read as the
+     * explicit "on". If the flag's FINAL value is "on", every such
+     * recorded load ran without the O_NOFOLLOW / writable-target checks
+     * this directive exists to apply -- fail the config rather than
+     * start with a dictionary the operator asked to have vetted but
+     * that never was. nginx directives are conventionally
+     * order-independent, so this is a real operator trap, not pedantry:
+     * confirmed live, a world-writable dcz dictionary loaded before a
+     * later "zstd_dict_strict_path on;" line passed with no warning.
+     */
+    if (zmcf->dict_strict_path == 1
+        && zmcf->dcz_dict_loaded_before_strict_on)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"zstd_dict_strict_path on\" was declared "
+                           "AFTER \"zstd_dcz_dict_file %V\", which had "
+                           "already loaded unchecked by that point. "
+                           "nginx directives are order-independent by "
+                           "convention, but this one is not: move "
+                           "\"zstd_dict_strict_path on;\" before every "
+                           "\"zstd_dcz_dict_file\" directive it must "
+                           "apply to",
+                           &zmcf->dcz_dict_loaded_before_strict_on_file);
+        return NGX_CONF_ERROR;
+    }
+
     if (zmcf->dict_file.len == 0) {
         return NGX_CONF_OK;
     }
@@ -3549,6 +3601,7 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_file_info_t            info;
     ngx_http_zstd_dcz_dict_t  *dict, *dicts;
     ngx_http_zstd_main_conf_t *zmcf;
+    ngx_flag_t                 strict;
 
     (void) cmd;
 
@@ -3629,17 +3682,31 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
 
     /*
-     * dict_strict_path is read raw here rather than via the normalized
-     * (0/1) value init_main_conf() produces: this directive handler
-     * runs during ngx_conf_parse(), strictly BEFORE init_main_conf (see
-     * ngx_http_zstd_open_dict_file()'s block comment), so
-     * zstd_dict_strict_path may still read as NGX_CONF_UNSET (-1) here
-     * regardless of directive order in the config file. Treat anything
-     * other than the explicit "on" (1) as off, matching the eventual
-     * normalized default.
+     * dict_strict_path is read raw here (not the normalized 0/1 value
+     * init_main_conf() later produces): this directive handler runs
+     * during ngx_conf_parse(), strictly BEFORE init_main_conf, so if
+     * "zstd_dict_strict_path on;" appears LATER in the same config
+     * file, it has not been parsed yet and this read sees
+     * NGX_CONF_UNSET (-1), not 1. Reading that as "off" is only safe
+     * for THIS load -- it does NOT mean the operator declined strict
+     * mode overall, only that this line hasn't been reached. A
+     * subsequent "on" would mean this dictionary was loaded unchecked
+     * despite the operator asking for strict mode -- confirmed live to
+     * fail open: a world-writable dictionary loaded here with no error
+     * when zstd_dict_strict_path on came after this directive. Record
+     * that possibility now (once, keeping the first offending path for
+     * the message) so init_main_conf() can reject the ordering outright
+     * once the flag's FINAL value is known, rather than silently
+     * accepting an unchecked load.
      */
-    fd = ngx_http_zstd_open_dict_file(cf, &path,
-                                      zmcf->dict_strict_path == 1, &info);
+    strict = (zmcf->dict_strict_path == 1);
+
+    if (!strict && !zmcf->dcz_dict_loaded_before_strict_on) {
+        zmcf->dcz_dict_loaded_before_strict_on = 1;
+        zmcf->dcz_dict_loaded_before_strict_on_file = path;
+    }
+
+    fd = ngx_http_zstd_open_dict_file(cf, &path, strict, &info);
     if (fd == NGX_INVALID_FILE) {
         return NGX_CONF_ERROR;
     }
