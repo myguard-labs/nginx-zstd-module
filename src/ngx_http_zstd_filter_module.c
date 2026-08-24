@@ -23,19 +23,17 @@
  *
  * Portable implementation: handles all size_t values, including edge cases.
  * For x <= 2^10: returns 10 (ZSTD_WINDOWLOG_MIN). For x >= 2^23: caps at 23
- * (RFC 9842 client-guarantee limit). Avoids branch-heavy loops by using
- * GCC __builtin_clzll (on GCC/Clang) with a fallback for other compilers.
+ * (RFC 9842 client-guarantee limit).
  *
- * On MSVC or builds without __builtin_clzll, falls back to a simple
- * logarithmic bit-length search (still O(log x), not O(x)).
+ * On platforms with __builtin_clzll (GCC, Clang), uses the compiler builtin
+ * for O(1) bit-position lookup. On other platforms (MSVC, others), falls back
+ * to an O(log x) binary search loop.
  *
  * Result: 10 <= returned wlog <= 23 always (respects min and cap).
  */
 static ngx_inline ngx_uint_t
 ngx_http_zstd_ceil_log2(size_t x)
 {
-    ngx_uint_t  wlog;
-
     if (x <= 1024) {  /* 2^10 */
         return 10;
     }
@@ -45,43 +43,34 @@ ngx_http_zstd_ceil_log2(size_t x)
     }
 
 #if defined(__GNUC__) || defined(__clang__)
-    /* Use compiler builtin for count-leading-zeros; narrowing size_t to
-     * unsigned long long to match __builtin_clzll signature. */
-    if (x <= ULLONG_MAX) {
-        unsigned long long  ull = (unsigned long long) x;
-        int                 leading_zeros;
+    /* Use compiler builtin for count-leading-zeros on 64-bit. GCC and Clang
+     * both provide __builtin_clzll; __builtin_clz is 32-bit but we require
+     * 64-bit size_t here. */
+    unsigned long long  ull = (unsigned long long) x;
+    int                 leading_zeros = __builtin_clzll(ull);
+    ngx_uint_t          wlog = 64 - leading_zeros;
 
-        if (sizeof(unsigned long long) == 8) {
-            leading_zeros = __builtin_clzll(ull);
-            wlog = 64 - leading_zeros;
-        } else {
-            /* Fallback for hypothetical non-64-bit unsigned long long */
-            leading_zeros = __builtin_clz((unsigned int) ull);
-            wlog = 32 - leading_zeros;
-        }
-
-        /* Adjust for ceil behavior: if (x & (x - 1)) != 0, x is not a power
-         * of two and we need one extra bit. */
-        if ((ull & (ull - 1)) != 0) {
-            wlog++;
-        }
-    } else {
-        /* size_t > ULLONG_MAX is impossibly large; just use 23 cap. */
-        wlog = 23;
+    /* Adjust for ceil behavior: if x is not a power of two, we need one
+     * extra bit to fit it in 2^wlog. */
+    if ((ull & (ull - 1)) != 0) {
+        wlog++;
     }
+
+    return wlog;
 #else
-    /* Fallback: binary search for the position of the highest set bit.
-     * Logarithmic iterations (at most 6 for 64-bit size_t). */
-    wlog = 10;
-    size_t  pow2 = 1024;  /* 2^10 */
+    /* Fallback: binary search for the highest set bit position.
+     * O(log x) iterations (at most 6 for 64-bit size_t). Declared inside
+     * the branch to keep C99+ compound-literal style declaration. */
+    ngx_uint_t  wlog = 10;
+    size_t      pow2 = 1024;  /* 2^10 */
 
     while (pow2 < x && wlog < 23) {
         pow2 <<= 1;
         wlog++;
     }
-#endif
 
-    return ngx_min(wlog, (ngx_uint_t) 23);  /* Paranoid final cap */
+    return wlog;
+#endif
 }
 
 
@@ -1886,13 +1875,17 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     /*
      * Invalidate out_buf to force get_buf() to acquire a fresh buffer on the
-     * next iteration. The guard at get_buf (ctx->out_buf != NULL && ...) will
-     * fail and trigger allocation or free-chain reuse. The buffer_out fields
-     * (dst, pos, size) are stale after queueing; they are always set by
-     * get_buf() before compress() uses them, so no explicit zeroing needed.
-     * Every NGX_DECLINED/nomem path from get_buf() ensures queued buffers are
-     * sent before returning (see lines 1548-1559: ngx_http_next_body_filter()
-     * and ngx_chain_update_chains()), so stale buffer_out cannot be used.
+     * next iteration. The guard at get_buf's top (ctx->out_buf != NULL &&
+     * ctx->buffer_out.pos < ctx->buffer_out.size) fails when out_buf is NULL,
+     * triggering buffer allocation or free-chain reuse.
+     *
+     * The buffer_out fields (dst, pos, size) are stale after this function
+     * queues b; they are always set by get_buf() before compress() reads them.
+     * Safety proof: NGX_DECLINED from get_buf() (nomem case) and error paths
+     * route through ngx_http_next_body_filter() to send queued buffers before
+     * returning (body filter), then ngx_chain_update_chains() recycles buffers
+     * and returns, then out_buf = NULL is set before any reentry to compress().
+     * No path uses stale buffer_out after queueing.
      */
     ctx->out_buf = NULL;
 
@@ -4565,13 +4558,16 @@ ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
 /*
  * Custom setter for zstd_bypass_vary directive. Validates that the value is
  * exactly ONE RFC 9110 field-name token (case-preserving), and rejects:
- *   - Quoted strings or special characters that create list ambiguity
+ *   - Bare wildcard "*", which disables shared caching
  *   - Comma or semicolon (list/parameter separators)
- *   - Wildcards (*), which would disable shared caching
- *   - Anything else that is not a token per RFC 9110 §5.1
+ *   - Quoted strings (DQUOTE), which are never part of a token
+ *   - Any non-tchar byte
+ *
+ * Per RFC 9110 §5.1, tchar includes: ! # $ % & ' * + - . ^ _ ` | ~
+ *   and DIGIT / ALPHA.
  *
  * Valid examples: "Accept-Encoding", "X-My-Header", "content-type"
- * Invalid: "Accept-Encoding, Custom", "Accept-Encoding;q=1", "*"
+ * Invalid: "*" (alone), "Accept-Encoding, Custom", "Accept-Encoding;q=1"
  */
 static char *
 ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
@@ -4582,6 +4578,10 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     value = cf->args->elts;
 
+    /* Check for duplicate: use .data == NULL test to detect config-file
+     * duplicates in the same block. Values inherited from parent blocks
+     * will have .data set; this allows normal nginx merge semantics where
+     * a child block overrides the parent without error. */
     if (zlcf->bypass_vary.data != NULL) {
         return "is duplicate";
     }
@@ -4593,50 +4593,41 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return "empty value";
     }
 
-    /* Wildcard is never valid: it disables shared caching and matches any
-     * header, which defeats the purpose of naming a specific one. */
+    /* Bare wildcard is never valid: it disables shared caching and matches
+     * any Vary field, defeating the purpose of naming a specific header. */
     if (value->len == 1 && value->data[0] == '*') {
-        return "invalid value: wildcard '*' disables shared caching";
+        return "invalid value: bare wildcard '*' disables shared caching";
     }
 
-    /* Validate as a single RFC 9110 token: no commas, semicolons, quotes,
-     * or non-token bytes. Per RFC 9110 §5.1:
+    /* Validate as a single RFC 9110 token. Per RFC 9110 §5.1:
      *   tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-"
      *         / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
-     * We accept all tchar except "*" (already rejected above) because "*"
-     * by itself is the wildcard, and in a token position with other chars
-     * (e.g. "a*b") is nonsensical for a header name.
-     */
+     * Reject commas and semicolons (list/parameter separators) and quotes
+     * (not tchar; never part of a token). Accept all other tchar including
+     * '*' in non-solitary positions (e.g., X-Foo*Bar is a valid token). */
     for (p = value->data, end = value->data + value->len; p < end; p++) {
         u_char  c = *p;
 
-        /* Comma and semicolon are list/parameter separators — reject them
-         * to prevent creation of ambiguous Vary headers. */
+        /* List/parameter separators: reject to prevent ambiguous Vary. */
         if (c == ',' || c == ';') {
-            return "invalid value: contains list or parameter separator";
+            return "invalid value: comma or semicolon (not a token)";
         }
 
-        /* Quoted string (DQUOTE) is never part of a token. */
+        /* Quoted string: DQUOTE is never part of a token. */
         if (c == '"') {
-            return "invalid value: contains quoted string";
+            return "invalid value: quoted string (not a token)";
         }
 
-        /* Wildcard: we already rejected the single-char case; reject it
-         * anywhere else too to keep the intent clear. */
-        if (c == '*') {
-            return "invalid value: contains wildcard";
-        }
-
-        /* tchar check: allow alphanumeric, tchar symbols, and hyphen
-         * (common in header names like "Content-Type"). */
+        /* tchar set per RFC 9110 §5.1. Accept all, including '*' in
+         * non-solitary positions (e.g., X-Foo*Bar is valid). */
         if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
               || (c >= '0' && c <= '9')
-              || c == '-' || c == '_' || c == '.'
               || c == '!' || c == '#' || c == '$' || c == '%'
-              || c == '&' || c == '\'' || c == '+' || c == '^'
+              || c == '&' || c == '\'' || c == '*' || c == '+'
+              || c == '-' || c == '.' || c == '^' || c == '_'
               || c == '`' || c == '|' || c == '~'))
         {
-            return "invalid value: contains non-token character";
+            return "invalid value: not a valid field-name token (RFC 9110)";
         }
     }
 
