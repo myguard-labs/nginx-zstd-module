@@ -2280,7 +2280,7 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
 {
     ngx_uint_t                  i, borrowed;
     ngx_pool_cleanup_t         *cln;
-    ngx_http_zstd_cctx_slot_t  *slot, *free_slot;
+    ngx_http_zstd_cctx_slot_t  *slot, *free_slot, *lender;
 
     /*
      * The cleanup slot is registered BEFORE the context is claimed, so a
@@ -2294,6 +2294,7 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
 
     borrowed = 0;
     free_slot = NULL;
+    lender = NULL;
 
     /*
      * Borrow a slot whose context is free and was built for this location's
@@ -2329,6 +2330,7 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         {
             ctx->cctx = slot->cctx;
             slot->busy = 1;
+            lender = slot;
             borrowed = 1;
 
             ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -2352,6 +2354,7 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             free_slot->long_mode = zlcf->long_mode;
             free_slot->window_log = zlcf->window_log;
             free_slot->busy = 1;
+            lender = free_slot;
             borrowed = 1;
         }
 
@@ -2360,14 +2363,19 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
                        ctx->cctx, borrowed);
     }
 
+    /*
+     * The two handlers take different data: release_cctx() returns a loan
+     * and is given its lending slot, cleanup_cctx() owns an uncached
+     * context outright and is given the context itself.
+     */
     if (borrowed) {
         cln->handler = ngx_http_zstd_release_cctx;
+        cln->data = lender;
 
     } else {
         cln->handler = ngx_http_zstd_cleanup_cctx;
+        cln->data = ctx->cctx;
     }
-
-    cln->data = ctx->cctx;
 
     return NGX_OK;
 }
@@ -3934,33 +3942,29 @@ ngx_http_zstd_cleanup_cctx(void *data)
 static void
 ngx_http_zstd_release_cctx(void *data)
 {
-    ngx_uint_t   i;
-    ZSTD_CCtx   *cctx = data;
+    ngx_http_zstd_cctx_slot_t  *slot = data;
 
-    if (cctx == NULL) {
+    if (slot == NULL || slot->cctx == NULL) {
         return;
     }
 
     /*
-     * Find the slot this loan came from. The cleanup handler is given only
-     * the context pointer (nginx's cleanup contract), so the slot is located
-     * by pointer identity; NGX_HTTP_ZSTD_CCTX_SLOTS is a small compile-time
-     * constant, so this walk is a handful of comparisons on a hot-but-tiny
-     * array, not a lookup structure worth carrying.
+     * The lending slot is handed straight to this handler: acquire_cctx()
+     * already had it, and nginx's cleanup data is an opaque void *, not a
+     * CCtx-only contract. Returning the loan is therefore O(1) with no
+     * search.
+     *
+     * This replaced a pointer-identity walk over the ring. That walk also
+     * carried a "not found -> ZSTD_freeCCtx()" fallback for a slot replaced
+     * mid-loan; the fallback was already unreachable, because a slot on loan
+     * is never evicted or re-seeded (acquire_cctx() skips every busy slot,
+     * and only ever seeds one that is empty AND not busy). Any future
+     * eviction policy must preserve that invariant -- evicting a busy slot
+     * would free a context a live request is still writing into, which no
+     * amount of searching here could make safe.
      */
-    for (i = 0; i < NGX_HTTP_ZSTD_CCTX_SLOTS; i++) {
-        if (ngx_http_zstd_worker_cctx_slots[i].cctx == cctx) {
-            (void) ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);
-            ngx_http_zstd_worker_cctx_slots[i].busy = 0;
-            return;
-        }
-    }
-
-    /*
-     * Not in any slot: the slot was replaced while this request held its
-     * loan (only reachable if a future edit adds eviction). Own it.
-     */
-    ZSTD_freeCCtx(cctx);
+    (void) ZSTD_CCtx_reset(slot->cctx, ZSTD_reset_session_only);
+    slot->busy = 0;
 }
 
 
