@@ -438,6 +438,17 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
  * effectiveness past NGX_HTTP_ZSTD_CCTX_SLOTS profiles depends on startup
  * traffic order. A profile that finds no slot is served correctly on the
  * per-request path, the pre-existing safe behaviour.
+ *
+ * "Per-profile" bounds what a slot may SERVE, not how many slots a profile
+ * may occupy. The search skips a busy slot before comparing its profile, so
+ * a request arriving while a matching slot is on loan seeds a further slot
+ * with that same profile. That is not an accident -- it is what makes the
+ * ring help under concurrency at all, since overlapping requests on one
+ * location would otherwise still serialise onto a single slot. The memory
+ * bound is unaffected: the ring retains at most NGX_HTTP_ZSTD_CCTX_SLOTS
+ * workspaces whatever the mix, and duplicates of one profile are all at that
+ * profile's config-vetted figure. Do not read the ring as one slot per
+ * configured profile when budgeting worker RSS -- read it as the constant.
  */
 #ifndef NGX_HTTP_ZSTD_CCTX_SLOTS
 #define NGX_HTTP_ZSTD_CCTX_SLOTS  4
