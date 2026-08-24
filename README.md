@@ -657,7 +657,7 @@ The 32 MB threshold sits in the natural gap between `zstd_comp_level`
 11 (~28.7 MB) and 12 (~52.7 MB), so the ordinary web-serving range is
 silent and only genuinely large profiles are named:
 
-| profile (level 3 unless stated) | per request | retained per worker (×4) | advisory |
+| profile (level 3 unless stated) | per request | per worker (×4) | advisory |
 | --- | ---: | ---: | :---: |
 | `zstd_comp_level 1` | 1.3 MB | 5.2 MB | no |
 | default (`zstd_comp_level 3`) | 3.5 MB | 14.0 MB | no |
