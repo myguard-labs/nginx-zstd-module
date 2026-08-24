@@ -104,6 +104,22 @@ def detect_module(explicit, nginx: pathlib.Path, name: str):
     return sib if sib.exists() else None
 
 
+def nginx_has_ssl(nginx: pathlib.Path) -> bool:
+    """Whether this binary can parse `listen ... ssl`.
+
+    Same probe shape the sibling tools use for --with-debug
+    (test_concurrent_cctx_isolation.py:206, test_slow_drain.py:233): ask
+    the binary itself via -V rather than inferring from the environment
+    or the job name. The sanitizer and valgrind nginx builds in this
+    repo's CI are configured WITHOUT --with-http_ssl_module, where an
+    `ssl` listen parameter is a config-time emerg that kills the tool
+    before any assertion runs -- including every plain-HTTP check, which
+    needs no TLS at all.
+    """
+    v = subprocess.run([str(nginx), "-V"], capture_output=True, text=True, check=False)
+    return "--with-http_ssl_module" in v.stderr
+
+
 def wait_for_port(port: int, timeout: float = 10.0, stderr_file=None) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -186,13 +202,35 @@ def make_selfsigned(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
 
 
 def write_config(
-    root: pathlib.Path, port: int, tls_port: int, insecure_port: int, modules
+    root: pathlib.Path,
+    port: int,
+    tls_port: int,
+    insecure_port: int,
+    modules,
+    with_ssl: bool,
 ) -> pathlib.Path:
     conf_dir = root / "conf"
     conf_dir.mkdir()
     (root / "logs").mkdir()
-    cert, key = make_selfsigned(root)
     load = "".join(f"load_module {m};\n" for m in modules)
+
+    # Only emitted for an SSL-capable binary: `listen ... ssl` against an
+    # nginx without ngx_http_ssl_module is [emerg] at config parse, so an
+    # unconditional block would take every non-TLS assertion down with it.
+    tls_server = ""
+    if with_ssl:
+        cert, key = make_selfsigned(root)
+        tls_server = f"""
+    # Native TLS: the secure context the RFC actually describes, with no
+    # acknowledgement directive at all. Proves the gate passes on
+    # r->connection->ssl rather than only on the opt-in.
+    server {{
+        listen 127.0.0.1:{tls_port} ssl;
+        ssl_certificate {cert};
+        ssl_certificate_key {key};
+        root html;
+    }}
+"""
     conf = conf_dir / "nginx.conf"
     conf.write_text(
         f"""{load}
@@ -221,16 +259,7 @@ http {{
         root html;
     }}
 
-    # Native TLS: the secure context the RFC actually describes, with no
-    # acknowledgement directive at all. Proves the gate passes on
-    # r->connection->ssl rather than only on the opt-in.
-    server {{
-        listen 127.0.0.1:{tls_port} ssl;
-        ssl_certificate {cert};
-        ssl_certificate_key {key};
-        root html;
-    }}
-
+{tls_server}
     # Cleartext with NO acknowledgement: the compiled-in default. Nothing
     # a client can send may negotiate dcz here.
     server {{
@@ -344,7 +373,8 @@ def main() -> int:
         dict_bytes, resource = build_fixtures(root, args.fixture_lines)
         tls_port = args.tls_port if args.tls_port else args.port + 1
         insecure_port = args.insecure_port if args.insecure_port else args.port + 2
-        conf = write_config(root, args.port, tls_port, insecure_port, modules)
+        with_ssl = nginx_has_ssl(nginx_path)
+        conf = write_config(root, args.port, tls_port, insecure_port, modules, with_ssl)
         dict_hash = hashlib.sha256(dict_bytes).digest()
         dict_b64 = base64.b64encode(dict_hash).decode()
         bad_b64 = base64.b64encode(b"\x01" * 32).decode()
@@ -358,8 +388,9 @@ def main() -> int:
             )
         try:
             wait_for_port(args.port, stderr_file=stderr_file)
-            wait_for_port(tls_port, stderr_file=stderr_file)
             wait_for_port(insecure_port, stderr_file=stderr_file)
+            if with_ssl:
+                wait_for_port(tls_port, stderr_file=stderr_file)
 
             # -- RFC 9842 section 8: dcz is a secure-context-only coding.
             dcz_headers = {
@@ -367,17 +398,30 @@ def main() -> int:
                 "Available-Dictionary": f":{dict_b64}:",
             }
 
-            tls_headers, tls_body = fetch(tls_port, dict(dcz_headers), tls=True)
-            check(
-                "secure context: native TLS negotiates dcz with no opt-in",
-                content_encoding(tls_headers) == "dcz",
-                f"(got {content_encoding(tls_headers)})",
-            )
-            check(
-                "secure context: native-TLS dcz body carries the RFC magic",
-                tls_body[:8] == DCZ_MAGIC and tls_body[8:40] == dict_hash,
-                f"(got {tls_body[:8].hex()})",
-            )
+            if with_ssl:
+                tls_headers, tls_body = fetch(tls_port, dict(dcz_headers), tls=True)
+                check(
+                    "secure context: native TLS negotiates dcz with no opt-in",
+                    content_encoding(tls_headers) == "dcz",
+                    f"(got {content_encoding(tls_headers)})",
+                )
+                check(
+                    "secure context: native-TLS dcz body carries the RFC magic",
+                    tls_body[:8] == DCZ_MAGIC and tls_body[8:40] == dict_hash,
+                    f"(got {tls_body[:8].hex()})",
+                )
+            else:
+                # Loud and named, not silent: the sanitizer and valgrind
+                # builds have no ngx_http_ssl_module, so the native-TLS
+                # leg cannot run there. Everything below still gates --
+                # the fail-closed default and the spoof cases are the
+                # security-relevant assertions and need no TLS.
+                print(
+                    "  native-TLS checks skipped (nginx -V has no "
+                    "--with-http_ssl_module: this binary cannot parse "
+                    "`listen ... ssl`); cleartext fail-closed and spoof "
+                    "checks below still run"
+                )
 
             insecure_headers, insecure_body = fetch(insecure_port, dict(dcz_headers))
             check(
