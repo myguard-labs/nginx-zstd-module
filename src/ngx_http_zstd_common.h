@@ -478,50 +478,85 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
 
 
 /*
- * ngx_http_zstd_vary_handled_externally()
+ * ngx_http_zstd_vary_accept_encoding()
  *
- * True when a module named "ngx_http_compression_vary_filter_module"
- * (HanadaLee's Vary-flattening filter) is loaded, statically or via
- * load_module. When its "compression_vary" directive is on, that
- * module emits Vary: Accept-Encoding keyed on r->gzip_vary alone,
- * regardless of clcf->gzip_vary — replacing the "gzip_vary" directive
- * (verified empirically against all four gzip_vary x compression_vary
- * quadrants; its author explicitly recommends "gzip_vary off" when
- * "compression_vary on" is used). With it loaded, "gzip_vary off" is
- * plausibly deliberate rather than a caching hazard.
+ * Make "Vary: Accept-Encoding" safe BY CONSTRUCTION on any response
+ * whose representation depends on Accept-Encoding, instead of leaving
+ * it to the operator's "gzip_vary" directive.
  *
- * PRESENCE IS NOT PROOF, though: "compression_vary" itself defaults
- * to off, and this module cannot verify the effective value — the
- * conf struct is private to that module, and merge order between
- * unrelated modules follows their position in cycle->modules, so its
- * merged values may not even exist yet when ours merge. Callers
- * therefore must not silence the gzip_vary-off warning outright on
- * this check; they withhold the per-location lines and emit one
- * summary warning from postconfiguration that tells the operator
- * exactly what to verify.
+ * The hazard this closes: r->gzip_vary alone is only a REQUEST for the
+ * header. ngx_http_header_filter_module honours it solely when
+ * clcf->gzip_vary is on, and otherwise clears the flag outright
+ * (ngx_http_header_filter_module.c: "if (r->gzip_vary) { if
+ * (clcf->gzip_vary) ... else r->gzip_vary = 0; }"). So under the
+ * default "gzip_vary off" the module negotiated on Accept-Encoding and
+ * then shipped a response that did not say so — and a shared cache
+ * stored the zstd representation under a key a client sending no
+ * "Accept-Encoding: zstd" would hit, handing it a body it cannot
+ * decode. That correctness property used to belong to a directive this
+ * module does not own; now it does not.
  *
- * Called at merge_loc_conf time: every load_module directive has been
- * processed by then (core conf parses before the http block), so
- * cf->cycle->modules is complete for both linkage styles.
+ * DUPLICATE-SAFE, which is the whole subtlety. We must not simply push
+ * a header line unconditionally: when clcf->gzip_vary IS on, nginx
+ * emits its own "Vary: Accept-Encoding" from r->gzip_vary and we would
+ * produce two identical field lines. Caches union all Vary fields so
+ * the result would still be semantically correct, but a doubled field
+ * is sloppy and strict intermediaries have been known to object. The
+ * two emitters are mutually exclusive by construction:
  *
- * ngx_inline for the same reason as ngx_http_zstd_ok() above: this
- * header is included by TUs that never call it (the fuzz harness),
- * and a plain `static` definition trips -Werror=unused-function there.
+ *   clcf->gzip_vary on  -> set r->gzip_vary, push nothing (nginx emits)
+ *   clcf->gzip_vary off -> push our own line (nginx emits nothing,
+ *                          having cleared r->gzip_vary)
+ *
+ * Exactly one "Vary: Accept-Encoding" line in both states, verified as
+ * a proxy-cache matrix in CI. r->gzip_vary is set in BOTH branches,
+ * because other modules read the flag — notably
+ * ngx_http_compression_vary_filter_module, which keys on it alone and
+ * flattens the Vary fields it finds, so our own line is folded rather
+ * than doubled. That is precisely why emitting a real header is
+ * compatible with that module where relying on its default-off
+ * directive was not.
+ *
+ * Callers must invoke this at most once per response, and only on a
+ * path that is genuinely Accept-Encoding-dependent. "zstd_static
+ * always" deliberately does NOT call it: it ignores Accept-Encoding,
+ * so its response is not a negotiated variant and must not claim to
+ * vary on one.
+ *
+ * Returns NGX_OK, or NGX_ERROR when the header-list allocation fails.
+ *
+ * ngx_inline for the same reason as the helpers above: this header is
+ * included by TUs that never call it (the fuzz harness), and a plain
+ * `static` definition trips -Werror=unused-function there.
  */
-static ngx_inline ngx_uint_t
-ngx_http_zstd_vary_handled_externally(ngx_conf_t *cf)
+static ngx_inline ngx_int_t
+ngx_http_zstd_vary_accept_encoding(ngx_http_request_t *r)
 {
-    ngx_uint_t  i;
+    ngx_table_elt_t           *v;
+    ngx_http_core_loc_conf_t  *clcf;
 
-    for (i = 0; cf->cycle->modules[i]; i++) {
-        if (ngx_strcmp(cf->cycle->modules[i]->name,
-                       "ngx_http_compression_vary_filter_module") == 0)
-        {
-            return 1;
-        }
+    r->gzip_vary = 1;
+
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    if (clcf != NULL && clcf->gzip_vary) {
+        /* nginx's header filter emits the line from r->gzip_vary */
+        return NGX_OK;
     }
 
-    return 0;
+    v = ngx_list_push(&r->headers_out.headers);
+    if (v == NULL) {
+        return NGX_ERROR;
+    }
+
+    v->hash = 1;
+#if (nginx_version >= 1023000)
+    v->next = NULL;
+#endif
+    ngx_str_set(&v->key, "Vary");
+    ngx_str_set(&v->value, "Accept-Encoding");
+
+    return NGX_OK;
 }
 
 

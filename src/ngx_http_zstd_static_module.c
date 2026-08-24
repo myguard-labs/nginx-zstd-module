@@ -107,14 +107,15 @@ typedef struct {
 
 typedef struct {
     /*
-     * Locations where the gzip_vary-off warning was withheld because a
-     * compression_vary module is loaded (see merge_loc_conf). Counted
-     * per cycle — a rejected reload takes its count down with its pool
-     * (the #103 lesson) — and reported as one summary warning from
-     * postconfiguration instead of per location. Mirrors the filter
-     * module's counter.
+     * No fields today: the gzip_vary-off warning counter that lived
+     * here was removed with the warning itself (G5 — the handler now
+     * emits Vary: Accept-Encoding directly). The struct and its
+     * create_main_conf hook are kept because the module context slot
+     * is part of the module's shape and future main-scope state has an
+     * obvious home; an empty struct is not valid C, so a placeholder
+     * holds the space.
      */
-    ngx_uint_t  vary_warn_suppressed;
+    ngx_uint_t  unused;
 } ngx_http_zstd_static_main_conf_t;
 
 
@@ -478,10 +479,31 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 
     log = r->connection->log;
 
-    if (!clcf->gzip_vary && rc != NGX_OK) {
+    /*
+     * Historically this returned early when the client did not accept
+     * zstd AND "gzip_vary" was off, on the reasoning that there was
+     * then nothing to gain from the stat(): we would decline anyway,
+     * and r->gzip_vary would have been cleared by the header filter,
+     * so no Vary header could be produced.
+     *
+     * That shortcut is exactly the caching hazard this module now
+     * closes by construction. This module emits "Vary:
+     * Accept-Encoding" itself, independent of "gzip_vary", so the
+     * probe below is what tells us whether a .zst variant exists — and
+     * therefore whether this URI is Accept-Encoding-dependent at all.
+     * Skipping it here would serve a Vary-less identity response for
+     * precisely the configuration (gzip_vary off) the operator is most
+     * likely to be running, and a shared cache would then reuse it for
+     * clients that do accept zstd, or reuse an accepting client's
+     * stored zstd body for this one.
+     *
+     * "always" ignores Accept-Encoding and never varies, so it keeps
+     * its own shortcut: rc is forced to NGX_OK for it above, which
+     * leaves this test false regardless of gzip_vary.
+     */
+    if (zscf->enable != NGX_HTTP_ZSTD_STATIC_ON && rc != NGX_OK) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0,
-                       "zstd static: skip, client did not accept zstd and "
-                       "gzip_vary is off");
+                       "zstd static: skip, client did not accept zstd");
         return NGX_DECLINED;
     }
 
@@ -550,7 +572,31 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     }
 
     if (zscf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
-        r->gzip_vary = 1;
+        /*
+         * A .zst variant of this URI exists, so which representation
+         * this URI serves depends on Accept-Encoding — including on
+         * the decline path just below, where we hand the request back
+         * for the identity file to be served by the static handler.
+         * That identity response needs the Vary header just as much as
+         * the compressed one does: without it a shared cache filled by
+         * a non-accepting client keeps serving identity to everyone,
+         * and one filled by an accepting client serves zstd to a
+         * client that cannot decode it. The header list we push onto
+         * survives the NGX_DECLINED, so the field lands on whichever
+         * response is finally produced.
+         *
+         * Emitted directly rather than requested via r->gzip_vary, so
+         * correctness does not depend on the operator's "gzip_vary"
+         * directive; duplicate-safe in both of its states. See
+         * ngx_http_zstd_vary_accept_encoding().
+         *
+         * "always" is excluded by the enclosing test on purpose: it
+         * ignores Accept-Encoding, so its response is not a negotiated
+         * variant and must not claim to vary on it. See C5.
+         */
+        if (ngx_http_zstd_vary_accept_encoding(r) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
 
         if (rc != NGX_OK) {
             return NGX_DECLINED;
@@ -909,7 +955,6 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 static void *
 ngx_http_zstd_static_create_main_conf(ngx_conf_t *cf)
 {
-    /* pcalloc zeroes vary_warn_suppressed — no reset hook needed */
     return ngx_pcalloc(cf->pool, sizeof(ngx_http_zstd_static_main_conf_t));
 }
 
@@ -940,53 +985,15 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                               NGX_HTTP_ZSTD_STATIC_OFF);
 
     /*
-     * Warn at config load only when zstd_static is set to "on" (negotiated)
-     * for THIS location and the same location has gzip_vary off. The
-     * previous version emitted this warning unconditionally from the
-     * postconfiguration handler whenever the top-level location lacked
-     * gzip_vary, even on configs that load the module but never use
-     * the directive — a misleading log line. Mirror the filter
-     * module's per-location merge-time check.
-     *
-     * "always" is deliberately excluded: it ignores Accept-Encoding,
-     * intentionally does NOT set r->gzip_vary, and the response carries no
-     * Vary header — so asking the operator to add gzip_vary would describe
-     * the response incorrectly. See C5.
+     * G5: there is no longer a gzip_vary-off warning here. The content
+     * handler emits "Vary: Accept-Encoding" itself whenever a .zst
+     * variant makes this URI Accept-Encoding-dependent (see
+     * ngx_http_zstd_vary_accept_encoding()), so the header no longer
+     * depends on the operator setting "gzip_vary on", and warning
+     * about that directive would be misleading. "always" still never
+     * varies, by construction rather than by warning: it ignores
+     * Accept-Encoding and the handler does not emit the field for it.
      */
-    if (conf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
-        /*
-         * As in the filter module: when the compression_vary filter
-         * module is loaded — it emits Vary: Accept-Encoding from
-         * r->gzip_vary without needing "gzip_vary on" — withhold the
-         * per-location warning and count it instead; presence alone
-         * cannot prove it is enabled here (see
-         * ngx_http_zstd_vary_handled_externally()), so
-         * postconfiguration reports one summary warning.
-         */
-        const ngx_http_core_loc_conf_t  *clcf;
-
-        clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-        if (clcf != NULL && !clcf->gzip_vary) {
-
-            if (ngx_http_zstd_vary_handled_externally(cf)) {
-                ngx_http_zstd_static_main_conf_t  *zsmcf;
-
-                zsmcf = ngx_http_conf_get_module_main_conf(cf,
-                                               ngx_http_zstd_static_module);
-                if (zsmcf != NULL) {
-                    zsmcf->vary_warn_suppressed++;
-                }
-
-            } else {
-                ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
-                                   "zstd_static is enabled but "
-                                   "\"gzip_vary\" is off; add \"gzip_vary "
-                                   "on\" to emit \"Vary: Accept-Encoding\" "
-                                   "so proxies and CDNs cache compressed "
-                                   "and uncompressed responses separately");
-            }
-        }
-    }
 
     return NGX_CONF_OK;
 }
@@ -997,29 +1004,6 @@ ngx_http_zstd_static_init(ngx_conf_t *cf)
 {
     ngx_http_handler_pt               *h;
     ngx_http_core_main_conf_t         *cmcf;
-    ngx_http_zstd_static_main_conf_t  *zsmcf;
-
-    /*
-     * The per-location gzip_vary-off warnings withheld in
-     * merge_loc_conf, folded into one line — see the filter module's
-     * postconfiguration for why this stays a warning rather than
-     * going silent (compression_vary defaults to off, and another
-     * module's merged conf cannot be read to check).
-     */
-    zsmcf = ngx_http_conf_get_module_main_conf(cf,
-                                               ngx_http_zstd_static_module);
-    if (zsmcf != NULL && zsmcf->vary_warn_suppressed) {
-        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
-                           "zstd_static is enabled with \"gzip_vary\" off "
-                           "in %ui location(s); the per-location warnings "
-                           "are suppressed because "
-                           "ngx_http_compression_vary_filter_module is "
-                           "loaded, but its \"compression_vary\" directive "
-                           "defaults to off; verify \"compression_vary "
-                           "on\" covers those locations so "
-                           "\"Vary: Accept-Encoding\" is emitted",
-                           zsmcf->vary_warn_suppressed);
-    }
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 

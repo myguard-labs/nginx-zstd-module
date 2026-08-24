@@ -230,13 +230,17 @@ continuously exercised.
 
 This filter module compresses responses on the fly using zstd. It runs after the upstream or file handler generates the response, and before nginx sends it to the client. Compression is applied only when the client signals support via `Accept-Encoding: zstd`. 2xx responses are eligible for compression — except the bodyless `204 No Content` and `205 Reset Content` — as well as `403` and `404` (which often carry compressible error bodies). All other non-2xx statuses are passed through uncompressed.
 
-> **Required:** Enable `gzip_vary on;` alongside this module. When compression is applied, the module sets `r->gzip_vary = 1`, which causes nginx to emit a `Vary: Accept-Encoding` response header — but only when `gzip_vary` is enabled. Without it, proxies and CDNs may cache and serve compressed responses to clients that do not support zstd. Both this module and `zstd_static` warn at config load when they are enabled in a location whose effective `gzip_vary` is off.
+> **`Vary: Accept-Encoding` is emitted automatically — you do not need `gzip_vary on`.** Whenever a response's encoding depends on `Accept-Encoding`, both this module and `zstd_static on` emit the `Vary: Accept-Encoding` header themselves, so proxies and CDNs keep the compressed and uncompressed variants apart without any directive on your part. Emission is duplicate-safe: with `gzip_vary on` nginx emits the field and the module stays quiet, with `gzip_vary off` the module emits it — exactly one `Vary: Accept-Encoding` line either way.
 >
-> The one exception: if [ngx_http_compression_vary_filter_module](https://github.com/HanadaLee/ngx_http_compression_vary_filter_module) is loaded, that module emits (and flattens) `Vary: Accept-Encoding` from `r->gzip_vary` on its own wherever `compression_vary on` applies, replacing the `gzip_vary` directive (its author recommends `gzip_vary off` alongside `compression_vary on`). Because `compression_vary` itself defaults to **off** — and one module cannot read another's merged configuration to verify it — the warnings are not silenced outright when that module is present: the per-location lines are withheld and each module emits a single summary warning naming how many locations are affected and asking you to verify `compression_vary on` covers them.
+> This used to be a deployment prerequisite backed only by a config-load warning: with the default `gzip_vary off`, nginx *suppresses* the header entirely, so a single overlooked location shipped zstd bodies that a shared cache would then hand to clients unable to decode them. Correctness now belongs to the module rather than to an operator directive, and the warning is gone with it. `gzip_vary on` remains perfectly fine to set (it also covers other encoders such as `gzip`); it is simply no longer load-bearing for zstd.
+>
+> `zstd_static always` is deliberately excluded: it ignores `Accept-Encoding` entirely, so its response is not a negotiated variant and correctly carries no `Vary: Accept-Encoding`.
+>
+> Interoperating with [ngx_http_compression_vary_filter_module](https://github.com/HanadaLee/ngx_http_compression_vary_filter_module) is safe in every combination. That module emits and *flattens* `Vary` from `r->gzip_vary`, which this module still sets; because it folds the fields it finds rather than appending blindly, the header this module emits is merged rather than doubled. With `compression_vary off` (its default) this module's own emission still covers you — previously that exact combination produced no `Vary` at all, which is the residual risk the old summary warning existed to describe. CI asserts the single-`Vary` contract against the real module in both of its states.
 
 > **ETag behaviour:** When a response is compressed, nginx automatically weakens the `ETag` value (converting `"abc"` to `W/"abc"` if it was strong). This is correct per HTTP semantics — a compressed representation is a different entity variant — but it means strong ETag validation (`If-Match`) will not match across compressed and uncompressed responses. CDN edge nodes that cache both variants will see different ETags for each.
 
-> **Coexisting with `gzip` and `brotli`:** It is safe to enable `zstd`, the [`brotli`](https://github.com/google/ngx_brotli) filter, and the built-in [`gzip`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html) filter on the same location with overlapping `*_types`. A response is only ever compressed once: nginx body filters run in a fixed chain, and the first encoder whose `Accept-Encoding` test passes wins, setting `Content-Encoding` so the later encoders skip the already-encoded body. Relative to the built-in `gzip`, `zstd` is always ordered to run **before** it (both in static and dynamic builds), so a client advertising `Accept-Encoding: gzip, zstd` receives `zstd`; clients that do not advertise `zstd` fall through to `gzip`. Always pair this with `gzip_vary on;` so each encoded variant is cached separately by proxies and CDNs.
+> **Coexisting with `gzip` and `brotli`:** It is safe to enable `zstd`, the [`brotli`](https://github.com/google/ngx_brotli) filter, and the built-in [`gzip`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html) filter on the same location with overlapping `*_types`. A response is only ever compressed once: nginx body filters run in a fixed chain, and the first encoder whose `Accept-Encoding` test passes wins, setting `Content-Encoding` so the later encoders skip the already-encoded body. Relative to the built-in `gzip`, `zstd` is always ordered to run **before** it (both in static and dynamic builds), so a client advertising `Accept-Encoding: gzip, zstd` receives `zstd`; clients that do not advertise `zstd` fall through to `gzip`. Each encoded variant is cached separately by proxies and CDNs because every encoder in that chain advertises `Vary: Accept-Encoding`; this module emits it itself, and `gzip`/`brotli` emit theirs via `gzip_vary`, so set `gzip_vary on` if you rely on those encoders too.
 >
 > **`zstd` vs `brotli` ordering (dynamic builds):** the fixed `before brotli` guarantee holds for **static** builds, where `filter/config` explicitly places `zstd` ahead of `ngx_http_brotli_filter_module` in the module array. For **dynamic** modules, `ngx_brotli` and this module share the same filter anchor and neither constrains itself relative to the other, so the body-filter chain is built in **reverse `load_module` order** — whichever is loaded **last** runs first and wins. To make `zstd` win a `br, zstd` negotiation, load it last:
 >
@@ -264,7 +268,7 @@ Enables or disables on-the-fly zstd compression for responses.
 ```nginx
 http {
     zstd       on;          # enable everywhere
-    gzip_vary  on;          # required: see the note above
+    gzip_vary  on;          # optional for zstd (emitted automatically); covers gzip/brotli too
 
     server {
         location /downloads/ {
@@ -765,8 +769,8 @@ server {
 ```
 
 The module emits this as an additional `Vary` header line; caches union all
-`Vary` fields, so it coexists with the `Vary: Accept-Encoding` produced by
-`gzip_vary on;`. It does not itself decide anything — it only makes the
+`Vary` fields, so it coexists with the `Vary: Accept-Encoding` the module
+emits automatically. It does not itself decide anything — it only makes the
 existing bypass behaviour cacheable without poisoning.
 
 ---
@@ -842,7 +846,7 @@ http {
 
 Operational notes:
 
-* **Caching.** Whenever dictionaries are configured, the module emits `Vary: Available-Dictionary, Sec-Fetch-Site` on **both** the dcz and the plain-zstd variants — which encoding a client receives depends on that request header for every client, and a shared cache that failed to key on it could serve an undecodable dcz body to a dictionary-less client. `Sec-Fetch-Site` is in that list for the same reason: dcz is refused for any value other than `same-origin`/`none`, so a shared cache that ignored it would hand the dcz representation to a cross-site request — bypassing the origin gate — or suppress dcz for a legitimate same-origin client, depending on which one filled the cache first. Security decision inputs stay in `Vary`. Keep `gzip_vary on` so `Vary: Accept-Encoding` is emitted alongside.
+* **Caching.** Whenever dictionaries are configured, the module emits `Vary: Available-Dictionary, Sec-Fetch-Site` on **both** the dcz and the plain-zstd variants — which encoding a client receives depends on that request header for every client, and a shared cache that failed to key on it could serve an undecodable dcz body to a dictionary-less client. `Sec-Fetch-Site` is in that list for the same reason: dcz is refused for any value other than `same-origin`/`none`, so a shared cache that ignored it would hand the dcz representation to a cross-site request — bypassing the origin gate — or suppress dcz for a legitimate same-origin client, depending on which one filled the cache first. Security decision inputs stay in `Vary`. `Vary: Accept-Encoding` is emitted alongside automatically, on its own header line.
 * **Dictionary lifecycle.** Files are read once at config parse, and hashed only when no hash is supplied (`nginx -t` validates them; empty or > 10 MB files and duplicate dictionary hashes are load errors — supplied hashes are compared as declared, so with computed hashes "duplicate" means identical content). Rotate dictionaries by updating the config and reloading. A location that declares its own `zstd_dcz_dict_file` list replaces the inherited one wholesale. Hashing uses libcrypto's EVP SHA-256 when detected at build time — roughly an order of magnitude faster, which at hundreds of registered dictionaries turns seconds of `nginx -t`/reload time into a blip (`NGX_ZSTD_NO_LIBCRYPTO=1` in the configure environment opts out) — with a portable implementation built in as the fallback.
 * **Window and memory.** dcz frames never declare a window above 8 MB (the RFC's unconditional client guarantee), sized down to dictionary + expected content when smaller. An explicit `zstd_window_log` below that still wins — a dictionary does not void the memory cap. Dictionaries are referenced per request via `ZSTD_CCtx_refPrefix()` (RFC 9842 `type=raw` semantics); the per-request table build over the dictionary costs roughly milliseconds per MB of dictionary, so prefer focused dictionaries (the previous version of one resource) over giant blobs.
 * **Secure context.** RFC 9842 §8 restricts dictionary transport to secure contexts, so dcz is only negotiated over TLS. A plain-HTTP request that would otherwise match falls back to plain `zstd`. Behind a TLS-terminating proxy, see [zstd_dcz_assume_secure_transport](#zstd_dcz_assume_secure_transport).
@@ -904,10 +908,10 @@ Controls how pre-compressed `.zst` files are served.
 | Value | Behaviour |
 |---|---|
 | `off` | Disabled. Always serve the original file. |
-| `on` | Check whether the client supports zstd (`Accept-Encoding: zstd`). If yes and a `.zst` file exists, serve it. Otherwise fall back to the original. Also emits `Vary: Accept-Encoding` (via `gzip_vary`). |
+| `on` | Check whether the client supports zstd (`Accept-Encoding: zstd`). If yes and a `.zst` file exists, serve it. Otherwise fall back to the original. Emits `Vary: Accept-Encoding` automatically on both outcomes. |
 | `always` | Always serve the `.zst` file if it exists, regardless of `Accept-Encoding`. Use this when you know all clients support zstd (e.g. internal services). |
 
-When set to `on`, the module sets `r->gzip_vary = 1`, which causes nginx to add a `Vary: Accept-Encoding` response header (controlled by [`gzip_vary`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_vary)). Enable `gzip_vary on;` alongside `zstd_static on;` to ensure correct caching by proxies and CDNs.
+When set to `on`, the module emits a `Vary: Accept-Encoding` response header itself as soon as a `.zst` sibling makes the URI depend on `Accept-Encoding` — including on the fallback path where the client does not accept zstd and the original file is served. Correct caching by proxies and CDNs therefore does not require [`gzip_vary`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_vary); setting `gzip_vary on` is compatible and never produces a duplicate header. `zstd_static always` ignores `Accept-Encoding` and emits no `Vary`.
 
 > **Warning (`always` mode):** When `zstd_static always` is set, `.zst` files are served to every client regardless of whether they advertise `Accept-Encoding: zstd`. No `Vary` header is emitted and no `Content-Encoding` negotiation occurs. Any client that does not support zstd will receive a compressed body it cannot decode. Only use `always` on locations where every client is guaranteed to support zstd — for example, internal service-to-service calls where you control both ends.
 
@@ -1193,8 +1197,8 @@ purely "load the previous `.so` / previous nginx binary and reload":
 2. To disable instantly without a binary change: set `zstd off;` (and
    `zstd_static off;`) and `nginx -s reload` — responses immediately
    serve identity; no client/cache corruption (compressed and
-   identity variants differ only by `Content-Encoding`, and
-   `gzip_vary on` keeps caches correct).
+   identity variants differ only by `Content-Encoding`, and the
+   automatic `Vary: Accept-Encoding` keeps caches correct).
 3. To revert the binary: restore the prior `.so`/binary, `nginx -t`,
    then `nginx -s reload`.
 

@@ -575,6 +575,53 @@ Vary: Accept-Encoding
 
 
 
+=== TEST 25a: zstd_static on sets Vary with gzip_vary OFF (non-accepting client)
+# G5: the gzip_vary-off cell of TEST 25, and the one that was broken.
+# With no "gzip_vary on", the handler used to return early WITHOUT even
+# probing for the .zst, so this identity response carried no Vary at
+# all — a shared cache then pinned every later client, including
+# zstd-capable ones, to the identity variant. The handler now emits the
+# field itself before declining.
+--- config
+    location /test {
+        zstd_static on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: gzip
+--- response_headers
+!Content-Encoding
+Vary: Accept-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 25b: zstd_static on sets Vary with gzip_vary OFF (accepting client)
+# The served-.zst arm of the same cell: the compressed representation
+# must announce that it was negotiated on Accept-Encoding, or a cache
+# hands it to a client that cannot decode it. Together with TEST 15,
+# TEST 16 and TEST 25a this completes the static handler's
+# gzip_vary x Accept-Encoding matrix.
+--- config
+    location /test {
+        zstd_static on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Vary: Accept-Encoding
+--- no_error_log
+[error]
+
+
+
 === TEST 26: zstd_static serves a .zst under directio without a failed pread
 # Regression for the O_DIRECT magic-probe bug. With "directio" active the
 # open_file_cache opens the .zst with O_DIRECT; the 4-byte, unaligned

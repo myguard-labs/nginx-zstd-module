@@ -273,12 +273,15 @@ invalid number
 
 
 
-=== TEST 12: zstd on without gzip_vary warns at config load
-# Whether the response is zstd or identity depends on Accept-Encoding;
-# without Vary a shared cache can serve the compressed variant to a
-# client that cannot decode it. The check has lived in merge_loc_conf
-# since the Vary work but never had a test pinning it — the brotli
-# sibling's TEST 12a predates this one.
+=== TEST 12: zstd on without gzip_vary still emits Vary: Accept-Encoding
+# G5. Whether the response is zstd or identity depends on
+# Accept-Encoding; without Vary a shared cache serves the compressed
+# variant to a client that cannot decode it. This used to be a
+# config-load WARNING telling the operator to set "gzip_vary on" —
+# advice that was silently ignorable, and one missed warning poisoned a
+# cache. The module now emits the field itself, so the header is what
+# gets asserted, and the warning is gone: a warning about a directive
+# that no longer changes the outcome would be misleading.
 --- config
     location /gv {
         zstd on;
@@ -290,16 +293,20 @@ invalid number
 GET /gv
 --- more_headers
 Accept-Encoding: zstd
---- error_log
-zstd is enabled but "gzip_vary" is off
---- no_error_log
-[error]
+--- response_headers
+Content-Encoding: zstd
+Vary: Accept-Encoding
+--- no_error_log eval
+[qr/gzip_vary/, qr/\[error\]/]
 
 
 
-=== TEST 13: zstd on WITH gzip_vary does not warn
-# The complementary half: a correctly paired configuration must load
-# silently, so the warning cannot become noise on valid configs.
+=== TEST 13: zstd on WITH gzip_vary emits exactly one Vary line
+# The duplicate-safety half. With "gzip_vary on" nginx emits the field
+# from r->gzip_vary, so the module must NOT push a second identical
+# line. Test::Nginx's response_headers compares the joined value of the
+# field, so a doubled emission reads as "Accept-Encoding, Accept-Encoding"
+# and fails here.
 --- config
     location /gv {
         zstd on;
@@ -312,38 +319,45 @@ zstd is enabled but "gzip_vary" is off
 GET /gv
 --- more_headers
 Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Vary: Accept-Encoding
 --- no_error_log eval
-[qr/"gzip_vary" is off/, qr/\[error\]/]
+[qr/gzip_vary/, qr/\[error\]/]
 
 
 
-=== TEST 14: zstd_static on without gzip_vary warns at config load
-# Same hazard as TEST 12 through the static module's own merge-time
-# check. No .zst fixture is needed: the warning is a config-load
-# statement about the location, not about any request — the request
-# below just keeps the block well-formed (identity fallback, no .zst).
+=== TEST 14: zstd_static on without gzip_vary still emits Vary: Accept-Encoding
+# G5, static handler, on the DECLINE arm. ../suite holds test and
+# test.zst, so this URI is Accept-Encoding-dependent; the client here
+# does not accept zstd, so the handler emits the Vary field and then
+# declines for the identity file to be served. That identity response
+# is exactly the one a shared cache must not pin every later client to,
+# and it must carry the field with no "gzip_vary on" configured — which
+# is what the old warning could only ask for. TEST 25 in 01-static.t is
+# the same arm WITH gzip_vary on.
 --- config
-    location /st/ {
+    location /test {
         zstd_static on;
-        root html;
+        root ../suite;
     }
---- user_files
->>> st/plain.txt
-static warn fixture
 --- request
-GET /st/plain.txt
---- error_log
-zstd_static is enabled but "gzip_vary" is off
---- no_error_log
-[error]
+GET /test
+--- more_headers
+Accept-Encoding: gzip
+--- response_headers
+!Content-Encoding
+Vary: Accept-Encoding
+--- no_error_log eval
+[qr/gzip_vary/, qr/\[error\]/]
 
 
 
-=== TEST 15: zstd_static always does not warn without gzip_vary
-# "always" ignores Accept-Encoding, never sets r->gzip_vary, and the
-# response carries no Vary — asking for gzip_vary would describe the
-# response incorrectly, so the warning must stay quiet (see the C5
-# comment at the check).
+=== TEST 15: zstd_static always does not vary and does not mention gzip_vary
+# "always" ignores Accept-Encoding: it is not a negotiated variant, so
+# it must NOT claim to vary on Accept-Encoding (that would fragment
+# every cache key for nothing). The G5 emission is deliberately scoped
+# to "on" only. See C5.
 --- config
     location /st/ {
         zstd_static always;
@@ -354,8 +368,10 @@ zstd_static is enabled but "gzip_vary" is off
 static warn fixture
 --- request
 GET /st/plain.txt
+--- response_headers
+!Vary
 --- no_error_log eval
-[qr/zstd_static is enabled but/, qr/\[error\]/]
+[qr/gzip_vary/, qr/\[error\]/]
 
 
 

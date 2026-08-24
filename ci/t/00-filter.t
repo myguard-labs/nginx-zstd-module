@@ -1277,6 +1277,59 @@ Vary: Accept-Encoding
 
 
 
+=== TEST 48a: Vary: Accept-Encoding is emitted with gzip_vary OFF (accepting client)
+# G5, the cell that used to be broken. No "gzip_vary" anywhere — its
+# compiled-in default is off, which is what most deployments actually
+# run. Before G5 this response was zstd-encoded with NO Vary header at
+# all: a shared cache stored it and served that zstd body to clients
+# that cannot decode zstd. The module now emits the field itself, so
+# correctness no longer depends on an operator directive it does not
+# own. Paired with TEST 47 (gzip_vary on) this is the dynamic half of
+# the gzip_vary x Accept-Encoding matrix.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        return 200 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+Vary: Accept-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 48b: Vary: Accept-Encoding is emitted with gzip_vary OFF (non-accepting client)
+# The identity arm of TEST 48a, and the more dangerous fill order: a
+# cache that stores THIS response without Vary pins every later client
+# to identity, silently losing compression for everyone. Emitting the
+# field before negotiating the encoding is what keeps the two variants
+# apart, with gzip_vary off.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        return 200 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: gzip
+--- response_headers
+!Content-Encoding
+Vary: Accept-Encoding
+--- no_error_log
+[error]
+
+
+
 === TEST 49: zstd_buffers with a small custom value still produces a valid stream
 # The zstd_buffers directive was previously not exercised by any test.
 # A very small buffer count forces the body filter through the
@@ -1716,6 +1769,11 @@ Content-Range: bytes 0-9/100
 
 === TEST 66: zstd_bypass_vary appends the named field to Vary
 # S1: header-driven bypass must be advertised to shared caches via Vary.
+# G5: this location has no "gzip_vary on", and the module now emits
+# "Vary: Accept-Encoding" itself rather than depending on that directive,
+# so the compressed response carries both fields. Before G5 it carried
+# only X-No-Compression — a zstd body that never told a shared cache it
+# was negotiated on Accept-Encoding.
 --- config
     location /filter {
         zstd on;
@@ -1733,7 +1791,7 @@ GET /filter
 Accept-Encoding: zstd
 --- response_headers
 Content-Encoding: zstd
-Vary: X-No-Compression
+Vary: X-No-Compression, Accept-Encoding
 --- no_error_log
 [error]
 
@@ -1768,6 +1826,12 @@ Content-Encoding: zstd
 # must be served identity (no Content-Encoding: zstd) yet STILL carry
 # Vary: X-No-Compression so a shared cache keys the bypassed variant separately
 # from the compressed one. This is the cache-poisoning arm TEST 66 omitted.
+# G5: the bypassed identity response must ALSO carry Accept-Encoding. The
+# same URI serves zstd to a request that does not trip the predicate, so
+# an identity body cached without Accept-Encoding in the key is served to
+# clients that should have been compressed (and vice versa on the reverse
+# fill order). This location has no "gzip_vary on"; the module emits the
+# field itself.
 --- config
     location /filter {
         zstd on;
@@ -1786,7 +1850,7 @@ Accept-Encoding: zstd
 X-No-Compression: 1
 --- response_headers
 Content-Encoding:
-Vary: X-No-Compression
+Vary: X-No-Compression, Accept-Encoding
 --- no_error_log
 [error]
 

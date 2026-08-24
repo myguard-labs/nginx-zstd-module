@@ -3,7 +3,7 @@
 COST, as a curve against config scale, for two nginx binaries.
 
 This is the gating dependency for the config-time TODO rows -- caching the
-`ngx_http_compression_vary_filter_module` presence scan, caching libzstd
+per-location config-merge work, caching libzstd
 profile work by effective tuple, and replacing the O(n^2) dcz duplicate-hash
 detection. Each of those rows says "benchmark before retaining the extra
 state".
@@ -92,10 +92,11 @@ rows can be decided on numbers instead of intuition.
 
 Two conclusions, both of which bear directly on the rows this tool gates:
 
-1. The per-location path (the `ngx_http_zstd_vary_handled_externally()` scan)
-   is LINEAR across 320x of scale -- 100 -> 32000 locations costs 52x, not
-   102400x. The O(locations x modules) shape is real but the module count is a
-   small constant, so it does not bend.
+1. The per-location merge path is LINEAR across 320x of scale -- 100 ->
+   32000 locations costs 52x, not 102400x. (These numbers were measured when
+   that path also ran an O(modules) scan per location for the gzip_vary-off
+   warning; G5 deleted the warning and the scan, so the per-location constant
+   is now strictly smaller and the linear shape still holds.)
 
 2. The dcz duplicate-hash detection IS genuinely O(n^2), and this harness can
    now show it: 20000 -> 40000 entries is 2x the scale for 4.6x the time. But
@@ -253,11 +254,11 @@ def generate_config(
     body = ""
 
     if workload == "locations-same-profile":
-        # Every location carries an IDENTICAL profile, and gzip_vary is off so
-        # the merge path runs ngx_http_zstd_vary_handled_externally() -- the
-        # linear scan over every loaded module -- once per location. This is
-        # the O(locations x modules) shape the presence-caching row targets,
-        # and the profile-caching row's best case (one distinct tuple).
+        # Every location carries an IDENTICAL profile. This is the
+        # profile-caching row's best case (one distinct tuple) and the
+        # baseline for per-location merge cost. gzip_vary off is kept as
+        # part of the fixture's shape; since G5 it no longer triggers any
+        # per-location scan or warning.
         for i in range(scale):
             body += (
                 f"    location /l{i} {{\n"
@@ -353,10 +354,11 @@ def measure_config_test(
     cmd = [str(arm.binary), "-t", "-p", str(root), "-c", str(conf)]
     peak_kb = 0
 
-    # Output goes to a FILE, never to a pipe. `nginx -t` emits one warning per
-    # location on some of these workloads (`gzip_vary off` under an enabled
-    # zstd is exactly such a case), so at 2000+ locations it produces far more
-    # than a 64 KB pipe buffer holds. With stdout=PIPE and the read deferred
+    # Output goes to a FILE, never to a pipe. `nginx -t` can emit one warning
+    # per location on some of these workloads, so at 2000+ locations it may
+    # produce far more than a 64 KB pipe buffer holds. (The gzip_vary-off
+    # warning that originally motivated this is gone as of G5, but other
+    # per-location warnings keep the hazard live and a file costs nothing.) With stdout=PIPE and the read deferred
     # until after the poll loop, nginx blocks in anon_pipe_write forever while
     # the harness waits for it to exit -- a deadlock that presents as an
     # arbitrarily slow config load, i.e. as a plausible measurement. Caught

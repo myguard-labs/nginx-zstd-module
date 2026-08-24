@@ -779,7 +779,6 @@ jobs:
             --with-compat \
             --add-dynamic-module="$GITHUB_WORKSPACE" \
             --add-dynamic-module="$GITHUB_WORKSPACE/ci/tools/ci-linkcheck-module" \
-            --add-dynamic-module="$GITHUB_WORKSPACE/ci/tools/ci-compression-vary-stub" \
             > /dev/null
           make -j"$(nproc)"
 
@@ -874,18 +873,15 @@ jobs:
           fi
           echo "✓ readelf agrees on both"
 
-      - name: Assert gzip_vary warning suppression witness (both directions)
-        # When a module named ngx_http_compression_vary_filter_module is
-        # loaded, the per-location gzip_vary-off warnings collapse into
-        # one summary warning per module — never full silence, because
-        # that module's compression_vary directive defaults to off and
-        # its effective value cannot be read from here (see
-        # ngx_http_zstd_common.h). Loading the CI stub that claims that
-        # name via load_module is the hardest detection case (dynamic,
-        # not static linkage); the warn-direction control keeps the
-        # quiet-direction greps from passing vacuously if the warning
-        # text ever changes. The cvary-interop job repeats this against
-        # the real third-party module and adds runtime Vary checks.
+      - name: "Assert Vary: Accept-Encoding is emitted without gzip_vary"
+        # G5: the modules emit "Vary: Accept-Encoding" themselves, so the
+        # header no longer depends on the operator's "gzip_vary"
+        # directive and the old gzip_vary-off warnings are gone. This
+        # step is the config-load half of that contract: the fixture
+        # below has NO gzip_vary anywhere, and must load with no
+        # gzip_vary advice of any kind. The runtime half (exactly one
+        # Vary line in every gzip_vary / compression_vary state) is the
+        # cvary-interop job and the vary-matrix job.
         run: |
           set -euo pipefail
           cd "nginx-${NGINX_VERSION}"
@@ -908,47 +904,20 @@ jobs:
           }
           EOF
 
-          # Identical config plus the stub that claims the
-          # compression_vary module's name.
-          { echo "load_module $PWD/objs/ngx_http_compression_vary_filter_module.so;"
-            cat wprefix/warn.conf; } > wprefix/quiet.conf
-
-          # Cardinality, not just presence: one location per module in
-          # the fixture means each expected line must appear EXACTLY
-          # once — a duplicate emission (e.g. postconfiguration running
-          # twice) is a bug grep -q would wave through.
-          expect_one() {
-            local n
-            n=$(echo "$out" | grep -cF "$1" || true)
-            if [ "$n" -ne 1 ]; then
-              echo "✗ expected exactly one \"$1\" line, got $n"
-              exit 1
-            fi
-          }
-
-          # Control direction: without the stub, each module must warn
-          # once for the single affected location.
           out=$(objs/nginx -p "$PWD/wprefix" -c warn.conf -t 2>&1)
           echo "$out"
           echo "$out" | grep -q 'test is successful'
-          expect_one 'zstd is enabled but "gzip_vary" is off'
-          expect_one 'zstd_static is enabled but "gzip_vary" is off'
-          echo "✓ both warnings fire exactly once without the stub"
 
-          # Witness direction: with the stub loaded, the per-location
-          # lines must vanish and each per-module summary must appear
-          # exactly once (the count in the message also mutation-checks
-          # the counter: a broken count changes "in 1 location(s)").
-          out=$(objs/nginx -p "$PWD/wprefix" -c quiet.conf -t 2>&1)
-          echo "$out"
-          echo "$out" | grep -q 'test is successful'
-          if echo "$out" | grep -q 'is enabled but "gzip_vary" is off'; then
-            echo "✗ per-location warning not suppressed with stub loaded"
+          # No gzip_vary advice may survive: neither the old
+          # per-location lines nor the old per-module summary. A stale
+          # warning telling operators to set a directive that no longer
+          # affects the header is worse than none.
+          if echo "$out" | grep -qi 'gzip_vary'; then
+            echo "✗ config load still mentions gzip_vary:"
+            echo "$out" | grep -i 'gzip_vary'
             exit 1
           fi
-          expect_one 'zstd is enabled with "gzip_vary" off in 1 location'
-          expect_one 'zstd_static is enabled with "gzip_vary" off in 1 location'
-          echo "✓ per-location warnings suppressed, one summary each"
+          echo "✓ loads clean with no gzip_vary anywhere in the config"
 
   # ── Interop against the REAL compression_vary module — the stub above
   #    proves name detection; this proves the semantic contract the
@@ -1077,20 +1046,25 @@ jobs:
           out=$(objs/nginx -p "$PWD/iprefix" -c interop.conf -t 2>&1)
           echo "$out"
           echo "$out" | grep -q 'test is successful'
-          if echo "$out" | grep -q 'is enabled but "gzip_vary" is off'; then
-            echo "✗ per-location warning fired despite the real module"
+          # G5: no gzip_vary advice of any kind survives — the header
+          # does not depend on that directive any more.
+          if echo "$out" | grep -qi 'gzip_vary'; then
+            echo "✗ config load still mentions gzip_vary:"
+            echo "$out" | grep -i 'gzip_vary'
             exit 1
           fi
-          # Exactly one summary — presence alone would miss duplicate
-          # emission.
-          n=$(echo "$out" | grep -cF 'zstd is enabled with "gzip_vary" off in 2 location' || true)
-          if [ "$n" -ne 1 ]; then
-            echo "✗ expected exactly one summary warning, got $n"
-            exit 1
-          fi
-          echo "✓ suppression + one summary against the real module"
+          echo "✓ clean load against the real module, no gzip_vary advice"
 
       - name: Assert runtime Vary contract (compression_vary on and off)
+        # THE point of G5. Both locations have "gzip_vary off". Before
+        # G5, /off/ (compression_vary off — its DEFAULT) served a zstd
+        # body with NO Vary at all: a shared cache would store it and
+        # hand it to a client that cannot decode zstd. That was the
+        # residual risk a warning was asked to cover. Now the module
+        # emits the field itself, so BOTH locations must carry exactly
+        # one Vary: Accept-Encoding — never zero (the cache-poisoning
+        # bug) and never two (compression_vary flattens what it finds,
+        # and a doubled field trips strict intermediaries).
         run: |
           set -euo pipefail
           cd "nginx-${NGINX_VERSION}"
@@ -1099,26 +1073,23 @@ jobs:
           trap 'objs/nginx -p "$PWD/iprefix" -c interop.conf -s stop' EXIT
           sleep 0.5
 
-          hdr_on=$(curl -s -D - -o /dev/null -H "Accept-Encoding: zstd" \
-            http://127.0.0.1:18994/on/x)
-          echo "$hdr_on"
-          echo "$hdr_on" | grep -qi '^content-encoding: zstd'
-          n=$(echo "$hdr_on" | grep -ci '^vary: accept-encoding' || true)
-          if [ "$n" -ne 1 ]; then
-            echo "✗ expected exactly one Vary: Accept-Encoding with compression_vary on, got $n"
-            exit 1
-          fi
-          echo "✓ compression_vary on → single Vary: Accept-Encoding, gzip_vary not needed"
+          check_one_vary() {
+            local loc="$1" label="$2" hdr n
+            hdr=$(curl -s -D - -o /dev/null -H "Accept-Encoding: zstd" \
+              "http://127.0.0.1:18994${loc}x")
+            echo "--- ${label} (${loc})"
+            echo "$hdr"
+            echo "$hdr" | grep -qi '^content-encoding: zstd'
+            n=$(echo "$hdr" | grep -ci '^vary: accept-encoding' || true)
+            if [ "$n" -ne 1 ]; then
+              echo "✗ ${label}: expected exactly one Vary: Accept-Encoding, got $n"
+              exit 1
+            fi
+            echo "✓ ${label}: exactly one Vary: Accept-Encoding"
+          }
 
-          hdr_off=$(curl -s -D - -o /dev/null -H "Accept-Encoding: zstd" \
-            http://127.0.0.1:18994/off/x)
-          echo "$hdr_off"
-          echo "$hdr_off" | grep -qi '^content-encoding: zstd'
-          if echo "$hdr_off" | grep -qi '^vary:'; then
-            echo "✗ expected NO Vary with compression_vary off (its default)"
-            exit 1
-          fi
-          echo "✓ compression_vary off → no Vary: the exact risk the summary warning names"
+          check_one_vary /on/  "gzip_vary off + compression_vary on"
+          check_one_vary /off/ "gzip_vary off + compression_vary off"
 
   # ── ASAN + UBSAN build — catches the lifetime/UB bugs in this module's
   #    history (per-request ctx, terminal-frame). Uses valgrind.suppress'd

@@ -110,7 +110,7 @@ GET /t
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
 --- response_headers
 Content-Encoding: dcz
-Vary: Available-Dictionary, Sec-Fetch-Site
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -135,7 +135,7 @@ GET /t
 Accept-Encoding: zstd, dcz
 --- response_headers
 Content-Encoding: zstd
-Vary: Available-Dictionary, Sec-Fetch-Site
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -251,7 +251,7 @@ GET /t
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: cross-site"
 --- response_headers
 Content-Encoding: zstd
-Vary: Available-Dictionary, Sec-Fetch-Site
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -380,7 +380,7 @@ GET /t
 "Accept-Encoding: dcz\nAvailable-Dictionary: :$::bad_b64:"
 --- response_headers
 !Content-Encoding
-Vary: Available-Dictionary, Sec-Fetch-Site
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -467,7 +467,7 @@ GET /t
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
 --- response_headers
 Content-Encoding: dcz
-Vary: Available-Dictionary, Sec-Fetch-Site
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
@@ -755,7 +755,7 @@ GET /t
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: same-origin"
 --- response_headers
 Content-Encoding: dcz
-Vary: Available-Dictionary, Sec-Fetch-Site
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
 
