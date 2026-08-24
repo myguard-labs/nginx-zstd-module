@@ -2143,6 +2143,30 @@ ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf)
      */
     zmcf->stream_out_size = ZSTD_CStreamOutSize();
 
+    /*
+     * Preformat $zstd_dcz_dicts_hashed once per cycle. The value is
+     * configuration-constant by this point: dcz dictionaries are hashed
+     * by the zstd_dcz_dict directive handler, which runs during config
+     * parsing, i.e. strictly before init_main_conf(). Storing the final
+     * decimal ngx_str_t in the cycle-owned main conf lets the variable
+     * handler return an immutable buffer instead of allocating
+     * NGX_INT_T_LEN bytes and calling ngx_sprintf on every request.
+     *
+     * This MUST stay above the zstd_dict_file early return below: dcz
+     * dictionaries are configured with zstd_dcz_dict and do not require
+     * zstd_dict_file, so returning first would leave the string empty
+     * for exactly the configurations that use the variable.
+     */
+    zmcf->dcz_dicts_hashed_str.data = ngx_pnalloc(cf->pool, NGX_INT_T_LEN);
+    if (zmcf->dcz_dicts_hashed_str.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    zmcf->dcz_dicts_hashed_str.len =
+        ngx_sprintf(zmcf->dcz_dicts_hashed_str.data, "%ui",
+                    zmcf->dcz_dicts_hashed)
+        - zmcf->dcz_dicts_hashed_str.data;
+
     if (zmcf->dict_file.len == 0) {
         return NGX_CONF_OK;
     }
@@ -2171,23 +2195,6 @@ ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf)
     if (ngx_conf_full_name(cf->cycle, &zmcf->dict_file, 1) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
-
-    /*
-     * Preformat $zstd_dcz_dicts_hashed once per cycle. The value is
-     * configuration-constant, so store the final decimal ngx_str_t in
-     * the cycle-owned main conf. The variable handler then returns this
-     * immutable buffer directly instead of allocating NGX_INT_T_LEN
-     * bytes and calling ngx_sprintf on every request.
-     */
-    zmcf->dcz_dicts_hashed_str.data = ngx_pnalloc(cf->pool,
-                                                   NGX_INT_T_LEN);
-    if (zmcf->dcz_dicts_hashed_str.data == NULL) {
-        return NGX_CONF_ERROR;
-    }
-
-    zmcf->dcz_dicts_hashed_str.len = ngx_sprintf(
-        zmcf->dcz_dicts_hashed_str.data, "%ui",
-        zmcf->dcz_dicts_hashed) - zmcf->dcz_dicts_hashed_str.data;
 
     return NGX_CONF_OK;
 }
