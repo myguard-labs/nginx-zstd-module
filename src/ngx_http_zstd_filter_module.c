@@ -164,6 +164,17 @@ typedef struct {
     ZSTD_CDict                  *dict;
 
     ngx_array_t                 *dcz_dicts;  /* ngx_http_zstd_dcz_dict_t */
+
+    /*
+     * RFC 9842 secure-context escape hatch. dcz is only offered on a
+     * TLS connection (r->connection->ssl != NULL). Behind a
+     * TLS-terminating proxy nginx sees plaintext and that test fails,
+     * so an operator who terminates TLS in front of this nginx sets
+     * zstd_dcz_assume_secure_transport on to assert the hop the client
+     * actually spoke was secure. Never inferred from a request header:
+     * X-Forwarded-Proto is client-settable on a direct connection.
+     */
+    ngx_flag_t                   dcz_assume_secure;
 } ngx_http_zstd_loc_conf_t;
 
 
@@ -603,6 +614,13 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       offsetof(ngx_http_zstd_main_conf_t, dict_unsafe),
       NULL },
 
+    { ngx_string("zstd_dcz_assume_secure_transport"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_zstd_loc_conf_t, dcz_assume_secure),
+      NULL },
+
     { ngx_string("zstd_dcz_dict_file"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE12,
       ngx_http_zstd_dcz_dict_file,
@@ -959,6 +977,9 @@ ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
  * to ordinary content negotiation, never to a broken dcz:
  *
  *   - the location has zstd_dcz_dict_file dictionaries;
+ *   - the connection is a secure context (RFC 9842 section 8): TLS at
+ *     this nginx, or zstd_dcz_assume_secure_transport on for a
+ *     TLS-terminating proxy in front;
  *   - the request carries Available-Dictionary, a structured-field byte
  *     sequence (":base64:") decoding to exactly 32 bytes (the SHA-256 of
  *     the client's cached dictionary), and it matches one of ours;
@@ -1046,6 +1067,7 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     ngx_http_zstd_loc_conf_t *zlcf)
 {
     u_char                     buf[NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN];
+    ngx_uint_t                 secure;
     ngx_uint_t                 i, nheaders;
     ngx_table_elt_t           *h, *ae;
     ngx_http_zstd_dcz_dict_t  *dicts;
@@ -1055,6 +1077,44 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     }
 
     if (r != r->main) {
+        return NULL;
+    }
+
+    /*
+     * RFC 9842 section 8: compression dictionary transport MUST only be
+     * used in a secure context. Dictionary-compressed responses leak
+     * plaintext length information about content the dictionary already
+     * describes, which is exactly the oracle a network attacker on a
+     * cleartext hop wants. Fail closed: plain HTTP falls back to
+     * ordinary zstd.
+     *
+     * r->connection->ssl is NULL when a proxy in front of nginx
+     * terminated TLS. That deployment is supported only by an explicit
+     * operator acknowledgement (zstd_dcz_assume_secure_transport on),
+     * never by trusting a request header: X-Forwarded-Proto and friends
+     * are client-supplied on a directly reachable listener, so
+     * inferring "https" from one would let any client re-enable dcz
+     * over cleartext by asking for it.
+     *
+     * The guard mirrors ngx_connection_t's own condition for the ssl
+     * member (ngx_connection.h: `#if (NGX_SSL || NGX_COMPAT)`), not
+     * NGX_SSL alone: this module is built --with-compat, where the
+     * field exists (and is always NULL) without an SSL-capable nginx.
+     * Testing a narrower macro would compile the read out of exactly
+     * the build the module ships in.
+     */
+#if (NGX_SSL || NGX_COMPAT)
+    secure = (r->connection->ssl != NULL);
+#else
+    secure = 0;
+#endif
+
+    if (!secure && !zlcf->dcz_assume_secure) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: skip, not a secure context (RFC 9842 "
+                       "section 8); set "
+                       "\"zstd_dcz_assume_secure_transport on\" if TLS is "
+                       "terminated upstream");
         return NULL;
     }
 
@@ -2404,6 +2464,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->max_cctx_memory = NGX_CONF_UNSET;
     conf->bypass = NGX_CONF_UNSET_PTR;
     conf->dcz_dicts = NGX_CONF_UNSET_PTR;
+    conf->dcz_assume_secure = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -2452,6 +2513,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     /* a location that declares its own zstd_dcz_dict_file list replaces the
      * inherited one wholesale (standard nginx array-directive semantics) */
     ngx_conf_merge_ptr_value(conf->dcz_dicts, prev->dcz_dicts, NULL);
+    ngx_conf_merge_value(conf->dcz_assume_secure, prev->dcz_assume_secure, 0);
 
     /*
      * zstd_bypass_vary only makes sense alongside a zstd_bypass predicate: it

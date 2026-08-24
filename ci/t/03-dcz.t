@@ -21,10 +21,25 @@ if (defined $ENV{'TEST_NGINX_BINARY'}) {
 
 add_block_preprocessor(sub {
     my $block = shift;
-    return if !@dynamic_modules;
 
-    my $main_config = join "\n", map { "load_module $_;" } @dynamic_modules;
-    $block->set_value("main_config", $main_config);
+    if (@dynamic_modules) {
+        my $main_config = join "\n", map { "load_module $_;" } @dynamic_modules;
+        $block->set_value("main_config", $main_config);
+    }
+
+    # RFC 9842 section 8 restricts dcz to secure contexts, and this
+    # harness speaks plain HTTP -- Test::Nginx::Socket has no TLS
+    # listener. Every block below therefore runs behind the explicit
+    # "TLS is terminated upstream" acknowledgement, which is exactly the
+    # deployment those tests model. Blocks named "secure-context:" are
+    # the tests OF that gate and are left alone so they see the
+    # compiled-in default (off) or set the flag themselves.
+    return if $block->name =~ /secure-context:/;
+
+    my $http_config = $block->http_config;
+    $http_config = '' if !defined $http_config;
+    $block->set_value("http_config",
+                      "$http_config\nzstd_dcz_assume_secure_transport on;\n");
 });
 
 # The negotiation key is the SHA-256 of the committed dictionary fixture,
@@ -657,6 +672,166 @@ Content-Encoding: zstd
 GET /t
 --- more_headers eval
 "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: same-origin"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 27: secure-context: plain HTTP falls back to zstd with no directive
+# RFC 9842 section 8: compression dictionary transport MUST only be used
+# in a secure context. This block is exempt from the suite's
+# assume-secure preprocessor, so it exercises the COMPILED-IN default
+# (zstd_dcz_assume_secure_transport off) with no directive anywhere in
+# the configuration -- a block that opted in explicitly would pass even
+# if the default were wrong. Every other dcz gate here is satisfied: the
+# only reason this is not dcz is the cleartext connection.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: same-origin"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 28: secure-context: explicit off is the same fail-closed answer
+# Pins the directive's off value rather than only its absence, so a
+# future default flip cannot silently make TEST 27 vacuous.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_assume_secure_transport off;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 29: secure-context: the acknowledgement re-enables dcz over cleartext
+# The supported TLS-terminating-proxy deployment. Same request as TEST
+# 27, one directive different, opposite outcome -- so the pair isolates
+# the gate rather than some other difference.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_assume_secure_transport on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: same-origin"
+--- response_headers
+Content-Encoding: dcz
+Vary: Available-Dictionary
+--- no_error_log
+[error]
+
+
+
+=== TEST 30: secure-context: a client-supplied scheme header does not enable dcz
+# X-Forwarded-Proto (and every sibling spelling) is settable by anyone
+# who can reach a cleartext listener. If the module inferred "secure"
+# from one, the gate would be a suggestion. Nothing here is trusted:
+# all four requests stay plain zstd.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request eval
+["GET /t", "GET /t", "GET /t", "GET /t"]
+--- more_headers eval
+[
+    "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nX-Forwarded-Proto: https",
+    "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nForwarded: proto=https",
+    "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nX-Forwarded-Ssl: on",
+    "Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:\nFront-End-Https: on",
+]
+--- response_headers eval
+[
+    "Content-Encoding: zstd",
+    "Content-Encoding: zstd",
+    "Content-Encoding: zstd",
+    "Content-Encoding: zstd",
+]
+--- no_error_log
+[error]
+
+
+
+=== TEST 31: secure-context: the acknowledgement inherits into locations
+# http/server/location context: set once at server level, every location
+# under it is covered. Pins the merge, which a per-location-only test
+# would leave unproven.
+--- config
+    zstd on;
+    zstd_min_length 16;
+    zstd_dcz_assume_secure_transport on;
+    zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+
+    location /child {
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /child
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 32: secure-context: a location can opt back out of an inherited on
+# The merge is a real inheritance, not a one-way latch: a location that
+# is reachable directly over cleartext can turn the acknowledgement off
+# again even when the server block set it.
+--- config
+    zstd on;
+    zstd_min_length 16;
+    zstd_dcz_assume_secure_transport on;
+    zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+
+    location /direct {
+        zstd_dcz_assume_secure_transport off;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /direct
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
 --- response_headers
 Content-Encoding: zstd
 --- no_error_log

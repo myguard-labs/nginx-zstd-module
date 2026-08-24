@@ -41,6 +41,7 @@ This is a hardened fork: every push/PR is exercised against **nginx mainline**, 
     * [zstd_bypass_vary](#zstd_bypass_vary)
     * [zstd_dict_file](#zstd_dict_file)
     * [zstd_dcz_dict_file](#zstd_dcz_dict_file)
+    * [zstd_dcz_assume_secure_transport](#zstd_dcz_assume_secure_transport)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
     * [zstd_static](#zstd_static)
 * [Variables](#variables)
@@ -810,9 +811,9 @@ http {
 **Default:** `—`
 **Context:** `http`, `server`, `location` (repeatable)
 
-Standards-based dictionary compression per [RFC 9842](https://www.rfc-editor.org/rfc/rfc9842) (Compression Dictionary Transport). Each occurrence loads one dictionary — typically a **previous version of the resource** (delta-style) or a trained dictionary — and registers its SHA-256 as a negotiation key. When a request arrives whose `Available-Dictionary` header matches a loaded dictionary **and** whose `Accept-Encoding` lists `dcz` explicitly with a non-zero weight, the response is compressed against that dictionary and sent as `Content-Encoding: dcz`: a fixed 40-byte header (a zstd skippable frame carrying the dictionary's SHA-256) followed by an ordinary zstd frame. Chrome 130+ negotiates this automatically for same-origin resources. Every gate miss — unknown hash, no explicit `dcz` token (`*` deliberately does not match), `dcz;q=0`, a malformed `Available-Dictionary`, or `Sec-Fetch-Site` other than `same-origin`/`none` — falls back to the plain `zstd` path.
+Standards-based dictionary compression per [RFC 9842](https://www.rfc-editor.org/rfc/rfc9842) (Compression Dictionary Transport). Each occurrence loads one dictionary — typically a **previous version of the resource** (delta-style) or a trained dictionary — and registers its SHA-256 as a negotiation key. When a request arrives whose `Available-Dictionary` header matches a loaded dictionary **and** whose `Accept-Encoding` lists `dcz` explicitly with a non-zero weight, the response is compressed against that dictionary and sent as `Content-Encoding: dcz`: a fixed 40-byte header (a zstd skippable frame carrying the dictionary's SHA-256) followed by an ordinary zstd frame. Chrome 130+ negotiates this automatically for same-origin resources. Every gate miss — a non-secure context ([see below](#zstd_dcz_assume_secure_transport)), unknown hash, no explicit `dcz` token (`*` deliberately does not match), `dcz;q=0`, a malformed `Available-Dictionary`, or `Sec-Fetch-Site` other than `same-origin`/`none` — falls back to the plain `zstd` path.
 
-Unlike `zstd_dict_file`, no opt-in flag is needed: dcz is real HTTP negotiation, and only clients that advertised the dictionary ever receive it.
+Unlike `zstd_dict_file`, no opt-in flag is needed to make dcz *safe*: dcz is real HTTP negotiation, and only clients that advertised the dictionary ever receive it. One flag can still be required by your topology — RFC 9842 §8 restricts dcz to secure contexts, so a deployment where TLS is terminated *in front of* this nginx needs [zstd_dcz_assume_secure_transport](#zstd_dcz_assume_secure_transport). On a listener that terminates TLS itself, nothing extra is needed.
 
 The optional second argument supplies the dictionary's SHA-256 as 64 hex characters, trusted **verbatim** in place of hashing the file at config load — deploy tooling that generates the directive list has usually just computed every hash anyway (for deduplication), and skipping the load-time pass removes the dominant cost of `nginx -t` and reloads at hundreds of registered dictionaries. Only supply hashes for content-hashed immutable assets, from tooling that owns the config: a *stale* supplied hash keeps matching, and every client advertising it (and any shared cache serving them) gets responses compressed against the wrong dictionary. dcz frames carry a **content checksum** (XXH64 of the uncompressed content, verified by browsers' zstd decoders) precisely so this fails as a visible decode error — without it, a same-size stale dictionary decodes *successfully* to wrong bytes. Visible is still broken: the checksum bounds the damage, it does not excuse a stale hash. A self-computed hash of a changed file simply stops matching (safe fallback to plain `zstd`). Malformed values are config-load errors.
 
@@ -840,6 +841,7 @@ Operational notes:
 * **Caching.** Whenever dictionaries are configured, the module emits `Vary: Available-Dictionary` on **both** the dcz and the plain-zstd variants — which encoding a client receives depends on that request header for every client, and a shared cache that failed to key on it could serve an undecodable dcz body to a dictionary-less client. Keep `gzip_vary on` so `Vary: Accept-Encoding` is emitted alongside.
 * **Dictionary lifecycle.** Files are read once at config parse, and hashed only when no hash is supplied (`nginx -t` validates them; empty or > 10 MB files and duplicate dictionary hashes are load errors — supplied hashes are compared as declared, so with computed hashes "duplicate" means identical content). Rotate dictionaries by updating the config and reloading. A location that declares its own `zstd_dcz_dict_file` list replaces the inherited one wholesale. Hashing uses libcrypto's EVP SHA-256 when detected at build time — roughly an order of magnitude faster, which at hundreds of registered dictionaries turns seconds of `nginx -t`/reload time into a blip (`NGX_ZSTD_NO_LIBCRYPTO=1` in the configure environment opts out) — with a portable implementation built in as the fallback.
 * **Window and memory.** dcz frames never declare a window above 8 MB (the RFC's unconditional client guarantee), sized down to dictionary + expected content when smaller. An explicit `zstd_window_log` below that still wins — a dictionary does not void the memory cap. Dictionaries are referenced per request via `ZSTD_CCtx_refPrefix()` (RFC 9842 `type=raw` semantics); the per-request table build over the dictionary costs roughly milliseconds per MB of dictionary, so prefer focused dictionaries (the previous version of one resource) over giant blobs.
+* **Secure context.** RFC 9842 §8 restricts dictionary transport to secure contexts, so dcz is only negotiated over TLS. A plain-HTTP request that would otherwise match falls back to plain `zstd`. Behind a TLS-terminating proxy, see [zstd_dcz_assume_secure_transport](#zstd_dcz_assume_secure_transport).
 * **Cross-origin.** Requests with `Sec-Fetch-Site` other than `same-origin`/`none` fall back to plain zstd rather than attempting RFC 9842's CORS legs. `Dictionary-ID` is not consumed — the hash is a complete key — so omit `id=` from `Use-As-Dictionary` (clients would echo it, but nothing here needs it).
 
 **Troubleshooting:** if `Vary: Available-Dictionary` appears but dcz never negotiates for hashes you know are right, run `nginx -T | grep dcz_dict_file` and check the loaded entries are your dictionary *files* — a deploy-generated list of directives must be pulled in with `include`, not passed to `zstd_dcz_dict_file` itself (which loyally loads the list file as a one-entry dictionary that matches nothing). Also check the error log for a rejected reload: a failed `nginx -t` leaves the previous configuration running.
@@ -852,6 +854,32 @@ curl -s -H 'Accept-Encoding: zstd, dcz' \
      https://example.com/app/app-v42.js \
 | zstd -d -D app-v41.js | diff - app-v42.js && echo "byte-exact"
 ```
+
+---
+
+### zstd_dcz_assume_secure_transport
+
+**Syntax:** `zstd_dcz_assume_secure_transport on | off;`
+**Default:** `zstd_dcz_assume_secure_transport off;`
+**Context:** `http`, `server`, `location`
+
+Asserts that the client-facing hop is TLS even though this nginx sees plaintext, re-enabling [`dcz`](#zstd_dcz_dict_file) negotiation on a non-TLS connection.
+
+[RFC 9842](https://www.rfc-editor.org/rfc/rfc9842) §8 requires compression dictionary transport to be used only in a **secure context**. By default the module enforces that directly: `dcz` is negotiated only when the request arrived on a TLS connection, and a plain-HTTP request that would otherwise match falls back to plain `zstd`. That is the fail-closed direction — dictionary compression over cleartext hands a network attacker a length oracle over content the dictionary already describes.
+
+When TLS is terminated by a load balancer or CDN in front of this nginx, the connection nginx sees *is* plaintext and the check fires even though the client spoke HTTPS. Set this directive on in that deployment:
+
+```nginx
+server {
+    listen 8080;                                # behind a TLS terminator
+
+    zstd on;
+    zstd_dcz_assume_secure_transport on;        # the client hop is HTTPS
+    zstd_dcz_dict_file /var/www/releases/app-v41.js;
+}
+```
+
+The directive is an **operator acknowledgement, not a detection**. The module deliberately does not infer the client's scheme from `X-Forwarded-Proto`, `Forwarded` or any other request header: those are client-supplied on a directly reachable listener, so trusting one would let any client re-enable `dcz` over cleartext simply by sending it. Only enable this on a listener that is genuinely unreachable except through your TLS terminator — if the same listener can be hit directly over HTTP, enabling it puts those clients back in the situation §8 forbids.
 
 ---
 

@@ -1,5 +1,23 @@
 Changes with http-zstd
 
+    *) Security: dcz is now offered only in a secure context, as RFC 9842
+       section 8 requires. The negotiation gate checked the dictionary
+       hash, the main request, the request headers and the coding weight
+       but never consulted transport security, so a matching request over
+       plain HTTP was served as Content-Encoding: dcz. Dictionary
+       compression over cleartext gives a network attacker a length
+       oracle over content the dictionary already describes. Requests on
+       a non-TLS connection now fall back to plain zstd.
+       Deployments that terminate TLS on a proxy in front of nginx see a
+       cleartext connection here and must opt in explicitly with the new
+       zstd_dcz_assume_secure_transport directive. The module never
+       infers the client's scheme from X-Forwarded-Proto or any other
+       request header: those are client-supplied on a directly reachable
+       listener, so trusting one would let any client re-enable dcz over
+       cleartext.
+       Affects only configurations using zstd_dcz_dict_file, which is new
+       in this release, so no released version is affected.
+
     *) Security: the dcz cross-origin gate could be bypassed by a
        duplicate request header. Sec-Fetch-Site and Available-Dictionary
        are not in nginx's known-header table, so nginx chains duplicate

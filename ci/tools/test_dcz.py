@@ -18,6 +18,7 @@ import os
 import pathlib
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,26 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=18106,
         help="Local TCP port for the temporary nginx instance.",
+    )
+    parser.add_argument(
+        "--tls-port",
+        type=int,
+        default=None,
+        help=(
+            "Local TCP port for the native-TLS listener "
+            "(default: --port + 1). RFC 9842 section 8 restricts dcz to "
+            "secure contexts, so the happy path is exercised here."
+        ),
+    )
+    parser.add_argument(
+        "--insecure-port",
+        type=int,
+        default=None,
+        help=(
+            "Local TCP port for a plain-HTTP listener with NO "
+            "zstd_dcz_assume_secure_transport (default: --port + 2). "
+            "Used for the fail-closed secure-context checks."
+        ),
     )
     parser.add_argument(
         "--zstd-bin",
@@ -123,10 +144,54 @@ def build_fixtures(root: pathlib.Path, lines: int) -> tuple[bytes, bytes]:
     return dict_path.read_bytes(), (root / "html" / "app.js").read_bytes()
 
 
-def write_config(root: pathlib.Path, port: int, modules) -> pathlib.Path:
+def make_selfsigned(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """Self-signed localhost cert for the native-TLS listener. Generated
+    per run rather than committed: a fixture certificate in-tree expires
+    and turns into a rolling CI failure
+    (feedback-fixed-date-test-ages-into-failure)."""
+    cert = root / "conf" / "test.crt"
+    key = root / "conf" / "test.key"
+    if shutil.which("openssl") is None:
+        # ci/tools/soak.sh already depends on this binary in the same
+        # jobs, so a miss here means the image changed, not that the
+        # test is optional. Say so instead of surfacing FileNotFoundError.
+        raise RuntimeError(
+            "the openssl CLI is required to generate the native-TLS "
+            "listener's certificate (RFC 9842 secure-context checks); "
+            "install the openssl package"
+        )
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "2",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return cert, key
+
+
+def write_config(
+    root: pathlib.Path, port: int, tls_port: int, insecure_port: int, modules
+) -> pathlib.Path:
     conf_dir = root / "conf"
     conf_dir.mkdir()
     (root / "logs").mkdir()
+    cert, key = make_selfsigned(root)
     load = "".join(f"load_module {m};\n" for m in modules)
     conf = conf_dir / "nginx.conf"
     conf.write_text(
@@ -144,8 +209,32 @@ http {{
     zstd on;
     zstd_min_length 64;
     zstd_dcz_dict_file {root}/dicts/app-v1.js;
+
+    # Cleartext listener modelling "TLS terminated by a proxy in front":
+    # RFC 9842 section 8 forbids dcz outside a secure context, and this
+    # listener carries the explicit operator acknowledgement that the
+    # client-facing hop was HTTPS. Every pre-existing check in this file
+    # runs here.
     server {{
         listen 127.0.0.1:{port};
+        zstd_dcz_assume_secure_transport on;
+        root html;
+    }}
+
+    # Native TLS: the secure context the RFC actually describes, with no
+    # acknowledgement directive at all. Proves the gate passes on
+    # r->connection->ssl rather than only on the opt-in.
+    server {{
+        listen 127.0.0.1:{tls_port} ssl;
+        ssl_certificate {cert};
+        ssl_certificate_key {key};
+        root html;
+    }}
+
+    # Cleartext with NO acknowledgement: the compiled-in default. Nothing
+    # a client can send may negotiate dcz here.
+    server {{
+        listen 127.0.0.1:{insecure_port};
         root html;
     }}
 }}
@@ -156,13 +245,26 @@ http {{
     return conf
 
 
-def fetch(port: int, headers: dict):
+def fetch(port: int, headers: dict, tls: bool = False):
     """Returns (email.message.Message, body). The Message preserves
     repeated header lines — the module legitimately emits two Vary
     lines (Accept-Encoding via gzip_vary, Available-Dictionary its own),
-    and a dict would silently keep only one of them."""
-    request = urllib.request.Request(f"http://127.0.0.1:{port}/app.js", headers=headers)
-    with urllib.request.urlopen(request, timeout=10) as response:
+    and a dict would silently keep only one of them.
+
+    tls=True talks to the native-TLS listener. The certificate is the
+    per-run self-signed one from make_selfsigned(), so verification is
+    switched off deliberately: this asserts the module's view of
+    r->connection->ssl, not PKI."""
+    scheme = "https" if tls else "http"
+    request = urllib.request.Request(
+        f"{scheme}://127.0.0.1:{port}/app.js", headers=headers
+    )
+    context = None
+    if tls:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(request, timeout=10, context=context) as response:
         return response.headers, response.read()
 
 
@@ -240,7 +342,9 @@ def main() -> int:
         os.chmod(tmp, 0o755)
         root = pathlib.Path(tmp)
         dict_bytes, resource = build_fixtures(root, args.fixture_lines)
-        conf = write_config(root, args.port, modules)
+        tls_port = args.tls_port if args.tls_port else args.port + 1
+        insecure_port = args.insecure_port if args.insecure_port else args.port + 2
+        conf = write_config(root, args.port, tls_port, insecure_port, modules)
         dict_hash = hashlib.sha256(dict_bytes).digest()
         dict_b64 = base64.b64encode(dict_hash).decode()
         bad_b64 = base64.b64encode(b"\x01" * 32).decode()
@@ -254,6 +358,70 @@ def main() -> int:
             )
         try:
             wait_for_port(args.port, stderr_file=stderr_file)
+            wait_for_port(tls_port, stderr_file=stderr_file)
+            wait_for_port(insecure_port, stderr_file=stderr_file)
+
+            # -- RFC 9842 section 8: dcz is a secure-context-only coding.
+            dcz_headers = {
+                "Accept-Encoding": "zstd, dcz",
+                "Available-Dictionary": f":{dict_b64}:",
+            }
+
+            tls_headers, tls_body = fetch(tls_port, dict(dcz_headers), tls=True)
+            check(
+                "secure context: native TLS negotiates dcz with no opt-in",
+                content_encoding(tls_headers) == "dcz",
+                f"(got {content_encoding(tls_headers)})",
+            )
+            check(
+                "secure context: native-TLS dcz body carries the RFC magic",
+                tls_body[:8] == DCZ_MAGIC and tls_body[8:40] == dict_hash,
+                f"(got {tls_body[:8].hex()})",
+            )
+
+            insecure_headers, insecure_body = fetch(insecure_port, dict(dcz_headers))
+            check(
+                "secure context: plain HTTP falls back to zstd "
+                "(compiled-in default, no directive)",
+                content_encoding(insecure_headers) == "zstd",
+                f"(got {content_encoding(insecure_headers)})",
+            )
+            insecure_src = root / "insecure-fallback.zst"
+            insecure_src.write_bytes(insecure_body)
+            # check=False on purpose: if the gate regresses, this body is
+            # a dcz frame and the dictionary-less decode EXITS NON-ZERO.
+            # With check=True that regression surfaces as a traceback
+            # that skips every remaining assertion instead of as a
+            # readable FAIL line.
+            insecure_decode = subprocess.run(
+                [args.zstd_bin, "-d", "-q", "-c", str(insecure_src)],
+                check=False,
+                capture_output=True,
+            )
+            check(
+                "secure context: the plain-HTTP fallback is still decodable "
+                "without the dictionary",
+                insecure_decode.returncode == 0 and insecure_decode.stdout == resource,
+                f"(rc={insecure_decode.returncode}, "
+                f"{len(insecure_decode.stdout)} bytes)",
+            )
+
+            # An untrusted client-supplied scheme signal must not
+            # re-enable dcz: X-Forwarded-Proto is settable by anyone who
+            # can reach the listener, so the module never consults it.
+            for spoof in (
+                {"X-Forwarded-Proto": "https"},
+                {"Forwarded": "proto=https"},
+                {"X-Forwarded-Ssl": "on"},
+                {"Front-End-Https": "on"},
+            ):
+                spoof_headers, _ = fetch(insecure_port, {**dcz_headers, **spoof})
+                name = next(iter(spoof))
+                check(
+                    f"secure context: spoofed {name} does not enable dcz",
+                    content_encoding(spoof_headers) == "zstd",
+                    f"(got {content_encoding(spoof_headers)})",
+                )
 
             # -- plain zstd client: baseline and cache-key contract
             headers, plain_body = fetch(args.port, {"Accept-Encoding": "zstd"})
