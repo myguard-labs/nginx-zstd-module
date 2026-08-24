@@ -2631,3 +2631,70 @@ Accept-Encoding: gzip , zstd ;q=1
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 100: multi-chunk streamed body across several body-filter callbacks
+# Regression for the O(1)-tail append bug: ctx->last_in is retracked to
+# &ctx->in whenever add_data drains the last retained link (ctx->in becomes
+# NULL), because ngx_free_chain() overwrites that consumed link's ->next
+# with the pool's free-chain head immediately afterward. Without the
+# retrack, the NEXT body-filter callback's append splices its copied chain
+# into ngx_pool_t.chain instead of onto ctx->in -- every callback after the
+# first is silently dropped, the compressor never receives the rest of the
+# body, and the response hangs waiting for a last_buf that never arrives.
+# Multiple real (non-special, proxy_buffering off) chunks with pauses in
+# between exercise several separate ngx_http_zstd_body_filter() callbacks
+# against the same request, each one draining ctx->in completely before the
+# next chunk arrives -- the exact interleaving the bug needs.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/up;
+    }
+    location /up {
+        proxy_http_version 1.1;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_RAND_PORT_1/;
+    }
+--- tcp_listen: $TEST_NGINX_RAND_PORT_1
+--- tcp_no_close
+--- tcp_reply_delay: 100ms
+--- tcp_reply eval
+my $hdr  = "HTTP/1.1 200 OK\r\n"
+         . "Content-Type: text/plain\r\n"
+         . "Transfer-Encoding: chunked\r\n"
+         . "Connection: close\r\n\r\n";
+my $chunk = sub { sprintf("%x\r\n%s\r\n", length($_[0]), $_[0]) };
+[
+    $hdr . $chunk->("first-chunk-"),
+    $chunk->("second-chunk-"),
+    $chunk->("third-chunk-"),
+    $chunk->("fourth-chunk-tail\n") . "0\r\n\r\n",
+]
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- response_body_filters eval
+sub {
+    my $zstd = $_[0];
+    require File::Temp;
+    my ($tfh, $tmp) = File::Temp::tempfile("zstd_t100_XXXXXX",
+                                           TMPDIR => 1, UNLINK => 1);
+    binmode($tfh); print $tfh $zstd; close($tfh);
+    open(my $r, "-|", "zstd", "-dqc", $tmp) or do { unlink $tmp; return "ERR" };
+    local $/; my $d = <$r>; close($r); my $rc = $?; unlink $tmp;
+    return "ERR-DECODE rc=$rc" if $rc != 0;
+    return $d;
+}
+--- response_body
+first-chunk-second-chunk-third-chunk-fourth-chunk-tail
+--- no_error_log
+[error]
+

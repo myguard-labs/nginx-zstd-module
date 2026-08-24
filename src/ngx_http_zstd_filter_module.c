@@ -123,6 +123,16 @@ typedef struct {
     ngx_str_t                    file;    /* resolved path, for logs */
     ngx_str_t                    bytes;   /* raw dictionary contents */
     u_char                       hash[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN];
+
+    /*
+     * The full 40-byte dcz skippable-frame prefix (magic + declared
+     * content size + this dictionary's hash), assembled once here at
+     * config load instead of on every negotiated request. emit_dcz_header
+     * previously built it per-request from two separate ngx_cpymem calls
+     * (a constant array plus the hash); this is the same bytes, computed
+     * once and copied whole.
+     */
+    u_char                       frame_header[NGX_HTTP_ZSTD_DCZ_HEADER_LEN];
 } ngx_http_zstd_dcz_dict_t;
 
 
@@ -167,10 +177,21 @@ typedef enum {
 
 typedef struct {
     ngx_chain_t                 *in;
+    ngx_chain_t                **last_in;
     ngx_chain_t                 *free;
     ngx_chain_t                 *busy;
     ngx_chain_t                 *out;
     ngx_chain_t                **last_out;
+
+    /*
+     * A chain link popped from ctx->free by get_buf, retained rather than
+     * returned to the pool, so the compress step can wrap ctx->out_buf in
+     * it directly instead of paying ngx_free_chain() here and
+     * ngx_alloc_chain_link() again in compress() for the same buffer. NULL
+     * when out_buf was freshly allocated (ngx_create_temp_buf path), in
+     * which case compress() allocates a link as before.
+     */
+    ngx_chain_t                 *pending_link;
 
     ngx_buf_t                   *in_buf;
     ngx_buf_t                   *out_buf;
@@ -839,6 +860,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     ngx_http_set_ctx(r, ctx, ngx_http_zstd_filter_module);
 
     ctx->last_out = &ctx->out;
+    ctx->last_in  = &ctx->in;
     ctx->dcz_dict = dcz;
 
     h = ngx_list_push(&r->headers_out.headers);
@@ -1160,6 +1182,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
     ngx_int_t                  flush, rc;
     ngx_chain_t               *cl;
+    ngx_chain_t               *in_copy;
     ngx_http_zstd_ctx_t       *ctx;
     ngx_http_zstd_loc_conf_t  *zlcf;
 
@@ -1180,6 +1203,19 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http zstd filter");
+
+    /*
+     * A no-op initial callback: no CCtx yet, no incoming data, nothing
+     * already queued or in flight downstream. There is no compressed or
+     * downstream state to flush, so initializing the CCtx (and, for dcz,
+     * queuing the 40-byte prefix) here would only be undone by whatever
+     * later call actually carries data or the end-of-stream signal.
+     */
+    if (!ctx->cctx_ready && in == NULL && ctx->in == NULL
+        && ctx->busy == NULL)
+    {
+        return NGX_OK;
+    }
 
     if (!ctx->cctx_ready) {
         /*
@@ -1208,9 +1244,35 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     }
 
     if (in) {
-        if (ngx_chain_add_copy(r->pool, &ctx->in, in) != NGX_OK) {
+        /*
+         * O(1) append: ngx_chain_add_copy() walks the destination chain
+         * from its head to find the tail before appending, which makes
+         * repeated callbacks against a pending (not yet fully drained)
+         * ctx->in chain O(n^2) in the number of links retained across
+         * callbacks -- reachable whenever upstream data arrives while
+         * downstream backpressure (NGX_AGAIN from
+         * ngx_http_next_body_filter) leaves prior links queued. Copy the
+         * incoming chain into a fresh, NULL-headed local chain first (so
+         * ngx_chain_add_copy's own head-walk is bounded by the size of
+         * just this callback's `in`, not the whole retained backlog), then
+         * splice that copy onto the tracked tail in O(1). Consumers of
+         * ctx->in (add_data) only ever advance it link-by-link from the
+         * head and never reorder it, so the tracked tail cannot go stale
+         * between calls.
+         */
+        in_copy = NULL;
+
+        if (ngx_chain_add_copy(r->pool, &in_copy, in) != NGX_OK) {
             goto failed;
         }
+
+        *ctx->last_in = in_copy;
+
+        while (in_copy->next) {
+            in_copy = in_copy->next;
+        }
+
+        ctx->last_in = &in_copy->next;
 
         r->connection->buffered |= NGX_HTTP_GZIP_BUFFERED;
     }
@@ -1558,9 +1620,15 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_AGAIN;
     }
 
-    cl = ngx_alloc_chain_link(r->pool);
-    if (cl == NULL) {
-        return NGX_ERROR;
+    if (ctx->pending_link != NULL) {
+        cl = ctx->pending_link;
+        ctx->pending_link = NULL;
+
+    } else {
+        cl = ngx_alloc_chain_link(r->pool);
+        if (cl == NULL) {
+            return NGX_ERROR;
+        }
     }
 
     b = ctx->out_buf;
@@ -1621,6 +1689,20 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     cl = ctx->in;
     ctx->in_buf = cl->buf;
     ctx->in = cl->next;
+
+    /*
+     * This was the last retained link: ctx->last_in still points at
+     * &cl->next (the O(1)-tail optimization above tracks the tail across
+     * body-filter callbacks). ngx_free_chain() below overwrites cl->next
+     * with the pool's free-chain head, so leaving ctx->last_in aimed at it
+     * would splice the NEXT incoming chain into ngx_pool_t.chain instead of
+     * onto ctx->in -- silently dropping every subsequent body-filter
+     * callback's data. Re-point it at &ctx->in before the free.
+     */
+    if (ctx->in == NULL) {
+        ctx->last_in = &ctx->in;
+    }
+
     ngx_free_chain(r->pool, cl);
 
     /*
@@ -1695,7 +1777,15 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         cl = ctx->free;
         ctx->free = ctx->free->next;
         ctx->out_buf = cl->buf;
-        ngx_free_chain(r->pool, cl);
+
+        /*
+         * Retain this link instead of freeing it: compress() will wrap
+         * this same out_buf in a chain link to emit it, so returning it to
+         * the pool here only to allocate an equivalent one there is a
+         * wasted free/acquire pair. cl->buf/cl->next are overwritten by
+         * whoever consumes pending_link, so nothing needs clearing now.
+         */
+        ctx->pending_link = cl;
 
         /*
          * ngx_chain_update_chains() resets pos/last on a recycled buffer but
@@ -1714,7 +1804,46 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
                        "zstd get_buf: reused free buffer %p", ctx->out_buf);
 
     } else if (ctx->bufs < zlcf->bufs.num) {
-        ctx->out_buf = ngx_create_temp_buf(r->pool, zlcf->bufs.size);
+        size_t  buf_size = zlcf->bufs.size;
+
+        /*
+         * Size only the FIRST output buffer from the pledged size, when
+         * known. Every allocation shares zlcf->bufs.size (the config
+         * directive governs both count and size for the whole pool), so
+         * shrinking it globally would change streaming geometry -- forcing
+         * libzstd into more, smaller flush boundaries mid-stream, which the
+         * :2255-area merge comment exists to avoid. Narrowing to just the
+         * first buffer avoids over-allocating a full zlcf->bufs.size
+         * (default 131072B on many builds) for a response known in advance
+         * to be much smaller, e.g. a 389B body, while every subsequent
+         * buffer keeps the full configured size for the unknown-length
+         * (chunked/proxied) tail. pledged_size is -1 exactly on that
+         * streaming case, so this never fires there.
+         */
+        if (ctx->bufs == 0 && ctx->pledged_size >= 0) {
+            size_t  bound = ZSTD_compressBound((size_t) ctx->pledged_size);
+
+            /*
+             * ZSTD_compressBound() covers only the compressed payload; pad
+             * it for libzstd's own frame/block header overhead (the dcz
+             * 40-byte skippable-frame prefix is queued on its own separate
+             * buffer by emit_dcz_header and never lands here). Never grow
+             * past the configured size, and keep a small floor so
+             * tiny/empty bodies still get a buffer the frame overhead fits
+             * inside.
+             */
+            bound += 64;
+
+            if (bound < 256) {
+                bound = 256;
+            }
+
+            if (bound < buf_size) {
+                buf_size = bound;
+            }
+        }
+
+        ctx->out_buf = ngx_create_temp_buf(r->pool, buf_size);
         if (ctx->out_buf == NULL) {
             return NGX_ERROR;
         }
@@ -1770,11 +1899,6 @@ static ngx_int_t
 ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx)
 {
-    static const u_char  magic[8] = {
-        0x5e, 0x2a, 0x4d, 0x18,     /* 0x184D2A5E, little-endian */
-        0x20, 0x00, 0x00, 0x00      /* frame content size: 32 */
-    };
-
     ngx_buf_t    *b;
     ngx_chain_t  *cl;
 
@@ -1783,9 +1907,8 @@ ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    b->last = ngx_cpymem(b->last, magic, sizeof(magic));
-    b->last = ngx_cpymem(b->last, ctx->dcz_dict->hash,
-                         NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+    b->last = ngx_cpymem(b->last, ctx->dcz_dict->frame_header,
+                         NGX_HTTP_ZSTD_DCZ_HEADER_LEN);
 
     cl = ngx_alloc_chain_link(r->pool);
     if (cl == NULL) {
@@ -3011,8 +3134,12 @@ ngx_http_zstd_cleanup_cctx(void *data)
  * holds the previous response's compression state until something else
  * claims it.
  * init_cctx does reset before reuse, so this is defence in depth against a
- * future caller that forgets -- and it releases the session's internal buffers
- * promptly rather than pinning them until the next request arrives.
+ * future caller that forgets. It does NOT release the session's internal
+ * buffers: measured on libzstd 1.5.7, ZSTD_sizeof_CCtx() is byte-identical
+ * before and after ZSTD_reset_session_only at levels 1/7/13/19, for both a
+ * completed stream and one abandoned mid-stream. The workspace is
+ * level-driven and stays pinned until the slot is freed or replaced; this
+ * reset only clears session/frame state, not memory.
  */
 static void
 ngx_http_zstd_release_cctx(void *data)
@@ -3316,6 +3443,23 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     dict->file = path;
     dict->bytes = bytes;
     ngx_memcpy(dict->hash, hash, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+
+    {
+        /*
+         * Assemble the 40-byte dcz frame prefix once, here, instead of on
+         * every request emit_dcz_header runs for this dictionary. Same
+         * bytes as before: the zstd skippable-frame magic 0x184D2A5E with
+         * a declared 32-byte content, then this dictionary's hash.
+         */
+        static const u_char  magic[8] = {
+            0x5e, 0x2a, 0x4d, 0x18,     /* 0x184D2A5E, little-endian */
+            0x20, 0x00, 0x00, 0x00      /* frame content size: 32 */
+        };
+
+        ngx_memcpy(dict->frame_header, magic, sizeof(magic));
+        ngx_memcpy(dict->frame_header + sizeof(magic), dict->hash,
+                   NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+    }
 
     return NGX_CONF_OK;
 
