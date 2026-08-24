@@ -27,7 +27,7 @@
  *
  * On platforms with __builtin_clzll (GCC, Clang), uses the compiler builtin
  * for O(1) bit-position lookup. On other platforms (MSVC, others), falls back
- * to an O(log x) binary search loop.
+ * to a linear shift-and-count loop (at most 13 iterations in range).
  *
  * Result: 10 <= returned wlog <= 23 always (respects min and cap).
  */
@@ -45,10 +45,9 @@ ngx_http_zstd_ceil_log2(size_t x)
 #if defined(__GNUC__) || defined(__clang__)
     /* Use compiler builtin for count-leading-zeros on 64-bit. GCC and Clang
      * both provide __builtin_clzll; __builtin_clz is 32-bit but we require
-     * 64-bit size_t here. The bit length (64 - leading_zeros) is already
-     * ceil-log2 for powers of two. For non-powers-of-two, it's one too small,
-     * so we increment. The test is inverted: when x IS a power of two,
-     * decrement back to the correct value. */
+     * 64-bit size_t here. The bit length (64 - leading_zeros) is exactly
+     * ceil-log2 for non-powers-of-two, and one too many for exact powers of
+     * two -- so the only correction needed is a decrement in that case. */
     unsigned long long  ull = (unsigned long long) x;
     int                 leading_zeros = __builtin_clzll(ull);
     ngx_uint_t          wlog = 64 - leading_zeros;
