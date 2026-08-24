@@ -1,17 +1,23 @@
 Changes with http-zstd
 
     *) Feature: "zstd_buffers number size" now bounds the aggregate
-       number x size product at config load. The directive previously
-       delegated entirely to nginx core's ngx_conf_set_bufs_slot(),
-       which range-checks each argument but never the product, so a
-       typo ("zstd_buffers 100000 100000;" instead of "100 100k;") or a
-       value inherited unchanged from an outer block could request an
-       overflowing or merely enormous per-response output-chain pool.
-       An overflowing product is now a hard config-load error naming
-       both operands; a representable product above 8 MB is a warning
+       number x size product at config load, in four tiers. The
+       directive previously delegated entirely to nginx core's
+       ngx_conf_set_bufs_slot(), which range-checks each argument but
+       never the product, so a typo ("zstd_buffers 100000 100000;"
+       instead of "100 100k;") or a value inherited unchanged from an
+       outer block could request an overflowing, or merely enormous, or
+       even multi-exabyte per-response output-chain pool -- the last of
+       these previously passed with only a log line. An overflowing
+       product is a hard config-load error naming both operands,
+       unconditionally. A representable product above 8 MB is a warning
        (never a failure) naming the total, marked as per-response, and
        cross-referencing the "zstd_max_cctx_memory" advisory for the
-       other half of the per-request memory budget. The check covers an
+       other half of the per-request memory budget. A representable
+       product above 256 MB is now a hard config-load error unless the
+       new "zstd_buffers_unsafe on;" directive (http, server, location,
+       inherited) is also set, in which case it is accepted and still
+       logged as a warning rather than silenced. The check covers an
        explicit value, one inherited from an outer block, and the
        module's own default alike.
 

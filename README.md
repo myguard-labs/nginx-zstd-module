@@ -490,41 +490,78 @@ but the **product** was not checked at all until this policy was added —
 a typo (`zstd_buffers 100000 100000;` instead of `100 100k;`) or a value
 inherited unchanged from an outer block could request an overflowing or
 merely enormous per-response output-chain pool, multiplied by every
-concurrent response under load.
+concurrent response under load. Four tiers apply to the resolved value,
+in ascending severity:
 
-* **`number × size` overflowing the platform's `size_t`** is a hard
-  config-load error, unconditionally — there is no representable
-  acknowledgement for a product that cannot exist:
+1. **`≤ 8 MB`** — silent. This covers nginx's own `zstd_buffers 32 4k`
+   default (128 KB) and this module's own `2 × ZSTD_CStreamOutSize()`
+   default (~256 KB at level 6) with generous headroom.
 
-  ```
-  nginx: [emerg] "zstd_buffers" (explicit directive) requests
-  9223372036854775807 buffers of 9223372036854775807 bytes each; that
-  product overflows the platform's size_t and cannot be a config any
-  operator meant to write
-  ```
+2. **`> 8 MB`, `≤ 256 MB`** — a **warning**, not an error. A config that
+   loads today keeps loading after an upgrade:
 
-* **A representable-but-large product** (above **8 MB**, generous
-  headroom over both nginx's own `zstd_buffers 32 4k` default and this
-  module's own `2 × ZSTD_CStreamOutSize()` default) is a **warning**, not
-  an error — a config that loads today keeps loading after an upgrade:
+   ```
+   nginx: [warn] "zstd_buffers" (merged value) requests 1 x 8388609 bytes
+   = ~8388609 bytes of output-chain memory PER RESPONSE; that is on top
+   of the per-request compressor (CCtx) working set -- see the
+   "zstd_max_cctx_memory" advisory above for that figure -- and both are
+   multiplied by concurrent responses under load
+   ```
 
-  ```
-  nginx: [warn] "zstd_buffers" (merged value) requests 1 x 8388609 bytes
-  = ~8388609 bytes of output-chain memory PER RESPONSE; that is on top
-  of the per-request compressor (CCtx) working set -- see the
-  "zstd_max_cctx_memory" advisory above for that figure -- and both are
-  multiplied by concurrent responses under load
-  ```
+3. **`> 256 MB`, no acknowledgement** — a **hard config-load error**.
+   Unlike the CCtx memory estimate (which depends on libzstd internals
+   the operator never directly sees), `number` and `size` are two
+   integers the operator typed out literally, so at 256 MB — two hundred
+   times nginx's own default — a refusal by default is the safer
+   reading of "this is almost certainly a mistake":
 
-  The total is **per response**; add it to the CCtx figure from the
-  [`zstd_max_cctx_memory`](#zstd_max_cctx_memory) advisory to size the
-  full per-request compressor + output-chain budget, then multiply by
-  expected concurrency.
+   ```
+   nginx: [emerg] "zstd_buffers" (merged value) requests 2147483647 x
+   1073741824 bytes = ~2305843008139952128 bytes of output-chain memory
+   PER RESPONSE, above the 256 MB hard cap -- that is on top of the
+   per-request compressor (CCtx) working set (see the
+   "zstd_max_cctx_memory" advisory above) and both are multiplied by
+   concurrent responses under load. Lower "zstd_buffers", or set
+   "zstd_buffers_unsafe on;" to acknowledge this total is intentional
+   ```
+
+4. **`> 256 MB`, with `zstd_buffers_unsafe on;`** — accepted, still
+   logged as a **warning** (not silenced) so the acknowledgement remains
+   visible in the log:
+
+   ```
+   nginx: [warn] "zstd_buffers" (merged value) requests 2147483647 x
+   1073741824 bytes = ~2305843008139952128 bytes of output-chain memory
+   PER RESPONSE, above the 256 MB hard cap; accepted because
+   "zstd_buffers_unsafe on;" acknowledges it. ...
+   ```
+
+`number × size` **overflowing the platform's `size_t`** is refused
+unconditionally at every tier, including with `zstd_buffers_unsafe on;`
+set — there is no representable acknowledgement for a product that
+cannot exist:
+
+```
+nginx: [emerg] "zstd_buffers" (explicit directive) requests
+9223372036854775807 buffers of 9223372036854775807 bytes each; that
+product overflows the platform's size_t and cannot be a config any
+operator meant to write
+```
+
+The total named in tiers 2–4 is **per response**; add it to the CCtx
+figure from the [`zstd_max_cctx_memory`](#zstd_max_cctx_memory) advisory
+to size the full per-request compressor + output-chain budget, then
+multiply by expected concurrency.
+
+`zstd_buffers_unsafe` is `http, server, location` scoped and inherits
+like any other directive here — set it once at the level that also sets
+`zstd_buffers`, or higher up if every location beneath needs the same
+acknowledgement.
 
 The check runs once the value is fully resolved (explicit, inherited
 from an outer block, or this module's own default) so all three sources
 are covered by the same bound; an explicit value that also happens to be
-the one that ends up in effect is warned about once, not twice.
+the one that ends up in effect is reported once, not twice.
 
 ---
 

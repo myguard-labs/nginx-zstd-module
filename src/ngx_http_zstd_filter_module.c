@@ -185,6 +185,15 @@ typedef struct {
 
     ngx_bufs_t                   bufs;
 
+    /*
+     * Acknowledgement for an aggregate "zstd_buffers number * size"
+     * above NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES. Mirrors
+     * "zstd_dict_file_unsafe" and "zstd_max_cctx_memory 0": the operator
+     * has to say, explicitly and in words, that a total this large is
+     * intentional -- the check does not just log and move on.
+     */
+    ngx_flag_t                   bufs_unsafe;
+
     ngx_array_t                 *types_keys;
 
     ZSTD_CDict                  *dict;
@@ -398,7 +407,7 @@ static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
 static char *ngx_http_zstd_set_bufs_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_zstd_check_bufs_product(ngx_conf_t *cf,
-    ngx_bufs_t *bufs, const char *ctx, ngx_flag_t advise);
+    ngx_bufs_t *bufs, ngx_flag_t unsafe, const char *ctx, ngx_flag_t advise);
 static void ngx_http_zstd_cleanup_dict(void *data);
 static void ngx_http_zstd_cleanup_cctx(void *data);
 static void ngx_http_zstd_release_cctx(void *data);
@@ -590,6 +599,13 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       ngx_http_zstd_set_bufs_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, bufs),
+      NULL },
+
+    { ngx_string("zstd_buffers_unsafe"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_zstd_loc_conf_t, bufs_unsafe),
       NULL },
 
     { ngx_string("zstd_min_length"),
@@ -2605,6 +2621,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->window_log = NGX_CONF_UNSET;
     conf->long_mode = NGX_CONF_UNSET;
     conf->max_cctx_memory = NGX_CONF_UNSET;
+    conf->bufs_unsafe = NGX_CONF_UNSET;
     conf->bypass = NGX_CONF_UNSET_PTR;
     conf->dcz_dicts = NGX_CONF_UNSET_PTR;
     conf->dcz_assume_secure = NGX_CONF_UNSET;
@@ -3115,6 +3132,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
      */
     ngx_conf_merge_bufs_value(conf->bufs, prev->bufs,
                               2, zmcf->stream_out_size);
+    ngx_conf_merge_value(conf->bufs_unsafe, prev->bufs_unsafe, 0);
 
     /*
      * The parse-time slot (ngx_http_zstd_set_bufs_slot()) only sees an
@@ -3129,8 +3147,9 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
      * once.
      */
     if (rc == NGX_CONF_OK
-        && ngx_http_zstd_check_bufs_product(cf, &conf->bufs, "merged value",
-                                             1)
+        && ngx_http_zstd_check_bufs_product(cf, &conf->bufs,
+                                             conf->bufs_unsafe,
+                                             "merged value", 1)
            != NGX_CONF_OK)
     {
         rc = NGX_CONF_ERROR;
@@ -4284,46 +4303,75 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
  * additive with the per-request CCtx working set the
  * "zstd_max_cctx_memory" advisory above already covers.
  *
- * NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES mirrors the CCtx advisory's shape:
- * overflow is refused unconditionally (there is no representable size for
- * which "the operator meant this"), and a representable-but-large product
- * warns rather than fails, so a config that loads today keeps loading
- * after an upgrade to this check. 8 MB is chosen generously above nginx's
- * own "zstd_buffers 32 4k" default (128 KB) and this module's own
- * 2 x CStreamOutSize() default (~256 KB at level 6): both stay silent, and
- * only a config that requests substantially more per response is named.
- * The warning states the total is PER RESPONSE and points at the CCtx
- * section so an operator sizing worker RSS adds the two: this directive's
- * total plus the up-to-NGX_HTTP_ZSTD_CCTX_SLOTS-times CCtx figure that
- * "zstd_max_cctx_memory" (undocumented) or its advisory (documented above)
- * reports.
+ * Three tiers on the representable (non-overflowing) product, in
+ * ascending severity:
+ *
+ *   <= NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES (8 MB)   silent. This is the
+ *       ordinary range: nginx's own "zstd_buffers 32 4k" default (128 KB)
+ *       and this module's own 2 x CStreamOutSize() default (~256 KB at
+ *       level 6) both land far under it.
+ *
+ *   >  NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES,
+ *   <= NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES (256 MB)  [warn]. Large but a
+ *       config that loads today must keep loading -- same non-breaking
+ *       posture as the zstd_max_cctx_memory advisory.
+ *
+ *   >  NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES            [emerg], refused
+ *       UNLESS "zstd_buffers_unsafe on;" is also set. Unlike the advisory
+ *       tier, this one is NOT "operator typed a big number and can live
+ *       with the log line" -- number and size are two integers the
+ *       operator wrote out literally (unlike the CCtx estimate, which
+ *       depends on libzstd internals the operator never sees), so at
+ *       this magnitude a refusal-by-default is the safe reading of "the
+ *       operator probably made a mistake", with an explicit opt-out for
+ *       the rare deployment that means it. 256 MB is two hundred times
+ *       nginx's own default and comfortably past any legitimate output
+ *       buffer size; a real deployment tuning zstd_buffers for throughput
+ *       does so in the single-digit MB range, not hundreds.
+ *
+ * Overflow is refused unconditionally at every tier -- there is no
+ * representable size for which "the operator meant this", so no
+ * acknowledgement spelling exists for it.
+ *
+ * The warning/refusal states the total is PER RESPONSE and points at the
+ * CCtx section so an operator sizing worker RSS adds the two: this
+ * directive's total plus the up-to-NGX_HTTP_ZSTD_CCTX_SLOTS-times CCtx
+ * figure that "zstd_max_cctx_memory" (undocumented) or its advisory
+ * (documented above) reports.
  */
 #ifndef NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES
 #define NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES  (8 * 1024 * 1024)
+#endif
+
+#ifndef NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES
+#define NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES  (256 * 1024 * 1024)
 #endif
 
 
 /*
  * Shared by the parse-time slot (explicit "zstd_buffers") and the
  * post-merge check (inherited or defaulted value): division-based
- * overflow pre-check, then -- when "advise" is set -- an advisory-shaped
- * threshold on the representable product. "ctx" names which of the two
- * callers is reporting so the operator can tell an explicit typo from an
- * inherited value without re-deriving it themselves.
+ * overflow pre-check, then -- when "advise" is set -- the
+ * advisory/hard-cap tiers on the representable product. "ctx" names
+ * which of the two callers is reporting so the operator can tell an
+ * explicit typo from an inherited value without re-deriving it
+ * themselves. "unsafe" is the merged conf->bufs_unsafe flag; it is only
+ * consulted when the hard-cap tier fires.
  *
  * The overflow check always runs (both callers pass advise or not, but
- * overflow is unconditional either way); the advisory WARN is emitted
- * only from the merge-time caller ("advise" true), never from the
- * parse-time slot. Every value ends up merged exactly once per location
- * -- the merge site is what conf->bufs is actually read from at request
- * time -- so gating the advisory there is what keeps a single explicit
- * "zstd_buffers" from printing the same warning twice (once at parse,
- * again at merge) while still failing an overflowing product at the
- * earliest possible point.
+ * overflow is unconditional either way, with no acknowledgement
+ * spelling); the advisory/cap tiers are evaluated only from the
+ * merge-time caller ("advise" true), never from the parse-time slot.
+ * Every value ends up merged exactly once per location -- the merge
+ * site is what conf->bufs is actually read from at request time -- so
+ * gating those tiers there is what keeps a single explicit
+ * "zstd_buffers" from being reported twice (once at parse, again at
+ * merge) while still failing an overflowing product at the earliest
+ * possible point.
  */
 static char *
 ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
-    const char *ctx, ngx_flag_t advise)
+    ngx_flag_t unsafe, const char *ctx, ngx_flag_t advise)
 {
     size_t  total;
 
@@ -4357,6 +4405,42 @@ ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
 
     total = (size_t) bufs->num * bufs->size;
 
+    if (total > NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES) {
+        if (unsafe) {
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                               "\"zstd_buffers\" (%s) requests %i x %uz "
+                               "bytes = ~%uz bytes of output-chain memory "
+                               "PER RESPONSE, above the %d MB hard cap; "
+                               "accepted because \"zstd_buffers_unsafe "
+                               "on;\" acknowledges it. That total is on "
+                               "top of the per-request compressor (CCtx) "
+                               "working set -- see the "
+                               "\"zstd_max_cctx_memory\" advisory above "
+                               "-- and both are multiplied by concurrent "
+                               "responses under load",
+                               ctx, bufs->num, bufs->size, total,
+                               (int) (NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES
+                                      / (1024 * 1024)));
+            return NGX_CONF_OK;
+        }
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"zstd_buffers\" (%s) requests %i x %uz bytes "
+                           "= ~%uz bytes of output-chain memory PER "
+                           "RESPONSE, above the %d MB hard cap -- that is "
+                           "on top of the per-request compressor (CCtx) "
+                           "working set (see the \"zstd_max_cctx_memory\" "
+                           "advisory above) and both are multiplied by "
+                           "concurrent responses under load. Lower "
+                           "\"zstd_buffers\", or set "
+                           "\"zstd_buffers_unsafe on;\" to acknowledge "
+                           "this total is intentional",
+                           ctx, bufs->num, bufs->size, total,
+                           (int) (NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES
+                                  / (1024 * 1024)));
+        return NGX_CONF_ERROR;
+    }
+
     if (total > NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES) {
         ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
                            "\"zstd_buffers\" (%s) requests %i x %uz bytes "
@@ -4379,14 +4463,19 @@ ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
  * for those cases are preserved verbatim, and this wrapper only adds the
  * overflow check on the ngx_bufs_t that parse produced -- fast, hard
  * feedback on an unrepresentable explicit value at the earliest possible
- * point. It deliberately does NOT run the advisory-threshold warning
+ * point. It deliberately does NOT run the advisory/hard-cap tiers
  * (advise=0): the post-merge check below (ngx_http_zstd_merge_loc_conf())
- * is the single owner of that warning, because it is the only point that
- * also covers a value this location never wrote itself but inherited
- * from an outer block, or the module's own computed default -- neither
- * of which runs through this slot handler at all. Running the advisory
- * here too would print it twice for the common case of an explicit
- * large value that also survives to the merge unchanged.
+ * is the single owner of those, because it is the only point that also
+ * covers a value this location never wrote itself but inherited from an
+ * outer block, or the module's own computed default -- neither of which
+ * runs through this slot handler at all. It is also the only point where
+ * conf->bufs_unsafe is guaranteed to already hold its final, merged
+ * value: "zstd_buffers_unsafe" can appear before OR after "zstd_buffers"
+ * in the same block, or at an outer level entirely, and this slot fires
+ * the moment "zstd_buffers" is parsed -- reading bufs_unsafe here could
+ * see it still unset. Running the hard-cap tier here too would also
+ * double-report it for the common case of an explicit large value that
+ * survives to the merge unchanged.
  */
 static char *
 ngx_http_zstd_set_bufs_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
@@ -4402,6 +4491,6 @@ ngx_http_zstd_set_bufs_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     bufs = (ngx_bufs_t *) (p + cmd->offset);
 
-    return ngx_http_zstd_check_bufs_product(cf, bufs, "explicit directive",
-                                             0);
+    return ngx_http_zstd_check_bufs_product(cf, bufs, 0,
+                                             "explicit directive", 0);
 }

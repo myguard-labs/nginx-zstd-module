@@ -9,55 +9,101 @@ inherits the parent's, or applies this module's own default
 (``2 x ZSTD_CStreamOutSize()``); none of those three paths re-validates the
 pair either. A typo ("zstd_buffers 100000 100000;" instead of
 "100 100k;") or a value inherited from an outer block could therefore
-request an overflowing or merely enormous per-response output-chain pool
+request an overflowing OR merely enormous per-response output-chain pool
 that nginx would happily commit per concurrent response.
 
-The policy under test
-----------------------
-  * ``num * size`` overflowing ``size_t`` is a hard config-load error,
-    unconditionally -- there is no representable acknowledgement for a
-    product that cannot exist.
-  * A representable-but-large product (> ``NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES``,
-    8 MB) is a ``[warn]`` naming the total, PER RESPONSE, cross-referencing
-    the ``zstd_max_cctx_memory`` advisory for the CCtx half of the budget.
-    It never fails the configuration -- a config that loads today keeps
-    loading.
-  * The check runs once at merge time, which is the single point that
-    covers an EXPLICIT value, one INHERITED from an outer block, and the
-    module's own DEFAULT alike (all three land in the same ``conf->bufs``
-    the filter reads from). The parse-time slot additionally catches an
-    overflowing explicit value at the earliest point, but does not repeat
-    the advisory -- so a bare explicit large value warns exactly once, not
-    twice.
+A first version of this policy only warned above 8 MB and refused only an
+actual ``size_t`` overflow -- which meant ``zstd_buffers 2147483647 1024m``
+(~2.3 EB per response) loaded successfully with nothing but a log line,
+because ``size_t`` overflow needs operands nginx's own integer parsing
+barely admits. That is not a bound; it is a warning that the config commits
+2.3 exabytes. This version adds a real hard cap in between.
+
+The policy under test -- four tiers on the representable (non-overflowing)
+product, ascending severity
+--------------------------------------------------------------------------
+  1. ``<= NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES`` (8 MB)          -- silent.
+  2. ``>  ADVISORY_BYTES``, ``<= NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES``
+     (256 MB)                                                  -- ``[warn]``,
+     never fails; a config that loads today keeps loading.
+  3. ``>  HARD_CAP_BYTES``, no ``zstd_buffers_unsafe on;``      -- ``[emerg]``,
+     config REFUSED.
+  4. ``>  HARD_CAP_BYTES``, WITH ``zstd_buffers_unsafe on;``    -- ``[warn]``
+     (not silent -- the operator still sees what they acknowledged),
+     config PASSES.
+
+``num * size`` overflowing ``size_t`` is refused unconditionally at every
+tier, including with the acknowledgement flag set -- there is no
+representable size for which "the operator meant this".
+
+The hard-cap tier is deliberately NOT advisory-shaped like the CCtx budget
+or the 8 MB tier below it: unlike a libzstd memory ESTIMATE (which depends
+on library internals the operator never directly sees), ``number`` and
+``size`` are two integers the operator typed out literally. At the 256 MB
+scale, refusing by default and requiring an explicit
+``zstd_buffers_unsafe on;`` is the correct default reading of "this is
+almost certainly a mistake, but if you really mean it, say so."
+
+The check runs once at merge time (``ngx_http_zstd_merge_loc_conf()``),
+which is the single point that sees the value however it got there --
+explicit, inherited via ``ngx_conf_merge_bufs_value()``, or this module's
+own default (all three land in the same ``conf->bufs`` the filter reads
+from, and ``conf->bufs_unsafe`` merges by the same inheritance rule). The
+parse-time slot (``ngx_http_zstd_set_bufs_slot()``) additionally catches
+an overflowing EXPLICIT value at the earliest point, but never repeats the
+advisory/cap tiers -- so a bare explicit large value is reported exactly
+once, not twice.
 
 Why this test and not ``ci/t/02-conf-warn.t``: Test::Nginx's error-log
 greps can assert a substring appeared, but cannot assert a config-load run
-PASSED with the warning present, is REFUSED with a specific message for
-overflow, and passed with NO warning at all for the near-boundary/ack
-cases -- all as one matrix with an explicit non-zero exit code check. A
-signal death (e.g. a bad cast crashing "nginx -t") would still satisfy a
-plain string grep; this harness explicitly separates that case out.
+PASSED with a specific warning present, is REFUSED with a specific message,
+and PASSES again once acknowledged -- all as one matrix with an explicit
+exit-code check per cell. A signal death (e.g. a bad cast crashing
+"nginx -t") would still satisfy a plain string grep; this harness
+explicitly separates that case out.
 
 Arms
 ----
-1. default zstd_buffers (module default, 2 x stream_out_size)  -> PASS,
-   no warning (the ordinary case must stay silent).
-2. cap - 1 byte (``zstd_buffers 1 8388607``)                    -> PASS,
-   no warning.
-3. cap exact (``zstd_buffers 1 8388608``)                       -> PASS,
-   no warning (the boundary itself is inclusive of "not advised").
-4. cap + 1 byte (``zstd_buffers 1 8388609``)                    -> PASS,
-   warning naming ~8388609 bytes.
-5. product overflow (``zstd_buffers <huge> <huge>``)            -> REFUSED,
-   naming both operands, never a signal death.
-6. inherited from an outer (http) block, over the cap           -> PASS,
-   warning fires at the location that merges it in (proves inheritance is
-   covered, not just the location that wrote the directive).
-7. explicit large value fires exactly ONCE, not twice (parse-time slot
-   must not duplicate the merge-time advisory).
+1. default zstd_buffers (module default, 2 x stream_out_size)     -> PASS,
+   silent.
+2. advisory cap - 1 byte (``zstd_buffers 1 8388607``)               -> PASS,
+   silent.
+3. advisory cap + 1 byte (``zstd_buffers 1 8388609``)               -> PASS,
+   warn.
+4. hard cap - 1 byte (``zstd_buffers 1 268435455``)                 -> PASS,
+   warn (still tier 2 -- the boundary is inclusive of "advisory, not
+   refused").
+5. hard cap exact (``zstd_buffers 1 268435456``)                    -> PASS,
+   warn (same reason as arm 4 -- the cap itself is not yet a breach).
+6. hard cap + 1 byte, NO acknowledgement (``zstd_buffers 1
+   268435457``)                                                     -> REFUSED,
+   naming the cap and the acknowledgement spelling.
+7. hard cap + 1 byte, WITH ``zstd_buffers_unsafe on;``              -> PASS,
+   warn (not silent).
+8. the reported gap's exact reproduction (``zstd_buffers 2147483647
+   1024m`` -- ~2.3 EB per response), NO acknowledgement              -> REFUSED.
+   This is the realistic-typo-shaped operand pair the first version of
+   this policy let straight through with only a log line; it must now be
+   the hard-refused case, not the overflow case.
+9. same reproduction, WITH acknowledgement                          -> PASS,
+   warn.
+10. product overflow (``zstd_buffers <huge> <huge>``), acknowledgement
+    flag ALSO set                                                    -> REFUSED,
+    naming both operands. Proves the acknowledgement never reaches the
+    overflow tier -- there is no spelling that accepts an unrepresentable
+    product.
+11. inherited from an outer (http) block: both ``zstd_buffers`` and
+    ``zstd_buffers_unsafe on;`` written at http level, a bare ``location``
+    underneath                                                        -> PASS,
+    warn (proves the acknowledgement flag inherits the same way the
+    aggregate bound does, not just the location that wrote it).
+12. explicit large value in the 8-256 MB band fires exactly ONCE, not
+    twice (parse-time slot must not duplicate the merge-time advisory).
 
-Arms 1-3 are the controls that keep this test from being vacuous: a build
-that warns unconditionally on any zstd_buffers value fails them.
+Arms 1, 2, 4, 5 are the controls that keep this test from being vacuous: a
+build that warns or refuses unconditionally on any zstd_buffers value
+fails them. Arm 8 is the regression control for the exact gap this policy
+exists to close.
 """
 
 import argparse
@@ -67,17 +113,25 @@ import subprocess
 import sys
 import tempfile
 
-# NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES in src/ngx_http_zstd_filter_module.c.
-ADVISORY_BYTES = 8 * 1024 * 1024
+# NGX_HTTP_ZSTD_BUFS_HARD_CAP_BYTES in src/ngx_http_zstd_filter_module.c.
+# (NGX_HTTP_ZSTD_BUFS_ADVISORY_BYTES, 8 MB, is exercised by the boundary
+# arms below but not compared against directly in this file.)
+HARD_CAP_BYTES = 256 * 1024 * 1024
 
+# Matched only on a line carrying "[warn]" (see WARN_RE usage below) so a
+# [emerg] hard-cap refusal -- which restates the same "requests N x M
+# bytes = ~T bytes" figure in its own message -- is never miscounted as a
+# warning.
 WARN_RE = re.compile(
-    r'"zstd_buffers" \((?P<ctx>[^)]+)\) requests (?P<num>\d+) x '
+    r'\[warn\].*"zstd_buffers" \((?P<ctx>[^)]+)\) requests (?P<num>\d+) x '
     r"(?P<size>\d+) bytes = ~(?P<total>\d+) bytes"
 )
 OVERFLOW_RE = re.compile(
     r'"zstd_buffers" \([^)]+\) requests (\d+) buffers of (\d+) bytes each; '
     r"that product overflows"
 )
+HARD_CAP_ACK_RE = re.compile(r"acknowledges it")
+HARD_CAP_REFUSE_RE = re.compile(r"above the \d+ MB hard cap")
 
 
 def parse_args():
@@ -139,20 +193,17 @@ def check_not_a_signal(name, rc, out):
     return []
 
 
-def run_arm(
-    nginx,
-    module,
-    port,
-    name,
-    http_directives,
-    srv_directives,
-    want_pass,
-    want_warning,
-    want_overflow_error=False,
-    min_total=None,
-    max_warn_count=1,
-):
-    """One matrix cell. Returns (failures, printable summary)."""
+def run_arm(nginx, module, port, name, http_directives, srv_directives, spec):
+    """One matrix cell. ``spec`` carries the expectations. Returns
+    (failures, printable summary)."""
+    want_pass = spec["want_pass"]
+    want_warning = spec.get("want_warning", False)
+    want_overflow_error = spec.get("want_overflow_error", False)
+    want_hard_cap_refuse = spec.get("want_hard_cap_refuse", False)
+    want_hard_cap_ack = spec.get("want_hard_cap_ack", False)
+    min_total = spec.get("min_total")
+    max_warn_count = spec.get("max_warn_count", 1)
+
     rc, out = config_test(nginx, module, port, http_directives, srv_directives)
     failures = check_not_a_signal(name, rc, out)
 
@@ -160,7 +211,7 @@ def run_arm(
         failures.append(
             f"{name}: expected nginx -t to PASS but it exited {rc}. The "
             f"bufs bound policy must never turn a working config into a "
-            f"config-load failure; output: {out.strip()!r}"
+            f"config-load failure at this tier; output: {out.strip()!r}"
         )
     if not want_pass and rc == 0:
         failures.append(
@@ -172,18 +223,18 @@ def run_arm(
 
     if want_warning and not warns:
         failures.append(
-            f"{name}: expected the [warn] advisory naming the aggregate "
-            f"buffer total, but it was not emitted; output: {out.strip()!r}"
+            f"{name}: expected the [warn] naming the aggregate buffer "
+            f"total, but it was not emitted; output: {out.strip()!r}"
         )
     if not want_warning and warns:
         failures.append(
-            f"{name}: the advisory was emitted but must NOT be. Either "
-            f"the threshold is wrong or the boundary is off-by-one; "
+            f"{name}: a warning was emitted but must NOT be at this tier. "
+            f"Either a threshold is wrong or a boundary is off-by-one; "
             f"output: {out.strip()!r}"
         )
     if warns and len(warns) > max_warn_count:
         failures.append(
-            f"{name}: advisory fired {len(warns)} times (want at most "
+            f"{name}: warning fired {len(warns)} times (want at most "
             f"{max_warn_count}) -- the parse-time slot and the merge-time "
             f"check are double-reporting the same explicit value; output: "
             f"{out.strip()!r}"
@@ -191,33 +242,27 @@ def run_arm(
 
     if warns and "[warn]" not in out:
         failures.append(
-            f"{name}: matched the advisory text but not at [warn] level; "
+            f"{name}: matched warning text but not at [warn] level; "
             f"output: {out.strip()!r}"
         )
 
     total = None
     if warns:
         total = int(warns[0][3])
-        if total <= ADVISORY_BYTES:
-            failures.append(
-                f"{name}: advisory fired at {total} bytes, which is <= the "
-                f"{ADVISORY_BYTES}-byte threshold. The condition is not "
-                f"the documented one."
-            )
         if min_total is not None and total < min_total:
             failures.append(
-                f"{name}: advisory reports {total} bytes, below the "
-                f"expected {min_total}. Computed from the wrong operands."
+                f"{name}: reports {total} bytes, below the expected "
+                f"{min_total}. Computed from the wrong operands."
             )
         if "per response" not in out.lower():
             failures.append(
-                f"{name}: advisory does not state the total is PER "
-                f"RESPONSE; output: {out.strip()!r}"
+                f"{name}: does not state the total is PER RESPONSE; "
+                f"output: {out.strip()!r}"
             )
         if "zstd_max_cctx_memory" not in out:
             failures.append(
-                f"{name}: advisory does not cross-reference the CCtx "
-                f'memory advisory ("zstd_max_cctx_memory"); output: '
+                f"{name}: does not cross-reference the CCtx memory "
+                f'advisory ("zstd_max_cctx_memory"); output: '
                 f"{out.strip()!r}"
             )
 
@@ -234,9 +279,46 @@ def run_arm(
                 f"level; output: {out.strip()!r}"
             )
 
+    if want_hard_cap_refuse:
+        if HARD_CAP_REFUSE_RE.search(out) is None:
+            failures.append(
+                f"{name}: expected the hard-cap refusal naming the cap, "
+                f"but it was not found; output: {out.strip()!r}"
+            )
+        elif "[emerg]" not in out:
+            failures.append(
+                f"{name}: hard-cap diagnostic present but not at [emerg] "
+                f"level; output: {out.strip()!r}"
+            )
+        if "zstd_buffers_unsafe" not in out:
+            failures.append(
+                f"{name}: hard-cap refusal does not name the "
+                f'acknowledgement spelling ("zstd_buffers_unsafe"); '
+                f"output: {out.strip()!r}"
+            )
+
+    if want_hard_cap_ack and HARD_CAP_ACK_RE.search(out) is None:
+        failures.append(
+            f"{name}: expected the hard-cap ACKNOWLEDGED wording "
+            f"(the acknowledgement must still be visible, not "
+            f"silent), but it was not found; output: {out.strip()!r}"
+        )
+
+    if (
+        total is not None
+        and total > HARD_CAP_BYTES
+        and not (want_hard_cap_refuse or want_hard_cap_ack)
+    ):
+        failures.append(
+            f"{name}: total {total} bytes exceeds the {HARD_CAP_BYTES}-byte "
+            f"hard cap but this arm did not mark either the refuse or the "
+            f"acknowledge expectation -- the matrix spec is wrong for this "
+            f"arm."
+        )
+
     summary = (
-        f"  {name:<38} exit {rc} (want {'0' if want_pass else 'non-zero'}), "
-        f"warnings {len(warns)} (want {'>=1' if want_warning else '0'})"
+        f"  {name:<52} exit {rc} (want {'0' if want_pass else 'non-zero'}), "
+        f"warnings {len(warns)}"
         + (f", total {total} bytes" if total is not None else "")
     )
     return failures, summary
@@ -257,77 +339,121 @@ def main() -> int:
             return 1
 
     huge = 9223372036854775807  # ngx_int_t / int64_t max on a 64-bit build.
+    ack = "zstd_buffers_unsafe on;"
 
     matrix = [
-        {
-            "name": "1 default bufs",
-            "http_directives": "",
-            "srv_directives": "",
-            "want_pass": True,
-            "want_warning": False,
-        },
-        {
-            "name": "2 cap-1 (8388607)",
-            "http_directives": "",
-            "srv_directives": "zstd_buffers 1 8388607;",
-            "want_pass": True,
-            "want_warning": False,
-        },
-        {
-            "name": "3 cap exact (8388608)",
-            "http_directives": "",
-            "srv_directives": "zstd_buffers 1 8388608;",
-            "want_pass": True,
-            "want_warning": False,
-        },
-        {
-            "name": "4 cap+1 (8388609)",
-            "http_directives": "",
-            "srv_directives": "zstd_buffers 1 8388609;",
-            "want_pass": True,
-            "want_warning": True,
-            "min_total": 8388609,
-            "max_warn_count": 1,
-        },
-        {
-            "name": "5 product overflow",
-            "http_directives": "",
-            "srv_directives": f"zstd_buffers {huge} {huge};",
-            "want_pass": False,
-            "want_warning": False,
-            "want_overflow_error": True,
-        },
-        {
-            "name": "6 inherited from http block",
-            "http_directives": "zstd_buffers 1 8388609;",
-            "srv_directives": "",
-            "want_pass": True,
-            "want_warning": True,
-            "min_total": 8388609,
-            # Merged twice on this call graph: once into the (unused)
-            # http-level location conf, once into the server/location
-            # that actually serves -- both are real ngx_conf merges of
-            # the SAME inherited value, so 2 is the correct count here,
-            # not a duplicate-reporting defect (see arm 7 for that check,
-            # which pins the explicit single-location case to exactly 1).
-            "max_warn_count": 2,
-        },
-        {
-            "name": "7 explicit large value warns once",
-            "http_directives": "",
-            "srv_directives": "zstd_buffers 1 16777217;",
-            "want_pass": True,
-            "want_warning": True,
-            "min_total": 16777217,
-            "max_warn_count": 1,
-        },
+        (
+            "1 default bufs (silent tier)",
+            "",
+            "",
+            {"want_pass": True, "want_warning": False},
+        ),
+        (
+            "2 advisory cap-1 (8388607, silent)",
+            "",
+            "zstd_buffers 1 8388607;",
+            {"want_pass": True, "want_warning": False},
+        ),
+        (
+            "3 advisory cap+1 (8388609, warn)",
+            "",
+            "zstd_buffers 1 8388609;",
+            {"want_pass": True, "want_warning": True, "min_total": 8388609},
+        ),
+        (
+            "4 hard cap-1 (268435455, still warn)",
+            "",
+            "zstd_buffers 1 268435455;",
+            {"want_pass": True, "want_warning": True, "min_total": 268435455},
+        ),
+        (
+            "5 hard cap exact (268435456, still warn)",
+            "",
+            "zstd_buffers 1 268435456;",
+            {"want_pass": True, "want_warning": True, "min_total": 268435456},
+        ),
+        (
+            "6 hard cap+1, NO ack -> REFUSED",
+            "",
+            "zstd_buffers 1 268435457;",
+            {
+                "want_pass": False,
+                "want_warning": False,
+                "want_hard_cap_refuse": True,
+            },
+        ),
+        (
+            "7 hard cap+1, WITH ack -> PASS+warn",
+            "",
+            f"zstd_buffers 1 268435457;\n        {ack}",
+            {
+                "want_pass": True,
+                "want_warning": True,
+                "want_hard_cap_ack": True,
+                "min_total": 268435457,
+            },
+        ),
+        (
+            "8 reported gap repro, NO ack -> REFUSED",
+            "",
+            "zstd_buffers 2147483647 1024m;",
+            {
+                "want_pass": False,
+                "want_warning": False,
+                "want_hard_cap_refuse": True,
+            },
+        ),
+        (
+            "9 reported gap repro, WITH ack -> PASS+warn",
+            "",
+            f"zstd_buffers 2147483647 1024m;\n        {ack}",
+            {
+                "want_pass": True,
+                "want_warning": True,
+                "want_hard_cap_ack": True,
+                "min_total": 2305843008139952128,
+            },
+        ),
+        (
+            "10 product overflow, ack ALSO set -> still REFUSED",
+            "",
+            f"zstd_buffers {huge} {huge};\n        {ack}",
+            {
+                "want_pass": False,
+                "want_warning": False,
+                "want_overflow_error": True,
+            },
+        ),
+        (
+            "11 inherited hard-cap breach + ack from http block",
+            f"{ack}\n    zstd_buffers 1 268435457;",
+            "",
+            {
+                "want_pass": True,
+                "want_warning": True,
+                "want_hard_cap_ack": True,
+                "min_total": 268435457,
+            },
+        ),
+        (
+            "12 explicit 16 MB value warns once, not twice",
+            "",
+            "zstd_buffers 1 16777217;",
+            {
+                "want_pass": True,
+                "want_warning": True,
+                "min_total": 16777217,
+                "max_warn_count": 1,
+            },
+        ),
     ]
 
     failures = []
     print("zstd_buffers aggregate bound policy matrix:")
-    for i, arm in enumerate(matrix):
-        name = arm.pop("name")
-        f, summary = run_arm(nginx, module, args.port + i, name, **arm)
+    for i, (name, http_directives, srv_directives, spec) in enumerate(matrix):
+        f, summary = run_arm(
+            nginx, module, args.port + i, name, http_directives, srv_directives, spec
+        )
         failures += f
         print(summary)
 
