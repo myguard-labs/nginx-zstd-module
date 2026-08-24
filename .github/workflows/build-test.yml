@@ -1515,6 +1515,18 @@ jobs:
           python3 ci/tools/test_ldm_budget_config.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18124
           echo "✓ zstd_long + zstd_max_cctx_memory config validation passed"
+          # Implicit per-request CCtx memory advisory. zstd_max_cctx_memory
+          # is optional, so the estimator used to be skipped entirely for
+          # the common no-budget config and an expensive profile
+          # (zstd_comp_level 22, zstd_long on) committed hundreds of MB per
+          # concurrent response silently. The matrix asserts the advisory
+          # fires on the large profiles, stays silent on the ordinary ones
+          # and on an explicit budget/acknowledgement, and -- the part
+          # Test::Nginx cannot express -- that it never turns a working
+          # nginx -t into a failing one.
+          python3 ci/tools/test_cctx_advisory_policy.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18130
+          echo "✓ CCtx memory advisory policy matrix passed"
 
       - name: Run RFC 9842 dcz end-to-end test
         timeout-minutes: 6
@@ -1958,6 +1970,8 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" --port 19104 --backend-port 19105
           python3 ci/tools/test_ldm_budget_config.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19122
+          python3 ci/tools/test_cctx_advisory_policy.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 19130
           python3 ci/tools/test_zstd_long_ldm.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 19102 --backend-port 19103
           python3 ci/tools/test_dcz.py --nginx-binary "$TEST_NGINX_BINARY" \

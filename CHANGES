@@ -1,5 +1,26 @@
 Changes with http-zstd
 
+    *) Feature: compression enabled without an explicit
+       "zstd_max_cctx_memory" now estimates the per-request compressor
+       working set at config load and warns when it exceeds 32 MB.
+       zstd_max_cctx_memory is optional and rarely set, so the estimator
+       was previously skipped for the common case: a later
+       "zstd_comp_level 22" or "zstd_long on" committed hundreds of MB
+       per concurrent response (level 22 estimates ~769 MB, zstd_long at
+       the default level ~138 MB) even though the module already knew
+       the figure at config load. The warning names the estimate, the
+       level, and the retained worker bound -- each worker keeps up to
+       four contexts, so worker RSS can reach four times the per-request
+       figure, and that again per worker process. It is advisory only
+       and never fails the configuration: a config that loads today
+       keeps loading. Set "zstd_max_cctx_memory <size>" to have a bound
+       enforced at config load instead, or "zstd_max_cctx_memory 0" to
+       acknowledge the profile and silence the warning. An explicit
+       non-zero budget keeps its existing hard-failure behaviour
+       unchanged. Requires the same -DZSTD_STATIC_LINKING_ONLY build as
+       the directive; a build without the estimator API does not warn
+       rather than implying a guarantee it cannot compute.
+
     *) Bugfix: "nginx -t" no longer dies with SIGFPE when "zstd_long on"
        is combined with "zstd_max_cctx_memory". The config-load budget
        check calls ZSTD_estimateCStreamSize_usingCCtxParams(), which

@@ -581,7 +581,7 @@ location /api/bulk-export {
 ### zstd_max_cctx_memory
 
 **Syntax:** `zstd_max_cctx_memory size;`
-**Default:** `—` (disabled, no budget enforced)
+**Default:** `—` (no budget enforced; see [the advisory](#implicit-advisory-when-no-budget-is-set) below)
 **Context:** `http, server, location`
 **Requires:** module built with `-DZSTD_STATIC_LINKING_ONLY` against libzstd ≥ 1.4.0 (the project's production and CI builds do; see [Compatibility](#compatibility)).
 
@@ -630,6 +630,61 @@ server {
 > refused at config load rather than accepted and blown at runtime.
 > Pair `zstd_long on` with an explicit `zstd_window_log` to bring it
 > back down (level 3 with `zstd_window_log 20` costs ~2.7 MB).
+
+#### Implicit advisory when no budget is set
+
+Setting `zstd_max_cctx_memory` is optional, and most configurations
+never do. Compression enabled with **no** `zstd_max_cctx_memory`
+anywhere in the inheritance chain therefore still runs the same
+estimate at config load, and emits a **warning** — not an error — when
+the profile needs more than **32 MB** of per-request compressor memory:
+
+```
+nginx: [warn] the configured zstd parameters need ~144328225 bytes of
+per-request compressor memory (zstd_comp_level 3); each worker retains
+up to 4 such contexts, so worker RSS can reach ~577312900 bytes, and
+that again per worker process. Set "zstd_max_cctx_memory" to a budget
+to have this enforced at config load, or "zstd_max_cctx_memory 0" to
+acknowledge the profile and silence this warning
+```
+
+This exists because the expensive levers are one line away from a
+working config: a later `zstd_comp_level 22` or `zstd_long on` commits
+hundreds of MB per concurrent response, and without the advisory the
+module knew that number at config load and said nothing.
+
+The 32 MB threshold sits in the natural gap between `zstd_comp_level`
+11 (~28.7 MB) and 12 (~52.7 MB), so the ordinary web-serving range is
+silent and only genuinely large profiles are named:
+
+| profile (level 3 unless stated) | per request | retained per worker (×4) | advisory |
+| --- | ---: | ---: | :---: |
+| `zstd_comp_level 1` | 1.3 MB | 5.2 MB | no |
+| default (`zstd_comp_level 3`) | 3.5 MB | 14.0 MB | no |
+| `zstd_comp_level 9` | 16.7 MB | 67.0 MB | no |
+| `zstd_comp_level 11` | 28.7 MB | 115.0 MB | no |
+| `zstd_comp_level 12` | 52.7 MB | 211.0 MB | **yes** |
+| `zstd_comp_level 19` | 89.5 MB | 358.0 MB | **yes** |
+| `zstd_comp_level 22` | 769.5 MB | 3078.0 MB | **yes** |
+| `zstd_long on` | 137.6 MB | 550.6 MB | **yes** |
+| `zstd_window_log 27` | 129.5 MB | 518.0 MB | **yes** |
+| `zstd_long on` + `zstd_window_log 20` | 2.6 MB | 10.3 MB | no |
+
+*(`ZSTD_estimateCStreamSize_usingCCtxParams()`, libzstd 1.5.7,
+streaming with unknown content size — the module's own path.)*
+
+Two ways to silence it, and they mean different things:
+
+* **`zstd_max_cctx_memory <size>;`** — you want the bound *enforced*.
+  Exceeding it is a hard config-load error, as documented above.
+* **`zstd_max_cctx_memory 0;`** — you have read the number and accept
+  it. Nothing is enforced and nothing is warned about.
+
+It never fails the configuration on its own: a config that loads today
+keeps loading after an upgrade. Note that the advisory requires the
+same `-DZSTD_STATIC_LINKING_ONLY` build as the directive; a build
+without the estimator API simply does not warn, rather than implying a
+guarantee it cannot compute.
 
 **Why a config-load assert and not a runtime cap.** The directive does
 **not** silently tune anything. A too-tight budget is a hard error so
