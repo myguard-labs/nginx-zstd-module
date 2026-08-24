@@ -369,7 +369,7 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
  *
  * Why there is no runtime memory cap: ZSTD_sizeof_CCtx() does not shrink on
  * reset, so an unbounded cache would pin each worker's RSS at its
- * largest-ever footprint. The cache is therefore keyed on the COMPLETE set
+ * largest-ever footprint. Each slot is therefore keyed on the COMPLETE set
  * of parameters that drive that workspace, and every one of them is fixed at
  * config load: zstd_comp_level, zstd_long and zstd_window_log.
  *
@@ -391,22 +391,59 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
  * So both zstd_long and zstd_window_log move the retained workspace by more
  * than thirty times at one level, and the growth is permanent: walking a
  * context through the 154 MB profile and back to the 4 MB one leaves
- * ZSTD_sizeof_CCtx() at 154 MB. Lending one worker context across locations
- * with differing profiles would raise the worker's floor to the largest
+ * ZSTD_sizeof_CCtx() at 154 MB. Lending one cached context across locations
+ * with differing profiles would raise that context's floor to the largest
  * profile ever served and silently defeat a lower location's
  * zstd_max_cctx_memory budget, which is computed from exactly these three
  * values at config load.
  *
- * Keying on all three keeps the cached context's high-water mark equal to
+ * Keying on all three keeps a cached context's high-water mark equal to
  * the figure config load already vetted for that profile. A location whose
- * profile differs in any of the three does not reuse the cache; it takes the
- * per-request path, which is the pre-existing safe behaviour.
+ * profile matches no slot does not reuse a cached context; it seeds a free
+ * slot, or takes the per-request path -- the pre-existing safe behaviour.
+ *
+ * Ring of per-profile slots, rather than the one slot this cache shipped
+ * with. Each slot carries its OWN profile triple, so the keying invariant
+ * documented above is per slot, not per worker: a slot's retained workspace
+ * high-water mark stays equal to the figure config load vetted for that
+ * slot's profile. A slot is never re-parameterised -- a request whose
+ * profile matches no slot either seeds a free slot or takes the per-request
+ * path, exactly as before.
+ *
+ * Two consequences the single-slot version did not have, both deliberate:
+ *
+ *  - Concurrent borrowing is now actually reachable. Previously the second
+ *    overlapping request on a worker always fell through to a per-request
+ *    context because the one slot was busy. Isolation is preserved by the
+ *    same rule as before, applied per slot: `busy` is set on loan and
+ *    cleared only by the borrowing request's pool cleanup, so a slot is
+ *    lent to at most one request at a time and two concurrent requests
+ *    always land on different slots (or on the per-request path).
+ *
+ *  - Locations with DIFFERENT profiles no longer evict each other. With one
+ *    slot, two locations differing only in zstd_window_log or zstd_long
+ *    meant whichever seeded the cache first served its own requests and
+ *    every request of the other took the per-request path forever.
+ *
+ * The ring size bounds retained memory: up to NGX_HTTP_ZSTD_CCTX_SLOTS
+ * workspaces per worker, each at its own profile's vetted figure. It is a
+ * compile-time constant rather than a directive so the bound is auditable
+ * from the source and cannot be raised by configuration.
  */
-static ZSTD_CCtx  *ngx_http_zstd_worker_cctx;
-static ngx_int_t   ngx_http_zstd_worker_cctx_level;
-static ngx_flag_t  ngx_http_zstd_worker_cctx_long_mode;
-static ngx_int_t   ngx_http_zstd_worker_cctx_window_log;
-static ngx_uint_t  ngx_http_zstd_worker_cctx_busy;
+#ifndef NGX_HTTP_ZSTD_CCTX_SLOTS
+#define NGX_HTTP_ZSTD_CCTX_SLOTS  4
+#endif
+
+typedef struct {
+    ZSTD_CCtx   *cctx;
+    ngx_int_t    level;
+    ngx_flag_t   long_mode;
+    ngx_int_t    window_log;
+    ngx_uint_t   busy;
+} ngx_http_zstd_cctx_slot_t;
+
+static ngx_http_zstd_cctx_slot_t
+    ngx_http_zstd_worker_cctx_slots[NGX_HTTP_ZSTD_CCTX_SLOTS];
 
 
 static ngx_conf_post_t  ngx_http_zstd_comp_level_bounds = {
@@ -1794,8 +1831,9 @@ static ngx_int_t
 ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
     ngx_http_zstd_loc_conf_t *zlcf)
 {
-    ngx_uint_t           borrowed;
-    ngx_pool_cleanup_t  *cln;
+    ngx_uint_t                  i, borrowed;
+    ngx_pool_cleanup_t         *cln;
+    ngx_http_zstd_cctx_slot_t  *slot, *free_slot;
 
     /*
      * The cleanup slot is registered BEFORE the context is claimed, so a
@@ -1808,29 +1846,52 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
     }
 
     borrowed = 0;
+    free_slot = NULL;
 
     /*
-     * Borrow the worker context when it is free and was built for this
-     * location's complete memory-affecting profile: compression level, long
-     * mode and window log. A mismatch in any of the three takes the
-     * per-request path rather than re-parameterising the cache: the retained
-     * workspace is driven by all three and never shrinks, so honouring a
-     * higher-memory location here would raise the worker's floor for every
-     * subsequent request of every other location.
+     * Borrow a slot whose context is free and was built for this location's
+     * complete memory-affecting profile: compression level, long mode and
+     * window log. A mismatch in any of the three never re-parameterises a
+     * slot: the retained workspace is driven by all three and never shrinks,
+     * so honouring a higher-memory location on an existing slot would raise
+     * that slot's floor for every subsequent request of every other location
+     * mapped to it.
+     *
+     * The same walk records the first slot that is empty AND not on loan, so
+     * a miss can seed it below without a second pass. An empty slot is only
+     * ever seeded, never evicted: a live cached context is not thrown away
+     * mid-flight, and one already on loan is left alone.
      */
-    if (!ngx_http_zstd_worker_cctx_busy
-        && ngx_http_zstd_worker_cctx != NULL
-        && ngx_http_zstd_worker_cctx_level == zlcf->level
-        && ngx_http_zstd_worker_cctx_long_mode == zlcf->long_mode
-        && ngx_http_zstd_worker_cctx_window_log == zlcf->window_log)
-    {
-        ctx->cctx = ngx_http_zstd_worker_cctx;
-        borrowed = 1;
+    for (i = 0; i < NGX_HTTP_ZSTD_CCTX_SLOTS; i++) {
+        slot = &ngx_http_zstd_worker_cctx_slots[i];
 
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "zstd: reusing worker cctx %p", ctx->cctx);
+        if (slot->busy) {
+            continue;
+        }
 
-    } else {
+        if (slot->cctx == NULL) {
+            if (free_slot == NULL) {
+                free_slot = slot;
+            }
+            continue;
+        }
+
+        if (slot->level == zlcf->level
+            && slot->long_mode == zlcf->long_mode
+            && slot->window_log == zlcf->window_log)
+        {
+            ctx->cctx = slot->cctx;
+            slot->busy = 1;
+            borrowed = 1;
+
+            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "zstd: reusing worker cctx %p (slot:%ui)",
+                           ctx->cctx, i);
+            break;
+        }
+    }
+
+    if (!borrowed) {
         ctx->cctx = ZSTD_createCCtx();
         if (ctx->cctx == NULL) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
@@ -1838,16 +1899,12 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             return NGX_ERROR;
         }
 
-        /*
-         * Seed an empty cache so subsequent requests amortise. Only an empty
-         * cache is populated -- a live cached context is never evicted
-         * mid-flight, and one already on loan is left alone.
-         */
-        if (ngx_http_zstd_worker_cctx == NULL) {
-            ngx_http_zstd_worker_cctx = ctx->cctx;
-            ngx_http_zstd_worker_cctx_level = zlcf->level;
-            ngx_http_zstd_worker_cctx_long_mode = zlcf->long_mode;
-            ngx_http_zstd_worker_cctx_window_log = zlcf->window_log;
+        if (free_slot != NULL) {
+            free_slot->cctx = ctx->cctx;
+            free_slot->level = zlcf->level;
+            free_slot->long_mode = zlcf->long_mode;
+            free_slot->window_log = zlcf->window_log;
+            free_slot->busy = 1;
             borrowed = 1;
         }
 
@@ -1857,7 +1914,6 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
     }
 
     if (borrowed) {
-        ngx_http_zstd_worker_cctx_busy = 1;
         cln->handler = ngx_http_zstd_release_cctx;
 
     } else {
@@ -2941,28 +2997,38 @@ ngx_http_zstd_cleanup_cctx(void *data)
 static void
 ngx_http_zstd_release_cctx(void *data)
 {
-    ZSTD_CCtx *cctx = data;
+    ngx_uint_t   i;
+    ZSTD_CCtx   *cctx = data;
 
     if (cctx == NULL) {
         return;
     }
 
-    if (cctx == ngx_http_zstd_worker_cctx) {
-        (void) ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);
-        ngx_http_zstd_worker_cctx_busy = 0;
-        return;
+    /*
+     * Find the slot this loan came from. The cleanup handler is given only
+     * the context pointer (nginx's cleanup contract), so the slot is located
+     * by pointer identity; NGX_HTTP_ZSTD_CCTX_SLOTS is a small compile-time
+     * constant, so this walk is a handful of comparisons on a hot-but-tiny
+     * array, not a lookup structure worth carrying.
+     */
+    for (i = 0; i < NGX_HTTP_ZSTD_CCTX_SLOTS; i++) {
+        if (ngx_http_zstd_worker_cctx_slots[i].cctx == cctx) {
+            (void) ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);
+            ngx_http_zstd_worker_cctx_slots[i].busy = 0;
+            return;
+        }
     }
 
     /*
-     * Not the cached context: the cache was replaced while this request held
-     * its loan (only reachable if a future edit adds eviction). Own it.
+     * Not in any slot: the slot was replaced while this request held its
+     * loan (only reachable if a future edit adds eviction). Own it.
      */
     ZSTD_freeCCtx(cctx);
 }
 
 
 /*
- * Free the worker's cached context at process exit.
+ * Free every cached context in the worker's slot ring at process exit.
  *
  * Without this the cache is a live allocation at shutdown, which LeakSanitizer
  * and Valgrind both report -- this tree gates on both, so a "harmless" one-off
@@ -2973,12 +3039,16 @@ ngx_http_zstd_release_cctx(void *data)
 static void
 ngx_http_zstd_exit_process(ngx_cycle_t *cycle)
 {
-    if (ngx_http_zstd_worker_cctx != NULL) {
-        ZSTD_freeCCtx(ngx_http_zstd_worker_cctx);
-        ngx_http_zstd_worker_cctx = NULL;
-    }
+    ngx_uint_t  i;
 
-    ngx_http_zstd_worker_cctx_busy = 0;
+    for (i = 0; i < NGX_HTTP_ZSTD_CCTX_SLOTS; i++) {
+        if (ngx_http_zstd_worker_cctx_slots[i].cctx != NULL) {
+            ZSTD_freeCCtx(ngx_http_zstd_worker_cctx_slots[i].cctx);
+            ngx_http_zstd_worker_cctx_slots[i].cctx = NULL;
+        }
+
+        ngx_http_zstd_worker_cctx_slots[i].busy = 0;
+    }
 }
 
 

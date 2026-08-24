@@ -63,6 +63,27 @@ ROUNDS = 12
 # context serving the previous body is a byte mismatch, not a silent pass.
 BODY_SIZE = 24 * 1024
 
+# The three locations whose memory profile differs from the default, each
+# of which must occupy its OWN ring slot.
+ALT_LOCATIONS = (
+    ("/alt/b", 999, "zstd_comp_level 9"),
+    ("/alt/long", 998, "zstd_long on"),
+    ("/alt/wlog", 997, "zstd_window_log 20"),
+)
+
+# Requests per /alt location. Must be >= 2: the first seeds that profile's
+# slot, the rest are the reuse witnesses that only a per-profile ring can
+# produce.
+ALT_ROUNDS = 4
+assert ALT_ROUNDS >= 2
+
+# One context per distinct profile, and no more.
+WANT_CREATED = 1 + len(ALT_LOCATIONS)
+
+# ROUNDS-1 reuses on the default profile (the first /b request seeds its
+# slot), plus ALT_ROUNDS-1 on each differing profile.
+WANT_REUSED = (ROUNDS - 1) + len(ALT_LOCATIONS) * (ALT_ROUNDS - 1)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -254,14 +275,22 @@ http {{
                     )
                     break
 
-            # Each differing memory profile must take the per-request path.
-            for path, rid, label in (
-                ("/alt/b", 999, "zstd_comp_level 9"),
-                ("/alt/long", 998, "zstd_long on"),
-                ("/alt/wlog", 997, "zstd_window_log 20"),
-            ):
-                if decode(http_get(args.port, path)) != fixture(rid):
-                    failures.append(f"{label} location: decoded body mismatch")
+            # Each differing memory profile gets its OWN ring slot: the
+            # first request seeds that slot, and every further request to
+            # the same location must REUSE it. Requesting each location
+            # ALT_ROUNDS times is what makes the per-profile half of the
+            # ring observable at all -- with a single request each, a ring
+            # and the old single-slot cache produce identical witness
+            # counts (one create, no reuse) and this test could not tell
+            # them apart. Under the single slot the default /b profile owns
+            # the one slot, so every one of these requests is a fresh
+            # create and `reused` falls short by ALT_PROFILES *
+            # (ALT_ROUNDS - 1).
+            for path, rid, label in ALT_LOCATIONS:
+                for _ in range(ALT_ROUNDS):
+                    if decode(http_get(args.port, path)) != fixture(rid):
+                        failures.append(f"{label} location: decoded body mismatch")
+                        break
 
             # Flush the debug log before reading witnesses.
             time.sleep(0.3)
@@ -285,21 +314,29 @@ http {{
             # bug this partition exists to prevent, and the two same-level
             # locations are the ones a level-only key gets wrong. More than
             # four means the cache is not holding across requests.
-            if args.log_level == "debug" and created != 4:
+            if args.log_level == "debug" and created != WANT_CREATED:
                 failures.append(
-                    f"expected exactly 4 'created cctx' witnesses (one "
-                    f"cached default profile, plus one each for the "
-                    f"zstd_comp_level / zstd_long / zstd_window_log "
-                    f"locations that must not reuse it), saw {created} -- "
-                    f"the cache is either lending across memory profiles or "
-                    f"not surviving across requests"
+                    f"expected exactly {WANT_CREATED} 'created cctx' "
+                    f"witnesses (one per distinct memory profile: the "
+                    f"default, plus the zstd_comp_level / zstd_long / "
+                    f"zstd_window_log locations, each of which must get its "
+                    f"OWN ring slot rather than borrowing another "
+                    f"profile's), saw {created} -- fewer means a slot was "
+                    f"lent across memory profiles, more means slots are not "
+                    f"surviving across requests"
                 )
-            # ROUNDS-1: the first /b request seeds the cache (counted as a
-            # create, not a reuse). Each /alt request is a create too.
-            if args.log_level == "debug" and reused != ROUNDS - 1:
+            # One create per distinct profile; every other request reuses
+            # that profile's slot. The ALT_ROUNDS-1 reuses per /alt
+            # location are the per-profile-slot witnesses: a single-slot
+            # cache cannot produce them, because the default profile
+            # permanently owns the only slot.
+            if args.log_level == "debug" and reused != WANT_REUSED:
                 failures.append(
-                    f"expected {ROUNDS - 1} 'reusing worker cctx' witnesses "
-                    f"across {ROUNDS} sequential requests, saw {reused}"
+                    f"expected {WANT_REUSED} 'reusing worker cctx' "
+                    f"witnesses ({ROUNDS - 1} on the default profile plus "
+                    f"{ALT_ROUNDS - 1} on each of the {len(ALT_LOCATIONS)} "
+                    f"differing profiles, which a single-slot cache cannot "
+                    f"produce at all), saw {reused}"
                 )
 
             if not failures:

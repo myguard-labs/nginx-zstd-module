@@ -49,6 +49,7 @@ import hashlib
 import http.server
 import os
 import pathlib
+import re
 import socket
 import socketserver
 import subprocess
@@ -79,6 +80,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--rounds", type=int, default=6, help="Times to run the full concurrent batch."
+    )
+    p.add_argument(
+        "--require-multi-slot",
+        action="store_true",
+        help="Also assert, from the debug-log witnesses, that the worker "
+        "CCtx ring actually lent MORE THAN ONE slot during the run. "
+        "Without this the byte-exactness oracle alone is satisfied by a "
+        "build where concurrent claimants always fall through to a "
+        "per-request context -- which is exactly what the single-slot "
+        "cache did, so the test would pass without ever exercising "
+        "concurrent slot borrowing, the risk surface the ring "
+        "introduces. Needs an nginx built --with-debug; raises the "
+        "location error_log to debug.",
     )
     return p.parse_args()
 
@@ -226,11 +240,12 @@ def main() -> int:
                     "payloads not distinct per id (test would be blind to bleed)"
                 )
 
+            elvl = "debug" if args.require_multi_slot else "warn"
             load = "".join(f"load_module {m};\n" for m in mods)
             conf = root / "nginx.conf"
             conf.write_text(
                 f"""{load}worker_processes 1;
-error_log {logs}/error.log warn;
+error_log {logs}/error.log {elvl};
 pid {root}/nginx.pid;
 events {{ worker_connections 512; }}
 http {{
@@ -306,6 +321,31 @@ http {{
                                     f"mismatch (got {len(got)}B want "
                                     f"{len(want)}B){culprit}"
                                 )
+                slots_seen: set[str] = set()
+                if args.require_multi_slot:
+                    # Flush, then count the DISTINCT ring slots that were
+                    # actually lent. One slot is the single-slot cache's
+                    # behaviour; the concurrent-borrowing path this test
+                    # exists to cover is only reached when at least two
+                    # distinct slots were on loan during the run.
+                    time.sleep(0.3)
+                    elog = (logs / "error.log").read_text("utf-8", "replace")
+                    slots_seen = set(
+                        re.findall(
+                            r"zstd: reusing worker cctx \S+ \(slot:(\d+)\)",
+                            elog,
+                        )
+                    )
+                    if len(slots_seen) < 2:
+                        failures.append(
+                            f"only {len(slots_seen)} distinct ring slot(s) "
+                            f"were ever lent ({sorted(slots_seen)}) across "
+                            f"{total} concurrent requests -- this run never "
+                            f"exercised concurrent slot borrowing, so its "
+                            f"byte-exactness result proves nothing about "
+                            f"the ring"
+                        )
+
                 if failures:
                     sys.stderr.write(
                         f"CCtx-ISOLATION FAILED: {len(failures)}/{total}:\n"
@@ -321,6 +361,11 @@ http {{
                     f"rounds, distinct per-request bodies, keepalive "
                     f"reuse) each decoded byte-exact to its own "
                     f"origin — no cross-request CCtx bleed"
+                    + (
+                        f"; {len(slots_seen)} distinct ring slots lent concurrently"
+                        if args.require_multi_slot
+                        else ""
+                    )
                 )
                 return 0
             finally:

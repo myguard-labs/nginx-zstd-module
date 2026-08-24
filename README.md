@@ -623,6 +623,18 @@ clear message, never silently no-op'd.
 > `worker_connections × zstd_max_cctx_memory` in the worst case
 > (every connection actively compressing).
 
+> **Retained memory between requests.** Each worker keeps a small ring
+> of compression contexts (4 slots) so consecutive responses reuse an
+> already-allocated workspace instead of building one per response.
+> A slot is keyed on the complete set of parameters that drive that
+> workspace — `zstd_comp_level`, `zstd_long` and `zstd_window_log` — and
+> is never re-parameterised, so a slot's retained size stays at the
+> figure `zstd_max_cctx_memory` vetted for that profile at config load.
+> An idle worker therefore holds up to 4 workspaces, one per distinct
+> profile it has served, rather than releasing them between requests;
+> this is a floor well below the `worker_connections ×
+> zstd_max_cctx_memory` ceiling above, not an addition to it.
+
 ---
 
 ### zstd_bypass
