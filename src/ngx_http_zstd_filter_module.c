@@ -45,22 +45,24 @@ ngx_http_zstd_ceil_log2(size_t x)
 #if defined(__GNUC__) || defined(__clang__)
     /* Use compiler builtin for count-leading-zeros on 64-bit. GCC and Clang
      * both provide __builtin_clzll; __builtin_clz is 32-bit but we require
-     * 64-bit size_t here. */
+     * 64-bit size_t here. The bit length (64 - leading_zeros) is already
+     * ceil-log2 for powers of two. For non-powers-of-two, it's one too small,
+     * so we increment. The test is inverted: when x IS a power of two,
+     * decrement back to the correct value. */
     unsigned long long  ull = (unsigned long long) x;
     int                 leading_zeros = __builtin_clzll(ull);
     ngx_uint_t          wlog = 64 - leading_zeros;
 
-    /* Adjust for ceil behavior: if x is not a power of two, we need one
-     * extra bit to fit it in 2^wlog. */
-    if ((ull & (ull - 1)) != 0) {
-        wlog++;
+    if ((ull & (ull - 1)) == 0) {
+        /* Exact power of two: bit length is one too many. */
+        wlog--;
     }
 
     return wlog;
 #else
-    /* Fallback: binary search for the highest set bit position.
-     * O(log x) iterations (at most 6 for 64-bit size_t). Declared inside
-     * the branch to keep C99+ compound-literal style declaration. */
+    /* Fallback: linear shift-and-count to find the highest set bit position.
+     * At most 13 iterations for size_t values in our range (1025 to 2^23).
+     * Declared inside the branch to keep C99+ compound-literal style. */
     ngx_uint_t  wlog = 10;
     size_t      pow2 = 1024;  /* 2^10 */
 
@@ -4578,10 +4580,12 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     value = cf->args->elts;
 
-    /* Check for duplicate: use .data == NULL test to detect config-file
-     * duplicates in the same block. Values inherited from parent blocks
-     * will have .data set; this allows normal nginx merge semantics where
-     * a child block overrides the parent without error. */
+    /* Check for duplicate within the same block: .data != NULL detects
+     * parse-time duplicates (directive appearing twice in same {}). Each
+     * block starts zero-initialized from create_loc_conf (ngx_pcalloc), so
+     * .data is NULL until we set it. Inheritance from parent blocks happens
+     * later via ngx_conf_merge_str_value after parsing, so child blocks can
+     * override parent values without error — normal nginx semantics. */
     if (zlcf->bypass_vary.data != NULL) {
         return "is duplicate";
     }
