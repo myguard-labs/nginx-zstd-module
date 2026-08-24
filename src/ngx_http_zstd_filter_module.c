@@ -141,6 +141,13 @@ typedef struct {
     ngx_flag_t                   long_mode;
     /* config-load assert: per-request CCtx memory budget */
     ssize_t                      max_cctx_memory;
+    /*
+     * Operator acknowledgement that no budget is wanted
+     * ("zstd_max_cctx_memory off"). Distinct from "never mentioned the
+     * directive": the latter gets the advisory warning below, this one
+     * silences it. NGX_CONF_UNSET until merged.
+     */
+    ngx_flag_t                   cctx_memory_ack;
 
     /* ngx_http_complex_value_t: per-request bypass */
     ngx_array_t                 *bypass;
@@ -258,6 +265,27 @@ typedef struct {
  */
 #define NGX_HTTP_ZSTD_LEVEL_UNSET  (-NGX_MAX_INT_T_VALUE - 1)
 
+/*
+ * Advisory per-request compressor-memory threshold, in bytes.
+ *
+ * When "zstd on" is in effect and the operator has NOT set
+ * zstd_max_cctx_memory, the estimated per-request CCtx working set is
+ * compared against this figure at config load and a warning is emitted
+ * when it is exceeded. 32 MB is comfortably above every default and
+ * mid-range profile (level 3 needs ~1.5 MB, level 12 ~10 MB) and well
+ * below the profiles that motivate the check (level 19 ~90 MB, level 22
+ * ~330 MB, level 22 + zstd_long ~600 MB+), so a stock or lightly tuned
+ * configuration never sees it.
+ *
+ * This is a WARNING, deliberately not a hard config failure: making a
+ * previously-working configuration refuse to start on a module upgrade
+ * is a compatibility break, and an operator who has already sized their
+ * box for a large profile is not misconfigured. "zstd_max_cctx_memory
+ * off" is the explicit acknowledgement that silences it; setting a real
+ * budget both silences it and enforces it.
+ */
+#define NGX_HTTP_ZSTD_CCTX_MEMORY_ADVISORY  (32 * 1024 * 1024)
+
 
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt  ngx_http_next_body_filter;
@@ -339,6 +367,8 @@ static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
 static ngx_int_t ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
+static char *ngx_http_zstd_max_cctx_memory(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_http_zstd_check_size_int_max(ngx_conf_t *cf, void *post,
     void *data);
 static char *ngx_http_zstd_check_num_int_max(ngx_conf_t *cf, void *post,
@@ -573,9 +603,9 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
 
     { ngx_string("zstd_max_cctx_memory"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_size_slot,
+      ngx_http_zstd_max_cctx_memory,
       NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_zstd_loc_conf_t, max_cctx_memory),
+      0,
       NULL },
 
     { ngx_string("zstd_bypass"),
@@ -2493,6 +2523,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->window_log = NGX_CONF_UNSET;
     conf->long_mode = NGX_CONF_UNSET;
     conf->max_cctx_memory = NGX_CONF_UNSET;
+    conf->cctx_memory_ack = NGX_CONF_UNSET;
     conf->bypass = NGX_CONF_UNSET_PTR;
     conf->dcz_dicts = NGX_CONF_UNSET_PTR;
     conf->dcz_assume_secure = NGX_CONF_UNSET;
@@ -2538,6 +2569,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->window_log, prev->window_log, 0);
     ngx_conf_merge_value(conf->long_mode, prev->long_mode, 0);
     ngx_conf_merge_value(conf->max_cctx_memory, prev->max_cctx_memory, 0);
+    ngx_conf_merge_value(conf->cctx_memory_ack, prev->cctx_memory_ack, 0);
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
     ngx_conf_merge_str_value(conf->bypass_vary, prev->bypass_vary, "");
 
@@ -2817,31 +2849,46 @@ close:
     }
 
     /*
-     * Per-request CCtx memory budget (config-load assertion).
+     * Per-request CCtx memory policy (config load).
      *
      * zstd's streaming compressor working set is dominated by the
      * compression-level *strategy* tables (chain/hash/search), not by
      * the window alone — see the README. Lowering windowLog therefore
      * does NOT meaningfully bound memory for high levels (level 22 at
      * windowLog 20 still allocates ~640 MB). The honest, precise lever
-     * is to validate the configured parameters against the operator's
-     * budget at config load using libzstd's own estimator, and refuse
-     * to start if they exceed it. The directive does not silently tune
-     * anything — a too-tight budget is a hard error so operators see
-     * the misconfiguration up front instead of discovering it as a
-     * worker-RSS surprise under concurrency.
+     * is libzstd's own estimator, evaluated here against the configured
+     * parameters.
+     *
+     * Two policies share that one estimate:
+     *
+     *   1. zstd_max_cctx_memory <size> — enforced budget. Exceeding it
+     *      is a hard config error, so operators see the misconfiguration
+     *      up front instead of discovering it as a worker-RSS surprise
+     *      under concurrency. The directive does not silently tune
+     *      anything.
+     *
+     *   2. Directive absent — advisory. Compression is enabled but no
+     *      budget was declared, so compare the estimate against
+     *      NGX_HTTP_ZSTD_CCTX_MEMORY_ADVISORY and warn when it is
+     *      exceeded. This is what stops a later "zstd_comp_level 22" or
+     *      "zstd_long on" edit from quietly committing hundreds of MB
+     *      per concurrent response with no config-time signal. It is a
+     *      warning and not an error on purpose: refusing to start a
+     *      configuration that worked before the upgrade is a
+     *      compatibility break, and an operator who has already sized
+     *      the box for a large profile is not misconfigured.
+     *      "zstd_max_cctx_memory off" is the explicit acknowledgement
+     *      that silences it.
      *
      * The estimator API lives in libzstd's experimental section
-     * (ZSTDLIB_STATIC_API), so the check is compiled in only when the
-     * module is built with -DZSTD_STATIC_LINKING_ONLY against
-     * libzstd >= 1.4.0 (the project's production and CI builds enable
-     * this). Without it, the directive is unsupported and rejected with
-     * an actionable error rather than silently no-op'd.
+     * (ZSTDLIB_STATIC_API), so it is compiled in only when the module is
+     * built with -DZSTD_STATIC_LINKING_ONLY against libzstd >= 1.4.0
+     * (the project's production and CI builds enable this). Without it
+     * an explicit budget is rejected with an actionable error rather
+     * than silently no-op'd, and the advisory path says once, clearly,
+     * that this build cannot compute the estimate at all.
      */
-    if (rc == NGX_CONF_OK && conf->enable
-        && conf->max_cctx_memory != NGX_CONF_UNSET
-        && conf->max_cctx_memory > 0)
-    {
+    if (rc == NGX_CONF_OK && conf->enable) {
 #if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
         ZSTD_CCtx_params  *cp;
         size_t             est;
@@ -2917,26 +2964,72 @@ close:
             return NGX_CONF_ERROR;
         }
 
-        if (est > (size_t) conf->max_cctx_memory) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+        if (conf->max_cctx_memory > 0) {
+            if (est > (size_t) conf->max_cctx_memory) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "the configured zstd parameters need ~%uz "
+                                   "bytes of per-request compressor memory, "
+                                   "which exceeds \"zstd_max_cctx_memory\" "
+                                   "%z; lower \"zstd_comp_level\" (currently "
+                                   "%i), lower \"zstd_window_log\", disable "
+                                   "\"zstd_long\", or raise the budget",
+                                   est, conf->max_cctx_memory, conf->level);
+                return NGX_CONF_ERROR;
+            }
+
+        } else if (!conf->cctx_memory_ack
+                   && est > NGX_HTTP_ZSTD_CCTX_MEMORY_ADVISORY)
+        {
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
                                "the configured zstd parameters need ~%uz "
-                               "bytes of per-request compressor memory, "
-                               "which exceeds \"zstd_max_cctx_memory\" %z; "
-                               "lower \"zstd_comp_level\" (currently %i), "
-                               "lower \"zstd_window_log\", disable "
-                               "\"zstd_long\", or raise the budget",
-                               est, conf->max_cctx_memory, conf->level);
-            return NGX_CONF_ERROR;
+                               "bytes of per-request compressor memory "
+                               "(above the %d-byte advisory threshold) and "
+                               "no \"zstd_max_cctx_memory\" budget is set, "
+                               "so worker memory is bounded only by "
+                               "\"worker_connections\" x this figure; set "
+                               "\"zstd_max_cctx_memory\" to declare and "
+                               "enforce a budget, lower \"zstd_comp_level\" "
+                               "(currently %i), lower \"zstd_window_log\", "
+                               "disable \"zstd_long\", or set "
+                               "\"zstd_max_cctx_memory off\" to acknowledge "
+                               "this profile deliberately",
+                               est,
+                               (int) NGX_HTTP_ZSTD_CCTX_MEMORY_ADVISORY,
+                               conf->level);
         }
 #else
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "\"zstd_max_cctx_memory\" requires the module "
-                           "to be built with -DZSTD_STATIC_LINKING_ONLY "
-                           "against libzstd >= 1.4.0 (memory-estimation "
-                           "API); rebuild accordingly, or use "
-                           "\"zstd_window_log\" for a coarse window-based "
-                           "bound");
-        return NGX_CONF_ERROR;
+        if (conf->max_cctx_memory > 0) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "\"zstd_max_cctx_memory\" requires the module "
+                               "to be built with -DZSTD_STATIC_LINKING_ONLY "
+                               "against libzstd >= 1.4.0 (memory-estimation "
+                               "API); rebuild accordingly, or use "
+                               "\"zstd_window_log\" for a coarse window-based "
+                               "bound");
+            return NGX_CONF_ERROR;
+        }
+
+        if (!conf->cctx_memory_ack) {
+            /*
+             * Fail-clear about the weaker guarantee: this build cannot
+             * compute the estimate, so neither the enforced budget nor
+             * the advisory threshold is available. Say so rather than
+             * silently doing nothing. Emitted once per location that
+             * enables compression without acknowledging; the operator
+             * silences it exactly as on a static build, with
+             * "zstd_max_cctx_memory off".
+             */
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                               "this build cannot estimate per-request zstd "
+                               "compressor memory (built without "
+                               "-DZSTD_STATIC_LINKING_ONLY against libzstd "
+                               ">= 1.4.0), so no per-request memory budget "
+                               "is checked or enforced; keep "
+                               "\"zstd_comp_level\" moderate and "
+                               "\"zstd_long\" off, or set "
+                               "\"zstd_max_cctx_memory off\" to acknowledge "
+                               "the weaker guarantee");
+        }
 #endif
     }
 
@@ -3553,6 +3646,74 @@ ngx_http_zstd_int_max_bound(ngx_conf_t *cf, ngx_int_t value,
                            name, INT_MAX);
         return NGX_CONF_ERROR;
     }
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * zstd_max_cctx_memory <size> | off
+ *
+ * A plain ngx_conf_set_size_slot() cannot express the difference between
+ * "the operator never mentioned this directive" and "the operator
+ * deliberately wants no budget". That difference is exactly what the
+ * advisory warning in merge_loc_conf() keys on, so parse the value here
+ * and record the acknowledgement in its own flag.
+ */
+static char *
+ngx_http_zstd_max_cctx_memory(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    char  *p = conf;
+
+    ssize_t                   size;
+    ngx_str_t                *value;
+    ngx_http_zstd_loc_conf_t *zlcf;
+
+    (void) cmd;
+
+    zlcf = (ngx_http_zstd_loc_conf_t *) p;
+
+    if (zlcf->max_cctx_memory != NGX_CONF_UNSET
+        || zlcf->cctx_memory_ack != NGX_CONF_UNSET)
+    {
+        return (char *) "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (value[1].len == 3
+        && ngx_strncasecmp(value[1].data, (u_char *) "off", 3) == 0)
+    {
+        /*
+         * Explicit acknowledgement: no budget is enforced and no advisory
+         * warning is emitted. Identical enforcement behaviour to leaving
+         * the directive out, but the operator has said so on purpose.
+         */
+        zlcf->max_cctx_memory = 0;
+        zlcf->cctx_memory_ack = 1;
+
+        return NGX_CONF_OK;
+    }
+
+    size = ngx_parse_size(&value[1]);
+
+    if (size == NGX_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid value \"%V\" in \"%V\"; expected a "
+                           "size or \"off\"", &value[1], &value[0]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (size <= 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"%V\" must be greater than 0, or \"off\" to "
+                           "acknowledge that no budget is enforced",
+                           &value[0]);
+        return NGX_CONF_ERROR;
+    }
+
+    zlcf->max_cctx_memory = size;
+    zlcf->cctx_memory_ack = 1;
 
     return NGX_CONF_OK;
 }
