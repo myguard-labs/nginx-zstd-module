@@ -3404,6 +3404,13 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 }
 
                 if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+                    /*
+                     * The descriptor is consumed either way: invalidate it
+                     * BEFORE jumping, or the close: label closes the same fd
+                     * a second time and logs a duplicate error.
+                     */
+                    fd = NGX_INVALID_FILE;
+
                     ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                                        ngx_close_file_n " \"%V\" failed",
                                        &zmcf->dict_file);
