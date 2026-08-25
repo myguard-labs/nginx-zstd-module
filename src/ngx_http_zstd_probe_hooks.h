@@ -76,6 +76,64 @@ void ngx_http_zstd_probe_note_buf_alloc(void);
 void ngx_http_zstd_probe_note_ctx_state(ngx_uint_t free_links,
     ngx_uint_t out_buf_present, size_t out_buf_size);
 
+
+/*
+ * Codec fault injection (Phase 3).
+ *
+ * The outcome an armed site produces. The testkit's arm parser carries a
+ * single integer per site (fault_codec=<nth>), and the probe contract is
+ * explicit that the module owns the injection point AND ITS SEMANTICS --
+ * so http-zstd encodes the outcome in the high part of that integer
+ * rather than asking the testkit for a second query key. See
+ * NGX_HTTP_ZSTD_PROBE_FAULT_ZERO_BASE below.
+ */
+typedef enum {
+    NGX_HTTP_ZSTD_PROBE_CODEC_NONE = 0,  /* not armed for this event    */
+    NGX_HTTP_ZSTD_PROBE_CODEC_ERROR,     /* return a ZSTD_isError value */
+    NGX_HTTP_ZSTD_PROBE_CODEC_ZERO       /* succeed, writing no output  */
+} ngx_http_zstd_probe_codec_outcome_e;
+
+
+/*
+ * Outcome encoding inside the single `nth` the testkit hands us.
+ *
+ *   fault_codec=<n>         n in 1..999   -> ERROR outcome on the nth call
+ *   fault_codec=<1000 + n>  n in 1..999   -> ZERO-OUTPUT outcome on the nth
+ *
+ * WHY ENCODE RATHER THAN ADD A KEY. The ZERO outcome is not optional
+ * decoration: the suppression arm in the filter gates on
+ * ngx_buf_size(ctx->out_buf) == 0, which is a libzstd *output* decision,
+ * not an error. An error-returning fault aborts the request before that
+ * arm is ever evaluated, so without a success-with-zero-output outcome the
+ * arm stays unreachable. Adding a second query key would mean changing the
+ * testkit, which is out of scope for this repo; the testkit's own contract
+ * (ngx_test_probe.h, "the module owns every actual injection point")
+ * delegates exactly this choice to us. The base is 1000 because the parser
+ * bounds a fault value at NGX_TEST_PROBE_FAULT_MAX_DIGITS (4) digits, so
+ * 1000..1999 is representable while leaving 1..999 for the plain form.
+ */
+#define NGX_HTTP_ZSTD_PROBE_FAULT_ZERO_BASE  1000
+
+
+/*
+ * Consume one codec-call event for the given site and report which
+ * outcome, if any, this call must produce.
+ *
+ * `is_end` selects the site: the ZSTD_e_end call is CODEC_END, every other
+ * directive is CODEC. Called exactly once per ZSTD_compressStream2 call,
+ * immediately before it, and it is the call that advances that site's
+ * event counter -- so a site armed at nth=2 trips on the second call
+ * REGARDLESS of which outcome was requested.
+ *
+ * Returns NGX_HTTP_ZSTD_PROBE_CODEC_NONE for the overwhelmingly common
+ * unarmed case; both globals sit at -1 then and the function is a pair of
+ * predictable compares, which is the "zero measurable cost when not armed"
+ * requirement. When not compiled (no NGX_TEST_HARNESS) neither this
+ * declaration nor its call site exists at all.
+ */
+ngx_http_zstd_probe_codec_outcome_e
+    ngx_http_zstd_probe_codec_fault(ngx_uint_t is_end);
+
 #endif /* NGX_TEST_HARNESS */
 
 #endif /* NGX_HTTP_ZSTD_PROBE_HOOKS_H_INCLUDED_ */

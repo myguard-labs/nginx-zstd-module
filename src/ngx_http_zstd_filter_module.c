@@ -2161,8 +2161,85 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_ERROR;
     }
 
+#ifdef NGX_TEST_HARNESS
+    {
+        /*
+         * Codec fault injection (CI harness builds only; this whole block
+         * does not exist in a packaged build -- see filter/config for the
+         * two switches, and ngx_http_zstd_probe_hooks.h for the outcome
+         * encoding).
+         *
+         * Site selection is exactly the testkit's split: the ZSTD_e_end
+         * call is the end-of-frame site (CODEC_END), every other directive
+         * is the streaming site (CODEC). `directive` is already final here
+         * -- it is computed above and nothing between reassigns it.
+         *
+         * The check is placed BEFORE the real call and SUBSTITUTES for it
+         * rather than corrupting its result afterwards, because both
+         * outcomes have to be indistinguishable from libzstd having
+         * behaved that way: an injected error must not leave the encoder
+         * half-advanced, and the zero-output outcome must leave
+         * buffer_in/buffer_out untouched, which is only true if the real
+         * call never ran.
+         */
+        switch (ngx_http_zstd_probe_codec_fault(directive == ZSTD_e_end)) {
+
+        case NGX_HTTP_ZSTD_PROBE_CODEC_ERROR:
+            /*
+             * A value ZSTD_isError() reports true for.
+             *
+             * (size_t) -1 and not a named ZSTD_error_* enumerator:
+             * ZSTD_ErrorCode and its enumerators live in zstd_errors.h /
+             * the ZSTD_STATIC_LINKING_ONLY section, which this module only
+             * conditionally has (see the ZSTD_VERSION_NUMBER >= 10400
+             * guards elsewhere in this file), whereas ZSTD_isError() is
+             * stable API always available. ZSTD_isError() tests
+             * `result > (size_t) -ZSTD_error_maxCode`, and (size_t) -1 is
+             * the largest representable size_t, so it is above maxCode for
+             * every libzstd that has ever shipped -- the one value that
+             * cannot stop being an error when the enum grows.
+             *
+             * Falls straight into the existing ZSTD_isError arm below, so
+             * there is no second error path to keep in sync; the request
+             * fails exactly as it would on a real codec failure, including
+             * the [crit]-level log line (which is why fault-injection tests
+             * must set PROBER_ALLOW_LOG).
+             */
+            zrc = (size_t) -1;
+            break;
+
+        case NGX_HTTP_ZSTD_PROBE_CODEC_ZERO:
+            /*
+             * Success with zero output: the encoder accepted nothing and
+             * produced nothing. buffer_in.pos and buffer_out.pos are left
+             * exactly as they were, so the deltas computed below are both
+             * 0 and ctx->out_buf keeps whatever it already held.
+             *
+             * zrc MUST be 0, not a positive remainder. 0 means "fully
+             * flushed" and is what drives the two arms this outcome exists
+             * to reach: with a non-END directive and ctx->last set it takes
+             * the END-transition arm, sees a zero output delta and returns
+             * NGX_AGAIN so a real ZSTD_e_end call still follows; with
+             * ZSTD_e_end it makes `last` true, which is what lets the
+             * empty-out_buf suppression arm below be evaluated at all.
+             * A positive zrc would instead set ctx->redo and, on the END
+             * site, spin forever producing no output -- a live-lock, not a
+             * fault injection.
+             */
+            zrc = 0;
+            break;
+
+        case NGX_HTTP_ZSTD_PROBE_CODEC_NONE:
+        default:
+            zrc = ZSTD_compressStream2(cctx, &ctx->buffer_out,
+                                       &ctx->buffer_in, directive);
+            break;
+        }
+    }
+#else
     zrc = ZSTD_compressStream2(cctx, &ctx->buffer_out, &ctx->buffer_in,
                                directive);
+#endif
 
     if (ZSTD_isError(zrc)) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,

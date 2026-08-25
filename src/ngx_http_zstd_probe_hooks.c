@@ -59,10 +59,34 @@ static ngx_uint_t  ngx_http_zstd_probe_out_buf_present;
 static size_t      ngx_http_zstd_probe_out_buf_size;
 static ngx_uint_t  ngx_http_zstd_probe_have_ctx;
 
-/* Fault-injection storage for Phase 3. This phase only provides the
- * accept/decline contract and the storage; nothing reads these yet. */
+/*
+ * Fault-injection state. The armed value is the raw `nth` the testkit
+ * parsed, still carrying its outcome encoding (see
+ * NGX_HTTP_ZSTD_PROBE_FAULT_ZERO_BASE in the header); -1 means disarmed,
+ * which is what fault_set_global stores for any negative value.
+ *
+ * PROCESS GLOBALS, DELIBERATELY. These are armed by the request that hits
+ * /__probe and tripped by a LATER request that runs the filter, so the two
+ * must land in the same worker. Every prober conf for this module runs a
+ * single worker (worker_processes 1) precisely so that holds -- the same
+ * constraint ngx_test_probe.h documents for its own fault_set_global
+ * counter, inherited here rather than re-derived. There is no shm zone in
+ * this module to put them in even if we wanted one (verified: zero
+ * ngx_shared_memory_add / shm_zone in src/), which is why the zoneless
+ * hook family is registered at all.
+ */
 static ngx_int_t  ngx_http_zstd_probe_fault_codec_nth     = -1;
 static ngx_int_t  ngx_http_zstd_probe_fault_codec_end_nth = -1;
+
+/*
+ * Per-site event counters, counting ZSTD_compressStream2 calls seen since
+ * process start. Same single-worker rationale as the armed values above.
+ * These advance on EVERY call, armed or not, so that an arm issued
+ * mid-stream still counts from a well-defined origin rather than from
+ * whenever the arm happened to land.
+ */
+static ngx_uint_t  ngx_http_zstd_probe_codec_calls;
+static ngx_uint_t  ngx_http_zstd_probe_codec_end_calls;
 
 static ngx_int_t ngx_http_zstd_probe_handler(ngx_http_request_t *r);
 
@@ -96,6 +120,56 @@ ngx_http_zstd_probe_note_ctx_state(ngx_uint_t free_links,
     ngx_http_zstd_probe_out_buf_present = out_buf_present;
     ngx_http_zstd_probe_out_buf_size = out_buf_size;
     ngx_http_zstd_probe_have_ctx = 1;
+}
+
+
+/*
+ * Codec fault decision. See the header for the outcome encoding and for
+ * why the outcome rides inside `nth` instead of a second query key.
+ *
+ * Advances the site's event counter, then answers whether THIS call is
+ * the armed nth. One-shot by construction: matching is `==`, so a site
+ * armed at nth=1 trips on exactly one call and every later call in the
+ * process is unarmed again -- a test does not have to disarm to keep the
+ * rest of its traffic clean.
+ *
+ * Unarmed cost: one increment and one compare against -1 that predicts
+ * perfectly, before any of the decode arithmetic runs.
+ */
+ngx_http_zstd_probe_codec_outcome_e
+ngx_http_zstd_probe_codec_fault(ngx_uint_t is_end)
+{
+    ngx_int_t   armed;
+    ngx_uint_t  seq;
+
+    if (is_end) {
+        armed = ngx_http_zstd_probe_fault_codec_end_nth;
+        seq = ++ngx_http_zstd_probe_codec_end_calls;
+
+    } else {
+        armed = ngx_http_zstd_probe_fault_codec_nth;
+        seq = ++ngx_http_zstd_probe_codec_calls;
+    }
+
+    if (armed < 0) {
+        /* The overwhelmingly common case: nothing armed for this site. */
+        return NGX_HTTP_ZSTD_PROBE_CODEC_NONE;
+    }
+
+    if (armed >= NGX_HTTP_ZSTD_PROBE_FAULT_ZERO_BASE) {
+
+        if ((ngx_uint_t) (armed - NGX_HTTP_ZSTD_PROBE_FAULT_ZERO_BASE) != seq) {
+            return NGX_HTTP_ZSTD_PROBE_CODEC_NONE;
+        }
+
+        return NGX_HTTP_ZSTD_PROBE_CODEC_ZERO;
+    }
+
+    if ((ngx_uint_t) armed != seq) {
+        return NGX_HTTP_ZSTD_PROBE_CODEC_NONE;
+    }
+
+    return NGX_HTTP_ZSTD_PROBE_CODEC_ERROR;
 }
 
 
@@ -134,12 +208,14 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
 
 /*
  * fault_set_global hook: zstd wires no SLAB/PALLOC/TEMPFILE/ACCEPT
- * injection points -- decline those. CODEC/CODEC_END storage is provided
- * here; Phase 3 wires the actual injection at the ZSTD_compressStream2
- * call site and reads these two globals. Accepting the value now (rather
- * than after Phase 3 lands) means the wire format and the arm/disarm
- * contract are settled before the injection itself, so Phase 3 adds no
- * probe-visible churn.
+ * injection points -- decline those. CODEC/CODEC_END are stored raw,
+ * outcome encoding and all; ngx_http_zstd_probe_codec_fault() decodes
+ * them at the single ZSTD_compressStream2 call site in the filter.
+ *
+ * The stored value is not range-checked here on purpose: the testkit's
+ * parser has already bounded it to +/- 4 digits, and an nth that names an
+ * event this process never reaches is a test that arms nothing, not an
+ * error to report. Anything negative disarms.
  */
 static ngx_int_t
 ngx_http_zstd_probe_fault_set_global(ngx_test_probe_fault_e fault,
