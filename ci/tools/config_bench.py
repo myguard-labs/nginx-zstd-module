@@ -135,8 +135,15 @@ DEFAULT_ROUNDS = 3
 # TODO rows actually name -- "thousands of same-profile locations" for the
 # location workloads and "~600 entries" for the dcz dictionary list.
 WORKLOAD_SCALES: dict[str, list[int]] = {
-    "locations-same-profile": [10, 500, 2000, 4000],
-    "locations-multi-profile": [10, 500, 2000, 4000],
+    # 16000 (not 4000) so the largest point clears SCALE_MIN_HI_SECONDS with
+    # margin on fast hardware: 4000 locations measured 27-33ms on a
+    # contemporary dev box in 2026-08, below the 50ms floor, aborting the
+    # self-check before either workload could report a curve. 16000 measured
+    # 91.7ms (same-profile) / 101.2ms (multi-profile) on that same box --
+    # roughly 2x the floor -- while staying inside the range the module
+    # docstring's baseline table already exercised (32000 locations, 246.5ms).
+    "locations-same-profile": [10, 500, 4000, 16000],
+    "locations-multi-profile": [10, 500, 4000, 16000],
     "dcz-dicts": [10, 150, 300, 600],
 }
 
