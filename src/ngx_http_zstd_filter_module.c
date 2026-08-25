@@ -4896,12 +4896,59 @@ ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
  * Valid examples: "Accept-Encoding", "X-My-Header", "content-type"
  * Invalid: "*" (alone), "Accept-Encoding, Custom", "Accept-Encoding;q=1"
  */
+/*
+ * Validate value as a single RFC 9110 field-name token. Per RFC 9110 §5.1:
+ *   tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-"
+ *         / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+ * Reject commas and semicolons (list/parameter separators) and quotes
+ * (not tchar; never part of a token). Accept all other tchar including
+ * '*' in non-solitary positions (e.g., X-Foo*Bar is a valid token).
+ *
+ * Returns NULL when value is a valid token, or the exact error string to
+ * return from the directive handler otherwise.
+ */
+static const char *
+ngx_http_zstd_validate_field_name_token(ngx_str_t *value)
+{
+    u_char  *p, *end;
+
+    for (p = value->data, end = value->data + value->len; p < end; p++) {
+        u_char  c = *p;
+
+        /* List/parameter separators: reject to prevent ambiguous Vary. */
+        if (c == ',' || c == ';') {
+            return "invalid value: comma or semicolon (not a token)";
+        }
+
+        /* Quoted string: DQUOTE is never part of a token. */
+        if (c == '"') {
+            return "invalid value: quoted string (not a token)";
+        }
+
+        /* tchar set per RFC 9110 §5.1. Accept all, including '*' in
+         * non-solitary positions (e.g., X-Foo*Bar is valid). */
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9')
+              || c == '!' || c == '#' || c == '$' || c == '%'
+              || c == '&' || c == '\'' || c == '*' || c == '+'
+              || c == '-' || c == '.' || c == '^' || c == '_'
+              || c == '`' || c == '|' || c == '~'))
+        {
+            return "invalid value: not a valid field-name token "
+                   "(RFC 9110)";
+        }
+    }
+
+    return NULL;
+}
+
+
 static char *
 ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_zstd_loc_conf_t  *zlcf = conf;
     ngx_str_t                 *value;
-    u_char                    *p, *end;
+    const char                *err;
 
     value = cf->args->elts;
 
@@ -4929,38 +4976,9 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                    "invalid value: bare wildcard '*' disables shared caching";
     }
 
-    /* Validate as a single RFC 9110 token. Per RFC 9110 §5.1:
-     *   tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-"
-     *         / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
-     * Reject commas and semicolons (list/parameter separators) and quotes
-     * (not tchar; never part of a token). Accept all other tchar including
-     * '*' in non-solitary positions (e.g., X-Foo*Bar is a valid token). */
-    for (p = value->data, end = value->data + value->len; p < end; p++) {
-        u_char  c = *p;
-
-        /* List/parameter separators: reject to prevent ambiguous Vary. */
-        if (c == ',' || c == ';') {
-            return (char *) "invalid value: comma or semicolon (not a token)";
-        }
-
-        /* Quoted string: DQUOTE is never part of a token. */
-        if (c == '"') {
-            return (char *) "invalid value: quoted string (not a token)";
-        }
-
-        /* tchar set per RFC 9110 §5.1. Accept all, including '*' in
-         * non-solitary positions (e.g., X-Foo*Bar is valid). */
-        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-              || (c >= '0' && c <= '9')
-              || c == '!' || c == '#' || c == '$' || c == '%'
-              || c == '&' || c == '\'' || c == '*' || c == '+'
-              || c == '-' || c == '.' || c == '^' || c == '_'
-              || c == '`' || c == '|' || c == '~'))
-        {
-            return (char *)
-                       "invalid value: not a valid field-name token "
-                       "(RFC 9110)";
-        }
+    err = ngx_http_zstd_validate_field_name_token(value);
+    if (err != NULL) {
+        return (char *) err;
     }
 
     /* Valid token: store it. ngx_conf_set_str_slot behavior (dup into
