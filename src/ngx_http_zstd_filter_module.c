@@ -245,6 +245,26 @@ typedef struct {
     u_char                      *dict_buf;
     size_t                       dict_buf_size;
     ngx_array_t                 *dict_registry;  /* dict_entry_t entries */
+
+    /*
+     * Conservative "could this cycle possibly serve a compressed
+     * response" latch for ngx_http_zstd_filter_init() (TODO row: skip
+     * installing the header/body filter hooks when the module is off
+     * everywhere). Set at DIRECTIVE PARSE TIME by
+     * ngx_http_zstd_set_enable_slot() whenever a "zstd on;" (or
+     * anything other than an explicit "zstd off;") is parsed ANYWHERE
+     * in the config -- main, srv, loc, or an NGX_HTTP_LIF_CONF location
+     * conf created for a rewrite-phase "if" block. Latching at parse
+     * time rather than during the location-conf merge walk sidesteps
+     * having to prove every "if" loc conf is reachable from that walk;
+     * a false positive here (installing the hooks when every merged
+     * location actually stays disabled) only costs the two no-op calls
+     * this row is about, while a false negative would silently drop
+     * compression for a live location. Never read at request time and
+     * never influences $zstd_ratio/$zstd_bytes_* (those stay wired
+     * unconditionally in ngx_http_zstd_add_variables()).
+     */
+    ngx_flag_t                   any_enabled;
 } ngx_http_zstd_main_conf_t;
 
 
@@ -534,6 +554,8 @@ static char *ngx_http_zstd_set_bufs_slot(ngx_conf_t *cf, ngx_command_t *cmd,
 static char *ngx_http_zstd_check_bufs_product(ngx_conf_t *cf,
     ngx_bufs_t *bufs, ngx_flag_t unsafe, const char *ctx, ngx_flag_t advise);
 static char *ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_http_zstd_set_enable_slot(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static void ngx_http_zstd_cleanup_dict(void *data);
 static void ngx_http_zstd_cleanup_cctx(void *data);
@@ -833,7 +855,7 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
     { ngx_string("zstd"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
       |NGX_CONF_FLAG,
-      ngx_conf_set_flag_slot,
+      ngx_http_zstd_set_enable_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, enable),
       NULL },
@@ -3904,6 +3926,26 @@ close:
 static ngx_int_t
 ngx_http_zstd_filter_init(ngx_conf_t *cf)
 {
+    ngx_http_zstd_main_conf_t  *zmcf;
+
+    zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
+
+    /*
+     * TODO row: do not install request hooks when the module is
+     * disabled in every merged location. any_enabled is latched
+     * conservatively at directive PARSE time (see
+     * ngx_http_zstd_set_enable_slot() and the field's own comment on
+     * ngx_http_zstd_main_conf_t) by every "zstd on;"/non-"off" value
+     * parsed anywhere in this cycle's config, including inside an "if"
+     * block. Skipping registration here only removes the two no-op
+     * calls an all-disabled deployment currently pays on every
+     * response; any location that could compress still gets both
+     * filters wired exactly as before.
+     */
+    if (!zmcf->any_enabled) {
+        return NGX_OK;
+    }
+
     ngx_http_next_header_filter = ngx_http_top_header_filter;
     ngx_http_top_header_filter = ngx_http_zstd_header_filter;
 
@@ -4989,6 +5031,52 @@ ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     if (zlcf->bypass_vary.data == NULL) {
         return (char *) "allocation failed";
     }
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * Wraps the stock ngx_conf_set_flag_slot() for the "zstd" directive so
+ * every "zstd on;"/"zstd <var>;" parsed ANYWHERE in the config — main,
+ * srv, loc, or an NGX_HTTP_LIF_CONF conf synthesized for a rewrite-phase
+ * "if" block — latches ngx_http_zstd_main_conf_t.any_enabled. See the
+ * field's own comment for why parse time (not the location-conf merge
+ * walk) is used and why a false positive here is harmless while a false
+ * negative is not: an "if" loc conf is not provably visited by the
+ * normal merge walk, so this is the deliberately conservative option.
+ *
+ * Only the literal "off" clears the possibility; every other value this
+ * directive can legally take at parse time — "on", or a variable/complex
+ * value from ngx_conf_set_flag_slot's own value table — must be assumed
+ * enabling, because ngx_conf_set_flag_slot() rejects anything that is
+ * not exactly "on"/"off" before we ever see it, and "if(cond) { zstd on;
+ * } if(!cond) { zstd off; }" plus nginx's "if" mechanics can still make
+ * the on-branch conf reachable regardless of what a sibling loc parses.
+ */
+static char *
+ngx_http_zstd_set_enable_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_str_t                  *value;
+    char                       *rc;
+    ngx_http_zstd_main_conf_t  *zmcf;
+
+    rc = ngx_conf_set_flag_slot(cf, cmd, conf);
+    if (rc != NGX_CONF_OK) {
+        return rc;
+    }
+
+    value = cf->args->elts;
+
+    /* value[1] is the directive's single argument: "on" or "off" (the
+     * only two ngx_conf_set_flag_slot accepts — anything else already
+     * made it return an error string above). */
+    if (value[1].len == 3 && ngx_strncmp(value[1].data, "off", 3) == 0) {
+        return NGX_CONF_OK;
+    }
+
+    zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
+    zmcf->any_enabled = 1;
 
     return NGX_CONF_OK;
 }

@@ -116,6 +116,28 @@ typedef struct {
      * holds the space.
      */
     ngx_uint_t  unused;
+
+    /*
+     * Conservative "could this cycle possibly serve a precompressed
+     * .zst file" latch for ngx_http_zstd_static_init() (TODO row: skip
+     * appending the always-declining content-phase handler when
+     * zstd_static is off in every merged location). Latched at
+     * DIRECTIVE PARSE TIME by ngx_http_zstd_static_set_enable_slot()
+     * whenever "zstd_static on;" or "zstd_static always;" is parsed
+     * anywhere in the config — main, srv, or loc. Unlike the filter
+     * module's "zstd" directive, "zstd_static"'s command flags (above)
+     * do not include NGX_HTTP_LIF_CONF, so nginx's config parser itself
+     * refuses it inside a rewrite-phase "if" block; there is no "if"
+     * loc conf case to reason about here. Latching at parse time rather
+     * than the location-conf merge walk is still the conservative
+     * choice for the same reason as the filter module: a false positive
+     * (installing the handler when every merged location stays off)
+     * only costs the handler's own early return, while a false negative
+     * would silently stop precompressed files being served. Independent
+     * of, and never influencing, the filter module's own any_enabled
+     * bit — the two modules latch separately.
+     */
+    ngx_flag_t  any_enabled;
 } ngx_http_zstd_static_main_conf_t;
 
 
@@ -127,11 +149,15 @@ static ngx_conf_enum_t  ngx_http_zstd_static[] = {
 };
 
 
+static char * ngx_http_zstd_static_set_enable_slot(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+
+
 static ngx_command_t  ngx_http_zstd_static_commands[] = {
 
     { ngx_string("zstd_static"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_enum_slot,
+      ngx_http_zstd_static_set_enable_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_static_conf_t, enable),
       &ngx_http_zstd_static },
@@ -1006,11 +1032,65 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 }
 
 
+/*
+ * Wraps the stock ngx_conf_set_enum_slot() for "zstd_static" so every
+ * "zstd_static on;"/"zstd_static always;" parsed anywhere in the config
+ * (main, srv, or loc — never inside an "if": see the any_enabled field's
+ * comment) latches ngx_http_zstd_static_main_conf_t.any_enabled. Only
+ * the literal "off" leaves it clear; ngx_conf_set_enum_slot() itself
+ * already rejects any value that is not one of the three enum entries
+ * (off/on/always), so by the time this runs the argument is always one
+ * of exactly those three.
+ */
+static char *
+ngx_http_zstd_static_set_enable_slot(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    ngx_str_t                         *value;
+    char                              *rc;
+    ngx_http_zstd_static_main_conf_t  *zsmcf;
+
+    rc = ngx_conf_set_enum_slot(cf, cmd, conf);
+    if (rc != NGX_CONF_OK) {
+        return rc;
+    }
+
+    value = cf->args->elts;
+
+    if (value[1].len == 3 && ngx_strncmp(value[1].data, "off", 3) == 0) {
+        return NGX_CONF_OK;
+    }
+
+    zsmcf = ngx_http_conf_get_module_main_conf(cf,
+                                                ngx_http_zstd_static_module);
+    zsmcf->any_enabled = 1;
+
+    return NGX_CONF_OK;
+}
+
+
 static ngx_int_t
 ngx_http_zstd_static_init(ngx_conf_t *cf)
 {
     ngx_http_handler_pt               *h;
     ngx_http_core_main_conf_t         *cmcf;
+    ngx_http_zstd_static_main_conf_t  *zsmcf;
+
+    zsmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_static_module);
+
+    /*
+     * TODO row: do not append the always-declining content-phase
+     * handler when zstd_static is off in every merged location.
+     * any_enabled is latched conservatively at directive parse time
+     * (ngx_http_zstd_static_set_enable_slot(), see its own and the
+     * field's comment). Skipping registration here removes one
+     * always-false content-phase check per request in an all-disabled
+     * deployment; any location that could serve a .zst file still gets
+     * the handler installed exactly as before.
+     */
+    if (!zsmcf->any_enabled) {
+        return NGX_OK;
+    }
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
