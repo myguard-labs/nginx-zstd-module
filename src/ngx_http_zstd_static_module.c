@@ -239,8 +239,6 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
     uint64_t    w;
     ngx_uint_t  i, fhd, fcs_size, off;
 
-    static const ngx_uint_t  did_len[4] = { 0, 1, 2, 4 };
-
     mw = ((uint32_t) hdr[0])
        | ((uint32_t) hdr[1] << 8)
        | ((uint32_t) hdr[2] << 16)
@@ -323,7 +321,7 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
          * flag only means "absent" when Single_Segment is unset).
          */
         fcs_size = (fhd >> 6) ? ((ngx_uint_t) 1 << (fhd >> 6)) : 1;
-        off = 5 + did_len[fhd & 3];
+        off = 5 + (((ngx_uint_t) 1 << (fhd & 3)) >> 1);
 
         if (n < off + fcs_size) {
             return NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED;
