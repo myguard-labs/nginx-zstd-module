@@ -89,7 +89,25 @@ main(void)
         (1u << 23) - 1, 1u << 23, (1u << 23) + 1,
         (size_t) 1 << 25
     };
-    static const off_t pledges[] = { UNKNOWN, 0, 1, 4096, 1u << 20, 1u << 23 };
+    /*
+     * The last three exercise the overflow fix: pledged_size is
+     * upstream-controlled (r->headers_out.content_length_n) and must not be
+     * able to wrap "required" down to something small. All three are large
+     * POSITIVE off_t values -- (off_t) SIZE_MAX itself is negative on a
+     * platform where off_t and size_t are the same width (verified: it
+     * would silently fall into the pledged_size < 0 "unknown length" branch
+     * and test nothing), so the boundary is expressed as OFF_T_MAX (the
+     * largest legal off_t on ANY platform) and fractions of it, which stay
+     * positive everywhere and still exceed size_t on an ILP32 build where
+     * off_t is wider.
+     */
+#define OFF_T_MAX  ((off_t) (((uintmax_t) 1 << (sizeof(off_t) * 8 - 1)) - 1))
+    static const off_t pledges[] = {
+        UNKNOWN, 0, 1, 4096, 1u << 20, 1u << 23,
+        OFF_T_MAX / 2,
+        OFF_T_MAX - 1,
+        OFF_T_MAX,
+    };
 
     size_t     di, pi;
     ngx_int_t  conf, budget;
@@ -118,12 +136,37 @@ main(void)
              * this is an oracle rather than a tautology.
              */
             {
-                size_t     required;
+                size_t     pledged_contribution, required;
                 ngx_int_t  want;
 
-                required = dict + (pledged >= 0
-                                   ? (size_t) pledged
-                                   : 1024 * 1024);
+                /*
+                 * Independently recomputed with its OWN saturating
+                 * arithmetic (not a call into the saturation the fix adds),
+                 * so this stays an oracle rather than the tautology of
+                 * calling the same helper the production code now calls.
+                 * Saturating at ceil_log2's own 2^23 threshold is enough:
+                 * anything at or past it maps to the same window log, so
+                 * the oracle does not need SIZE_MAX-exact behaviour.
+                 */
+                if (pledged < 0) {
+                    pledged_contribution = 1024 * 1024;
+
+                } else if ((uintmax_t) pledged > (size_t) 1 << 23) {
+                    pledged_contribution = (size_t) 1 << 23;
+
+                } else {
+                    pledged_contribution = (size_t) pledged;
+                }
+
+                if (pledged_contribution > (size_t) 1 << 23
+                    || dict > (size_t) 1 << 23)
+                {
+                    required = (size_t) 1 << 23;
+
+                } else {
+                    required = dict + pledged_contribution;
+                }
+
                 want = (ngx_int_t) ngx_http_zstd_ceil_log2(required);
 
                 if (base != want) {

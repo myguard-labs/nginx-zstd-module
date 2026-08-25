@@ -341,11 +341,12 @@ http {{
                 wb = frame_window(budget_body, True)
                 check(
                     "zstd_max_cctx_memory clamps the dcz window",
-                    wb <= 1 << BUDGET_EXPECTED_WLOG,
-                    f"declared window {wb} exceeds the budget-derived cap "
+                    wb == 1 << BUDGET_EXPECTED_WLOG,
+                    f"declared window {wb} != budget-derived cap "
                     f"{1 << BUDGET_EXPECTED_WLOG} (2^{BUDGET_EXPECTED_WLOG}) "
                     f"for zstd_max_cctx_memory {BUDGET} -- the dcz path "
-                    "escaped the vetted budget",
+                    "either escaped the vetted budget (over-clamp) or "
+                    "clamped tighter than the budget allows (under-clamp)",
                 )
         finally:
             proc.terminate()

@@ -24,11 +24,12 @@ Changes with http-zstd
        load had accepted (measured, libzstd 1.5.7 at level 3: 3663393
        bytes at the default window versus 9954849 at window log 23, a
        2.72x escape; 6.74x at level 1). When "zstd_max_cctx_memory" is
-       set, the dcz window is now clamped to the largest window log
-       whose estimated CCtx memory still fits the budget -- the same
-       treatment "zstd_window_log" already got, since both are memory
-       ceilings and a dictionary must not silently void one. The cap is
-       computed once at config load, so the request path only compares.
+       set to a POSITIVE budget, the dcz window is now clamped to the
+       largest window log whose estimated CCtx memory still fits the
+       budget -- the same treatment "zstd_window_log" already got,
+       since both are memory ceilings and a dictionary must not
+       silently void one. The cap is computed once at config load, so
+       the request path only compares.
 
        The clamp is OPT-IN and changes dcz wire bytes only for operators
        who explicitly configured a memory bound. With neither

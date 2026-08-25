@@ -11,6 +11,7 @@
 #include <zstd.h>
 
 #include <limits.h>  /* INT_MAX — config-load bound on (int)-narrowed sizes */
+#include <stdint.h>  /* SIZE_MAX — saturating dcz window-log arithmetic */
 
 #include "ngx_http_zstd_common.h"
 #include "ngx_http_zstd_sha256.h"
@@ -188,13 +189,37 @@ static ngx_inline ngx_int_t
 ngx_http_zstd_dcz_window_log(size_t dict_len, off_t pledged_size,
     ngx_int_t conf_window_log, ngx_int_t budget_window_cap)
 {
-    size_t     required;
+    size_t     required, pledged_contribution;
     ngx_int_t  wlog;
 
-    required = dict_len
-               + (pledged_size >= 0
-                  ? (size_t) pledged_size
-                  : 1024 * 1024);
+    /*
+     * pledged_size is upstream-controlled (r->headers_out.content_length_n,
+     * an off_t that can exceed SIZE_MAX on an ILP32 build, and can be large
+     * enough on any build to overflow the addition below). ceil_log2()
+     * already saturates any size_t at NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG, so
+     * saturating the cast and the sum here -- rather than letting either
+     * wrap -- is enough to keep a hostile content-length from producing a
+     * small "required" and hence a wrong (too small) window log and ring
+     * key. Saturating at SIZE_MAX is deliberately coarse: ceil_log2() caps
+     * everything above 2^23 the same way, so no finer clamp is needed.
+     */
+    if (pledged_size < 0) {
+        pledged_contribution = 1024 * 1024;
+
+    } else if (sizeof(off_t) > sizeof(size_t)
+               && (uintmax_t) pledged_size > (uintmax_t) SIZE_MAX)
+    {
+        /* off_t wider than size_t (ILP32): a cast down would truncate. */
+        pledged_contribution = SIZE_MAX;
+
+    } else {
+        pledged_contribution = (size_t) pledged_size;
+    }
+
+    required = dict_len + pledged_contribution;
+    if (required < dict_len) {
+        required = SIZE_MAX;
+    }
 
     wlog = (ngx_int_t) ngx_http_zstd_ceil_log2(required);
 

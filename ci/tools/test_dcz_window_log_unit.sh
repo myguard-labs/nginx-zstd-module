@@ -105,3 +105,20 @@ cp ci/tools/test_dcz_window_log_unit.c "$OUT/test_dcz_window_log_unit.c"
 "$OUT/dcz_window_log_unit"
 
 echo "OK: dcz window-log unit fixture (extracted from current $SRC)"
+
+# ILP32-with-LFS pass: sizeof(off_t) > sizeof(size_t) is the one shape where
+# a huge upstream content-length can truncate on cast or wrap the addition
+# in ngx_http_zstd_dcz_window_log(). A plain native build on this (64-bit)
+# host has off_t == size_t width and cannot reach either defect -- -m32 with
+# _FILE_OFFSET_BITS=64 is what reproduces it, so it is not optional coverage.
+# Skipped (not failed) when the runner has no 32-bit toolchain at all.
+if "$CC" -m32 -x c -o /dev/null - <<<'int main(void){return 0;}' \
+    >/dev/null 2>&1
+then
+    "$CC" -m32 -D_FILE_OFFSET_BITS=64 -Wall -Wextra -Werror -O2 -I"$OUT" \
+        -o "$OUT/dcz_window_log_unit_ilp32" "$OUT/test_dcz_window_log_unit.c"
+    "$OUT/dcz_window_log_unit_ilp32"
+    echo "OK: dcz window-log unit fixture (ILP32 + LFS, off_t wider than size_t)"
+else
+    echo "SKIP: no -m32 toolchain available; ILP32/LFS pass not run" >&2
+fi
