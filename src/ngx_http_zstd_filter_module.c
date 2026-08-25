@@ -262,7 +262,8 @@ typedef struct {
      * this row is about, while a false negative would silently drop
      * compression for a live location. Never read at request time and
      * never influences $zstd_ratio/$zstd_bytes_* (those stay wired
-     * unconditionally in ngx_http_zstd_add_variables()).
+     * unconditionally in ngx_http_zstd_add_variables(), each setting its
+     * own per-call no_cacheable flag -- see that function's comment).
      */
     ngx_flag_t                   any_enabled;
 } ngx_http_zstd_main_conf_t;
@@ -3961,16 +3962,26 @@ ngx_http_zstd_add_variables(ngx_conf_t *cf)
 {
     ngx_http_variable_t  *v;
 
-    v = ngx_http_add_variable(cf, &ngx_http_zstd_ratio,
-                              NGX_HTTP_VAR_NOCACHEABLE);
+    /*
+     * TODO row: no blanket NGX_HTTP_VAR_NOCACHEABLE here. Each handler
+     * below sets vv->no_cacheable per-call instead -- 1 while the
+     * compression for this request has not finished yet (ctx->done ==
+     * 0), 0 once it reports the final value. nginx's variable cache
+     * (ngx_http_get_indexed_variable()) retries a flushed no_cacheable
+     * result on the next lookup but reuses a cacheable one, so the
+     * first post-completion lookup formats the value once and every
+     * later lookup in the same request (e.g. repeated log/map
+     * references) reuses that cached ngx_http_variable_value_t instead
+     * of reformatting or redividing.
+     */
+    v = ngx_http_add_variable(cf, &ngx_http_zstd_ratio, 0);
     if (v == NULL) {
         return NGX_ERROR;
     }
 
     v->get_handler = ngx_http_zstd_ratio_variable;
 
-    v = ngx_http_add_variable(cf, &ngx_http_zstd_bytes_in,
-                              NGX_HTTP_VAR_NOCACHEABLE);
+    v = ngx_http_add_variable(cf, &ngx_http_zstd_bytes_in, 0);
     if (v == NULL) {
         return NGX_ERROR;
     }
@@ -3978,8 +3989,7 @@ ngx_http_zstd_add_variables(ngx_conf_t *cf)
     v->get_handler = ngx_http_zstd_bytes_variable;
     v->data = offsetof(ngx_http_zstd_ctx_t, bytes_in);
 
-    v = ngx_http_add_variable(cf, &ngx_http_zstd_bytes_out,
-                              NGX_HTTP_VAR_NOCACHEABLE);
+    v = ngx_http_add_variable(cf, &ngx_http_zstd_bytes_out, 0);
     if (v == NULL) {
         return NGX_ERROR;
     }
@@ -4050,6 +4060,7 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     ctx = ngx_http_get_module_ctx(r, ngx_http_zstd_filter_module);
     if (ctx == NULL || !ctx->done || ctx->bytes_out == 0) {
         vv->not_found = 1;
+        vv->no_cacheable = 1;
         return NGX_OK;
     }
 
@@ -4077,7 +4088,7 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
               - vv->data;
 
     vv->valid = 1;
-    vv->no_cacheable = 1;
+    vv->no_cacheable = 0;
 
     return NGX_OK;
 }
@@ -4088,7 +4099,9 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
  * compressed response, complementing $zstd_ratio (which only gives the
  * ratio). `data` is the offsetof() of the ctx field to report, so one
  * handler serves both. Only set once the filter has finished compressing
- * this response (log phase), like $zstd_ratio.
+ * this response (log phase), like $zstd_ratio. no_cacheable tracks that
+ * same transition (see ngx_http_zstd_add_variables()'s comment): 1 for
+ * a pre-completion not_found result, 0 for the final formatted value.
  */
 static ngx_int_t
 ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
@@ -4100,6 +4113,7 @@ ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
     ctx = ngx_http_get_module_ctx(r, ngx_http_zstd_filter_module);
     if (ctx == NULL || !ctx->done) {
         vv->not_found = 1;
+        vv->no_cacheable = 1;
         return NGX_OK;
     }
 
@@ -4112,7 +4126,7 @@ ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
 
     vv->len = ngx_sprintf(vv->data, "%uz", value) - vv->data;
     vv->valid = 1;
-    vv->no_cacheable = 1;
+    vv->no_cacheable = 0;
 
     return NGX_OK;
 }

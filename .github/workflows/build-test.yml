@@ -1388,6 +1388,12 @@ jobs:
           python3 ci/tools/test_terminal_frame.py --nginx-binary "$TEST_NGINX_BINARY" --port 18085
           echo "✓ Terminal-frame regression test passed"
 
+      - name: Run $zstd_ratio dynamic-cacheable regression test
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          python3 ci/tools/test_var_dynamic_cacheable.py --nginx-binary "$TEST_NGINX_BINARY" --port 18142
+          echo "✓ Dynamic-cacheable variable regression test passed"
+
       - name: Run proxy_buffering-off truncation regression (bug B)
         run: |
           cd "$GITHUB_WORKSPACE"
