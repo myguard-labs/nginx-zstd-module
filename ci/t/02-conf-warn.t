@@ -87,6 +87,114 @@ Accept-Encoding: zstd
 
 
 
+=== TEST 2b: zstd_bypass on a direct $http_* predicate without vary warns
+# Inverse of TEST 1: a zstd_bypass predicate that reads a request header
+# DIRECTLY, with no zstd_bypass_vary alongside it, lets a shared cache
+# mix an identity response with a compressed one under the same key.
+--- config
+    location /warn2b {
+        zstd on;
+        zstd_bypass $http_x_no_compression;
+        default_type text/plain;
+        return 200 "hello world padding padding padding\n";
+    }
+--- request
+GET /warn2b
+--- more_headers
+Accept-Encoding: zstd
+--- error_log
+without a "zstd_bypass_vary"
+--- no_error_log
+[error]
+
+
+
+=== TEST 2c: zstd_bypass on a direct $cookie_* predicate without vary warns
+# Same hazard, cookie-driven bypass instead of a request header.
+--- config
+    location /warn2c {
+        zstd on;
+        zstd_bypass $cookie_no_compression;
+        default_type text/plain;
+        return 200 "hello world padding padding padding\n";
+    }
+--- request
+GET /warn2c
+--- more_headers
+Accept-Encoding: zstd
+--- error_log
+without a "zstd_bypass_vary"
+--- no_error_log
+[error]
+
+
+
+=== TEST 2d: direct predicate WITH zstd_bypass_vary stays silent
+# The correctly-paired configuration (TEST 2's config) must not trip the
+# new inverse warning either -- both directions of the coupling check
+# must agree on a valid config.
+--- config
+    location /paired2d {
+        zstd on;
+        zstd_bypass $http_x_no_compression;
+        zstd_bypass_vary X-No-Compression;
+        default_type text/plain;
+        return 200 "hello world padding padding padding\n";
+    }
+--- request
+GET /paired2d
+--- more_headers
+Accept-Encoding: zstd
+--- no_error_log eval
+[qr/without a "zstd_bypass_vary"/, qr/\[error\]/]
+
+
+
+=== TEST 2e: a map-based zstd_bypass predicate without vary stays silent
+# Indirect variables (map results, etc.) are a documented operator
+# responsibility, not something this module can resolve; the raw
+# predicate text here is "$zstd_off", which contains neither "$http_"
+# nor "$cookie_", so the new check must not fire a false positive.
+--- http_config
+    map $http_x_no_zstd $zstd_off {
+        default 0;
+        "1"     1;
+    }
+--- config
+    location /warn2e {
+        zstd on;
+        zstd_bypass $zstd_off;
+        default_type text/plain;
+        return 200 "hello world padding padding padding\n";
+    }
+--- request
+GET /warn2e
+--- more_headers
+Accept-Encoding: zstd
+--- no_error_log eval
+[qr/without a "zstd_bypass_vary"/, qr/\[error\]/]
+
+
+
+=== TEST 2f: a response-only variable predicate without vary stays silent
+# A predicate that references neither a request header nor a cookie --
+# here a response-side module variable -- must not trip the new check.
+--- config
+    location /warn2f {
+        zstd on;
+        zstd_bypass $zstd_ratio;
+        default_type text/plain;
+        return 200 "hello world padding padding padding\n";
+    }
+--- request
+GET /warn2f
+--- more_headers
+Accept-Encoding: zstd
+--- no_error_log eval
+[qr/without a "zstd_bypass_vary"/, qr/\[error\]/]
+
+
+
 === TEST 3: zstd_static rejects an invalid enum value cleanly
 # Regression for the missing ngx_null_string sentinel in the
 # ngx_http_zstd_static[] ngx_conf_enum_t array. ngx_conf_set_enum_slot()

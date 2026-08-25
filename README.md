@@ -894,6 +894,16 @@ server {
 > `Cache-Control: private` / `no-store`. Bypass predicates that depend
 > only on `$request_uri`/`$uri` (already part of the cache key) do not
 > need this.
+>
+> The module warns at config load when a `zstd_bypass` predicate reads a
+> `$http_*` or `$cookie_*` variable **directly** with no
+> `zstd_bypass_vary` configured in the same location — the same
+> misconfiguration named above, caught before it reaches a shared cache.
+> The check only recognizes the literal `$http_*`/`$cookie_*` spellings;
+> an indirect predicate (e.g. a `map` result variable derived from a
+> header or cookie) is not resolved and stays silent — pairing
+> `zstd_bypass_vary` with a map-derived predicate remains an explicit
+> operator responsibility.
 
 ---
 

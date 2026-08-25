@@ -3367,6 +3367,54 @@ ngx_http_zstd_estimate_cctx_memory(ngx_conf_t *cf,
 #endif
 
 
+/*
+ * Detects a DIRECT "$http_*" or "$cookie_*" reference in one zstd_bypass
+ * predicate's source text (ngx_http_complex_value_t.value keeps the raw
+ * argument as written, even for a script with embedded variables -- see
+ * ccv->complex_value->value = *v in ngx_http_compile_complex_value()).
+ *
+ * Deliberately narrow: only the literal "$http_" / "$cookie_" spellings
+ * count. A map or any other indirection (e.g. a "map" result variable) is
+ * an explicit documented operator responsibility and must stay silent --
+ * a false warning on a map is worse than missing the direct case.
+ */
+static ngx_uint_t
+ngx_http_zstd_predicate_is_direct_header_or_cookie(ngx_str_t *v)
+{
+    u_char  *p, *last;
+
+    p = v->data;
+    last = v->data + v->len;
+
+    while (p < last) {
+        p = ngx_strlchr(p, last, '$');
+        if (p == NULL) {
+            return 0;
+        }
+
+        p++;
+
+        if (p < last && *p == '{') {
+            p++;
+        }
+
+        if ((size_t) (last - p) >= sizeof("http_") - 1
+            && ngx_strncmp(p, "http_", sizeof("http_") - 1) == 0)
+        {
+            return 1;
+        }
+
+        if ((size_t) (last - p) >= sizeof("cookie_") - 1
+            && ngx_strncmp(p, "cookie_", sizeof("cookie_") - 1) == 0)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
 static char *
 ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 {
@@ -3438,6 +3486,41 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                            "field no response varies on. Add a "
                            "\"zstd_bypass\" directive or remove "
                            "\"zstd_bypass_vary\"", &conf->bypass_vary);
+    }
+
+    /*
+     * Inverse of the check above: a zstd_bypass predicate that reads a
+     * request header or cookie DIRECTLY (e.g.
+     * "zstd_bypass $http_x_no_compression;") without a matching
+     * zstd_bypass_vary lets a shared cache mix an identity response
+     * with a compressed one under the same cache key -- a
+     * cache-poisoning / wrong-variant-served hazard. Only the literal
+     * "$http_*" / "$cookie_*" spellings are checked; a map or other
+     * indirection stays an explicit documented operator responsibility
+     * (see ngx_http_zstd_predicate_is_direct_header_or_cookie()).
+     */
+    if (conf->bypass != NULL && conf->bypass_vary.len == 0) {
+        ngx_http_complex_value_t  *cv;
+        ngx_uint_t                 i;
+
+        cv = conf->bypass->elts;
+
+        for (i = 0; i < conf->bypass->nelts; i++) {
+            if (ngx_http_zstd_predicate_is_direct_header_or_cookie(
+                    &cv[i].value))
+            {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                                   "\"zstd_bypass\" predicate \"%V\" reads "
+                                   "a request header or cookie directly "
+                                   "without a \"zstd_bypass_vary\"; a "
+                                   "shared cache may mix identity and "
+                                   "compressed responses under the same "
+                                   "key. Add a \"zstd_bypass_vary\" "
+                                   "directive naming the header this "
+                                   "varies on", &cv[i].value);
+                break;
+            }
+        }
     }
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
