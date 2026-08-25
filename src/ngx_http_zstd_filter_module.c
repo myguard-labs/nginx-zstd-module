@@ -1047,6 +1047,19 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         return ngx_http_next_header_filter(r);
     }
 
+    /* subrequest: both negotiators below reject r != r->main
+     * unconditionally (ngx_http_zstd_accepts() in common.h,
+     * ngx_http_zstd_dcz_negotiate()), so a subrequest can never be
+     * encoded here. Returning now skips the eligibility gates, the
+     * zstd-owned Vary pushes and zstd_bypass predicate evaluation,
+     * all of which are dead work on a response this filter will
+     * decline regardless. */
+    if (r != r->main) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, subrequest");
+        return ngx_http_next_header_filter(r);
+    }
+
     /* status not eligible: < 200, bodyless 204/205, 206 Partial Content,
      * or any > 299 except 403/404 (which carry compressible error bodies).
      *

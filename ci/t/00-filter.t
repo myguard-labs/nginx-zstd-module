@@ -2417,14 +2417,13 @@ Vary: X-No-Compression, Accept-Encoding
 
 
 === TEST 91: an SSI subrequest is not separately zstd-compressed
-# ngx_http_zstd_accepts() declines when r != r->main, so only the main request
-# negotiates a content coding. A subrequest inherits the parent's
-# headers_in (including "Accept-Encoding: zstd"), so without that guard the
-# include is compressed on its own and its zstd frame is spliced into the
-# parent's body as opaque bytes.
+# The header filter checks r != r->main early and declines for subrequests,
+# so only the main request negotiates a content coding. Without that guard
+# the subrequest would be compressed on its own and its zstd frame would be
+# spliced into the parent's body as opaque bytes.
 #
-# The assertion is the error-log line the filter emits when it commits to
-# compressing, counted over the whole request: the parent here is text/html
+# The assertion is the error-log line the filter emits when declining the
+# subrequest, counted over the whole request: the parent here is text/html
 # with zstd off, so a correctly guarded run reaches "zstd: compressing
 # response" zero times. Asserting only on the assembled body would not work —
 # with the guard removed the page still reads correctly, because the parent's
@@ -2454,7 +2453,7 @@ Accept-Encoding: zstd
 --- response_body
 BEGININCLUDED-PAYLOAD-INCLUDED-PAYLOAD-INCLUDED-PAYLOADEND
 --- error_log
-zstd: skip, client did not accept zstd encoding
+zstd: skip, subrequest
 --- no_error_log
 zstd: compressing response
 [error]
