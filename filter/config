@@ -21,6 +21,22 @@ ngx_module_srcs=$HTTP_ZSTD_SRCS
 ngx_module_deps=$HTTP_ZSTD_DEPS
 ngx_module_libs="$ngx_zstd_opt_L"
 
+# The CI-only test probe comes from ci/t/harness (nginx-module-testkit). It is
+# real code only when NGX_TEST_HARNESS is defined -- ci/tools/ci-build.sh sets both
+# TEST_HARNESS=1 (seen here) and -DNGX_TEST_HARNESS (the compile define), and
+# never for a packaged build. Gate its sources on the same switch so the
+# submodule is a hard prerequisite ONLY for the harness build. The paths are
+# spelled with $_ngx_zstd_root (not $ngx_addon_dir) because ngx_addon_dir is
+# reassigned to src/ before this config is sourced (see ../config:15).
+if [ "${TEST_HARNESS:-0}" = "1" ]; then
+    ngx_module_srcs="$ngx_module_srcs \
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe.c \
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe_arm.c"
+    ngx_module_deps="$ngx_module_deps \
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe.h"
+    ngx_module_incs="$ngx_module_incs $_ngx_zstd_root/ci/t/harness/src"
+fi
+
 # Optional acceleration for dcz dictionary hashing: RFC 9842 keys
 # negotiation on the SHA-256 of every registered dictionary, computed at
 # config load — so nginx -t and every reload pay it. libcrypto's EVP
