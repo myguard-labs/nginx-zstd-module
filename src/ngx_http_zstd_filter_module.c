@@ -662,9 +662,7 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
 #endif
 
 typedef struct {
-    ngx_int_t    level;
-    ngx_flag_t   long_mode;
-    ngx_int_t    window_log;
+    uint64_t key;
 } ngx_http_zstd_cctx_profile_t;
 
 typedef struct {
@@ -677,13 +675,50 @@ static ngx_http_zstd_cctx_slot_t
     ngx_http_zstd_worker_cctx_slots[NGX_HTTP_ZSTD_CCTX_SLOTS];
 
 
+/*
+ * Pack/unpack CCtx profile into a single 64-bit key for collision-free,
+ * reversible matching. Layout:
+ *   bits  0–17: level + 131072 bias (18 bits; handles -131072..22)
+ *   bits 18–22: window_log (5 bits; handles 0..31)
+ *   bit  23:    long_mode (1 bit; 0 or 1)
+ *   bits 24–63: reserved (zero)
+ *
+ * The bias shifts negative levels into the unsigned range so bit shifts are
+ * well-defined on all compilers (right-shift of negative signed ints is
+ * implementation-defined in C).
+ */
+#define NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS  131072
+
+static uint64_t
+ngx_http_zstd_profile_pack(ngx_int_t level, ngx_flag_t long_mode,
+    ngx_int_t window_log)
+{
+    uint64_t key;
+
+    key = ((uint64_t)(level + NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS) & 0x3FFFFUL)
+        | (((uint64_t)window_log & 0x1FUL) << 18)
+        | (((uint64_t)long_mode & 1UL) << 23);
+
+    return key;
+}
+
+
+static void __attribute__((unused))
+ngx_http_zstd_profile_unpack(uint64_t key, ngx_int_t *level,
+    ngx_flag_t *long_mode, ngx_int_t *window_log)
+{
+    *level = (ngx_int_t)((key & 0x3FFFFUL) - NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS);
+    *window_log = (ngx_int_t)((key >> 18) & 0x1FUL);
+    *long_mode = (ngx_flag_t)((key >> 23) & 1UL);
+}
+
+
 static void
 ngx_http_zstd_cctx_profile_from_conf(ngx_http_zstd_cctx_profile_t *profile,
     ngx_http_zstd_loc_conf_t *zlcf)
 {
-    profile->level = zlcf->level;
-    profile->long_mode = zlcf->long_mode;
-    profile->window_log = zlcf->window_log;
+    profile->key = ngx_http_zstd_profile_pack(zlcf->level, zlcf->long_mode,
+        zlcf->window_log);
 }
 
 
@@ -692,9 +727,7 @@ ngx_http_zstd_cctx_profiles_match(
     const ngx_http_zstd_cctx_profile_t *a,
     const ngx_http_zstd_cctx_profile_t *b)
 {
-    return a->level == b->level
-        && a->long_mode == b->long_mode
-        && a->window_log == b->window_log;
+    return a->key == b->key;
 }
 
 
