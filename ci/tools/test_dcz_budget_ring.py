@@ -372,12 +372,43 @@ http {{
             for slot, _lvl, _lng, wlog in witnesses:
                 by_slot.setdefault(slot, set()).add(wlog)
             wlogs = {w for s in by_slot.values() for w in s}
+
+            # The STRONG form, and the weak one is not good enough here.
+            # "at least two slots exist and at least two window logs appear"
+            # is an aggregate over the whole log: it cannot tell the fixed
+            # behaviour (slot A keyed only on the dcz window, slot B keyed
+            # only on the plain one) from a regression in which one slot was
+            # keyed on the plain window and LATER re-keyed by a dcz request,
+            # which is exactly the contamination under test. Two servers run
+            # in this one worker, so both aggregate counts are inflated for
+            # reasons unrelated to the property anyway.
+            #
+            # A slot is never re-parameterised, so every witness for a given
+            # slot must report the SAME window log. More than one window log
+            # on a single slot is the contamination itself, visible directly.
+            mixed = {s: sorted(w) for s, w in by_slot.items() if len(w) > 1}
+            check(
+                "no ring slot is keyed on more than one window log",
+                not mixed,
+                f"slot(s) re-keyed mid-run: {mixed} -- a dcz request borrowed "
+                "a slot vetted for another window and raised its retained "
+                "workspace permanently",
+            )
+
+            # And the two profiles must actually be present, in slots of
+            # their own: the dcz window (unclamped, on the default server)
+            # and the plain "unset" 0. Without this a run in which dcz never
+            # negotiated would satisfy the check above vacuously.
+            dcz_slots = {s for s, w in by_slot.items() if str(UNCLAMPED_WLOG) in w}
+            plain_slots = {s for s, w in by_slot.items() if "0" in w}
             check(
                 "dcz and plain requests occupy DIFFERENT ring slots",
-                len(by_slot) >= 2 and len(wlogs) >= 2,
-                f"witnesses {witnesses!r}: slots {sorted(by_slot)} keyed on "
-                f"window_logs {sorted(wlogs)} -- a dcz request keyed on the "
-                "unset zstd_window_log shares the plain slot and raises its "
+                bool(dcz_slots) and bool(plain_slots) and not (dcz_slots & plain_slots),
+                f"witnesses {witnesses!r}: slots keyed on the dcz window "
+                f"{UNCLAMPED_WLOG} = {sorted(dcz_slots)}, slots keyed on the "
+                f"unset window 0 = {sorted(plain_slots)}; want both non-empty "
+                "and disjoint. A dcz request keyed on the unset "
+                "zstd_window_log shares the plain slot and raises its "
                 "retained workspace permanently",
             )
             check(

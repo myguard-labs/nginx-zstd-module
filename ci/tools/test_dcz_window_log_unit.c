@@ -158,11 +158,15 @@ main(void)
                         continue;
                     }
 
-                    /* 2: a ceiling never RAISES the window. */
-                    if (got > base) {
-                        fail("ceiling-raised-window", dict, pledged, conf,
-                             budget, got, base);
-                    }
+                    /*
+                     * "A ceiling never raises the window" needs no separate
+                     * assertion: `want` is `base` reduced by the set
+                     * ceilings, and the floor cannot lift it back above
+                     * `base` because `base` is itself >= the floor. So the
+                     * got != want comparison above already enforces it, and
+                     * a `got > base` check here could never fire. Stating it
+                     * as its own assertion would only look like coverage.
+                     */
 
                     /*
                      * 4: range again, now under clamping. A configured
