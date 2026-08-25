@@ -16,6 +16,10 @@
 #include "ngx_http_zstd_common.h"
 #include "ngx_http_zstd_sha256.h"
 
+#ifdef NGX_TEST_HARNESS
+#include "ngx_http_zstd_probe_hooks.h"
+#endif
+
 
 /*
  * Compute the ceiling of log₂(x) for a size_t value: the minimum k such that
@@ -1147,6 +1151,15 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       0,
       NULL },
 
+#ifdef NGX_TEST_HARNESS
+    { ngx_string("zstd_probe"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS,
+      ngx_http_zstd_probe_directive,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+#endif
+
     ngx_null_command
 };
 
@@ -1835,6 +1848,36 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
 }
 
 
+#ifdef NGX_TEST_HARNESS
+/*
+ * Snapshot this request's free-chain length and out_buf state for the
+ * probe endpoint. Called from ngx_http_zstd_body_filter() at both return
+ * points of its main loop -- see the call sites. Kept here (not in
+ * ngx_http_zstd_probe_hooks.c) because it reads ngx_http_zstd_ctx_t, a
+ * typedef local to this translation unit; the probe file receives only
+ * the already-derived scalars via ngx_http_zstd_probe_note_ctx_state(),
+ * never the ctx pointer itself.
+ */
+static void
+ngx_http_zstd_probe_snapshot_ctx(ngx_http_zstd_ctx_t *ctx)
+{
+    ngx_chain_t  *cl;
+    ngx_uint_t    free_links;
+
+    free_links = 0;
+
+    for (cl = ctx->free; cl; cl = cl->next) {
+        free_links++;
+    }
+
+    ngx_http_zstd_probe_note_ctx_state(free_links,
+        ctx->out_buf != NULL,
+        ctx->out_buf != NULL
+            ? (size_t) (ctx->out_buf->end - ctx->out_buf->start) : 0);
+}
+#endif
+
+
 static ngx_int_t
 ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
@@ -1919,6 +1962,10 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
             *ctx->last_in = link;
             ctx->last_in = &link->next;
+
+#ifdef NGX_TEST_HARNESS
+            ngx_http_zstd_probe_note_chain_link();
+#endif
         }
 
         r->connection->buffered |= NGX_HTTP_GZIP_BUFFERED;
@@ -2020,6 +2067,9 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
 
         if (ctx->out == NULL && !flush) {
+#ifdef NGX_TEST_HARNESS
+            ngx_http_zstd_probe_snapshot_ctx(ctx);
+#endif
             return ctx->busy ? NGX_AGAIN : NGX_OK;
         }
 
@@ -2043,6 +2093,9 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         flush = 0;
 
         if (ctx->done) {
+#ifdef NGX_TEST_HARNESS
+            ngx_http_zstd_probe_snapshot_ctx(ctx);
+#endif
             return rc;
         }
     }
@@ -2540,6 +2593,10 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         if (ctx->out_buf == NULL) {
             return NGX_ERROR;
         }
+
+#ifdef NGX_TEST_HARNESS
+        ngx_http_zstd_probe_note_buf_alloc();
+#endif
 
         ctx->out_buf->tag = (ngx_buf_tag_t) &ngx_http_zstd_filter_module;
         ctx->out_buf->recycled = 1;
@@ -4301,6 +4358,20 @@ ngx_http_zstd_filter_init(ngx_conf_t *cf)
     ngx_http_zstd_main_conf_t  *zmcf;
 
     zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
+
+#ifdef NGX_TEST_HARNESS
+    /*
+     * Register the zoneless probe hooks unconditionally, BEFORE the
+     * any_enabled early return below: the probe endpoint (reached only
+     * through the "zstd_probe" directive, on a location an operator opts
+     * into explicitly) must stay reachable even in a config where every
+     * "zstd" directive is off, so a test can assert the disabled state
+     * itself.
+     */
+    if (ngx_http_zstd_probe_init(cf) != NGX_OK) {
+        return NGX_ERROR;
+    }
+#endif
 
     /*
      * TODO row: do not install request hooks when the module is

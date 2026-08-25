@@ -31,9 +31,11 @@ ngx_module_libs="$ngx_zstd_opt_L"
 if [ "${TEST_HARNESS:-0}" = "1" ]; then
     ngx_module_srcs="$ngx_module_srcs \
                  $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe.c \
-                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe_arm.c"
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe_arm.c \
+                 $_ngx_zstd_root/src/ngx_http_zstd_probe_hooks.c"
     ngx_module_deps="$ngx_module_deps \
-                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe.h"
+                 $_ngx_zstd_root/ci/t/harness/src/ngx_test_probe.h \
+                 $_ngx_zstd_root/src/ngx_http_zstd_probe_hooks.h"
     ngx_module_incs="$ngx_module_incs $_ngx_zstd_root/ci/t/harness/src"
 fi
 
