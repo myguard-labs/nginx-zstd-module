@@ -1539,7 +1539,6 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
     ngx_int_t                  flush, rc;
     ngx_chain_t               *cl;
-    ngx_chain_t               *in_copy;
     ngx_http_zstd_ctx_t       *ctx;
     ngx_http_zstd_loc_conf_t  *zlcf;
 
@@ -1601,34 +1600,31 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
     if (in) {
         /*
-         * O(1) append: ngx_chain_add_copy() walks the destination chain
-         * from its head to find the tail before appending, which makes
-         * repeated callbacks against a pending (not yet fully drained)
-         * ctx->in chain O(n^2) in the number of links retained across
-         * callbacks -- reachable whenever upstream data arrives while
-         * downstream backpressure (NGX_AGAIN from
-         * ngx_http_next_body_filter) leaves prior links queued. Copy the
-         * incoming chain into a fresh, NULL-headed local chain first (so
-         * ngx_chain_add_copy's own head-walk is bounded by the size of
-         * just this callback's `in`, not the whole retained backlog), then
-         * splice that copy onto the tracked tail in O(1). Consumers of
-         * ctx->in (add_data) only ever advance it link-by-link from the
-         * head and never reorder it, so the tracked tail cannot go stale
-         * between calls.
+         * O(1) append: allocate and link each incoming buffer one-by-one
+         * directly onto the tracked tail, advancing the tail as we go.
+         * This avoids the redundant traversal that ngx_chain_add_copy()
+         * followed by a while loop would incur: ngx_chain_add_copy() walks
+         * the destination chain to find its tail, and then a subsequent
+         * loop walks that same freshly-built chain again. Instead, we walk
+         * and build in the same pass, tracking the tail as we splice.
+         * Consumers of ctx->in (add_data) only ever advance it
+         * link-by-link from the head and never reorder it, so the tracked
+         * tail cannot go stale between calls.
          */
-        in_copy = NULL;
+        ngx_chain_t  *link;
 
-        if (ngx_chain_add_copy(r->pool, &in_copy, in) != NGX_OK) {
-            goto failed;
+        for (ngx_chain_t *src = in; src; src = src->next) {
+            link = ngx_alloc_chain_link(r->pool);
+            if (link == NULL) {
+                goto failed;
+            }
+
+            link->buf = src->buf;
+            link->next = NULL;
+
+            *ctx->last_in = link;
+            ctx->last_in = &link->next;
         }
-
-        *ctx->last_in = in_copy;
-
-        while (in_copy->next) {
-            in_copy = in_copy->next;
-        }
-
-        ctx->last_in = &in_copy->next;
 
         r->connection->buffered |= NGX_HTTP_GZIP_BUFFERED;
     }
