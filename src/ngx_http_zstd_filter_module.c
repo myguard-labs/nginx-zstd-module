@@ -708,8 +708,6 @@ static void ngx_http_zstd_collect_dcz_headers(ngx_http_request_t *r,
     ngx_table_elt_t **sec_fetch_site_h, ngx_uint_t *sec_fetch_site_count);
 static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
     ngx_http_request_t *r, ngx_http_zstd_loc_conf_t *zlcf);
-static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx);
 
 
 /*
@@ -1887,16 +1885,12 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
         /*
          * dcz responses start with the fixed 40-byte frame header (RFC
-         * 9842 §2.2). Queue it ahead of any compressed output. The
-         * dcz_header_sent guard predates cctx_ready (this block used to
-         * re-run when a data-less buffer cleared buffer_in.src); it stays
-         * as an independent invariant on the wire prefix.
+         * 9842 §2.2). It is no longer queued here as its own buffer/chain
+         * link: ngx_http_zstd_filter_get_buf() reserves and fills the
+         * first 40 bytes of the first compressor output buffer with it
+         * (ctx->dcz_header_sent still guards against duplicating it, and
+         * is now set there instead of here). Nothing to do on this path.
          */
-        if (ctx->dcz_dict != NULL && !ctx->dcz_header_sent) {
-            if (ngx_http_zstd_filter_emit_dcz_header(r, ctx) != NGX_OK) {
-                goto failed;
-            }
-        }
 
         ctx->cctx_ready = 1;
     }
@@ -2180,8 +2174,21 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
          * ZSTD_e_end runs. If it did produce output, fall through to emit
          * those (valid, non-terminal) bytes — but `last` must stay false this
          * iteration so we do not set last_buf before the end marker exists.
+         *
+         * Keyed on THIS call's delta (buffer_out.pos - pos_out), not
+         * ngx_buf_size(ctx->out_buf): the whole-buffer size also counts the
+         * dcz 40-byte prefix that ngx_http_zstd_filter_get_buf() may have
+         * already written into a freshly allocated buffer before this call
+         * ever ran. Checking the whole-buffer size made a buffer holding
+         * only the prefix look "non-empty" and forced a premature,
+         * non-terminal 40-byte emission instead of forcing the extra
+         * iteration that actually reaches ZSTD_e_end -- doubling the
+         * output buffers this response needed instead of the reduction
+         * this prefix-inlining change is for. The delta is 0 in both the
+         * prefix and non-prefix case whenever this call itself wrote
+         * nothing, so behaviour for a non-dcz response is unchanged.
          */
-        if (ngx_buf_size(ctx->out_buf) == 0) {
+        if (ctx->buffer_out.pos - pos_out == 0) {
             return NGX_AGAIN;
         }
 
@@ -2459,7 +2466,23 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
                        "zstd get_buf: reused free buffer %p", ctx->out_buf);
 
     } else if (ctx->bufs < zlcf->bufs.num) {
-        size_t  buf_size = zlcf->bufs.size;
+        size_t      buf_size = zlcf->bufs.size;
+        ngx_uint_t  first_buf = ctx->bufs == 0;
+
+        /*
+         * The 40-byte dcz skippable-frame prefix (RFC 9842 §2.2) rides in
+         * the front of THIS buffer instead of its own temp buffer/chain
+         * link: reserve the space here and copy it in below, once, on the
+         * very first output buffer this response ever allocates. A dcz
+         * response's first get_buf() call is always this fresh-allocation
+         * path (ctx->bufs == 0 here always means "never allocated before
+         * for this request" — the free-list reuse branch above cannot fire
+         * before the first allocation exists), so gating on first_buf is
+         * equivalent to, and replaces, the old dcz_header_sent-guarded
+         * call site in the body filter.
+         */
+        ngx_uint_t  want_prefix = first_buf && ctx->dcz_dict != NULL
+                                   && !ctx->dcz_header_sent;
 
         /*
          * Size only the FIRST output buffer from the pledged size, when
@@ -2475,14 +2498,12 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
          * (chunked/proxied) tail. pledged_size is -1 exactly on that
          * streaming case, so this never fires there.
          */
-        if (ctx->bufs == 0 && ctx->pledged_size >= 0) {
+        if (first_buf && ctx->pledged_size >= 0) {
             size_t  bound = ZSTD_compressBound((size_t) ctx->pledged_size);
 
             /*
              * ZSTD_compressBound() covers only the compressed payload; pad
-             * it for libzstd's own frame/block header overhead (the dcz
-             * 40-byte skippable-frame prefix is queued on its own separate
-             * buffer by emit_dcz_header and never lands here). Never grow
+             * it for libzstd's own frame/block header overhead. Never grow
              * past the configured size, and keep a small floor so
              * tiny/empty bodies still get a buffer the frame overhead fits
              * inside.
@@ -2498,6 +2519,23 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             }
         }
 
+        /*
+         * Grow the allocation by the prefix length so reserving it never
+         * steals space ZSTD_compressBound()/the floor above sized for the
+         * compressed payload -- the compressor still gets the full
+         * buf_size to fill; the prefix rides in bytes appended past it.
+         * Never let this push buf_size past zlcf->bufs.size: on the
+         * pledged-size path buf_size is already clamped below it above,
+         * and on the full-size path adding 40 bytes here would otherwise
+         * make the allocation slightly larger than every other buffer in
+         * the pool for no benefit, so clamp back down and only ever
+         * dip into the compressor's own share when the pool buffer is
+         * already at the configured size.
+         */
+        if (want_prefix) {
+            buf_size += NGX_HTTP_ZSTD_DCZ_HEADER_LEN;
+        }
+
         ctx->out_buf = ngx_create_temp_buf(r->pool, buf_size);
         if (ctx->out_buf == NULL) {
             return NGX_ERROR;
@@ -2506,6 +2544,20 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         ctx->out_buf->tag = (ngx_buf_tag_t) &ngx_http_zstd_filter_module;
         ctx->out_buf->recycled = 1;
         ctx->bufs++;
+
+        if (want_prefix) {
+            ctx->out_buf->last = ngx_cpymem(ctx->out_buf->last,
+                                             ctx->dcz_dict->frame_header,
+                                             NGX_HTTP_ZSTD_DCZ_HEADER_LEN);
+
+            ctx->bytes_out += NGX_HTTP_ZSTD_DCZ_HEADER_LEN;
+            ctx->dcz_header_sent = 1;
+
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "zstd dcz: 40-byte frame header written into "
+                           "first output buffer (dict \"%V\")",
+                           &ctx->dcz_dict->file);
+        }
 
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd get_buf: allocated buffer %p (%i in use)",
@@ -2524,7 +2576,15 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         return NGX_ERROR;
     }
 
-    ctx->buffer_out.dst = ctx->out_buf->pos;
+    /*
+     * dst/size are keyed off ->last, not ->pos: on a freshly allocated
+     * buffer carrying the dcz prefix, ->last was already advanced past it
+     * above, so the compressor writes immediately after the prefix bytes
+     * instead of overwriting them. On every other buffer (recycled, or a
+     * fresh non-dcz allocation) ->last == ->pos still, so this is exactly
+     * the prior behaviour.
+     */
+    ctx->buffer_out.dst = ctx->out_buf->last;
     ctx->buffer_out.pos = 0;
 
     /* Validate buffer pointers to detect corruption before using in ZSTD */
@@ -2535,53 +2595,14 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         return NGX_ERROR;
     }
 
-    ctx->buffer_out.size = ctx->out_buf->end - ctx->out_buf->start;
-
-    return NGX_OK;
-}
-
-
-/*
- * Queue the 40-byte dcz frame header (RFC 9842 §2.2) as the first link
- * on the out chain: the zstd skippable-frame magic 0x184D2A5E with a
- * declared 32-byte content, then the dictionary's SHA-256. Emitted from
- * its own pool buffer rather than through the compressor's recycled
- * buffers so it can never be reordered behind compressed output. A
- * plain zstd decoder skips the frame; a dcz client checks the hash
- * against the dictionary it advertised.
- */
-static ngx_int_t
-ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx)
-{
-    ngx_buf_t    *b;
-    ngx_chain_t  *cl;
-
-    b = ngx_create_temp_buf(r->pool, NGX_HTTP_ZSTD_DCZ_HEADER_LEN);
-    if (b == NULL) {
+    if (ctx->out_buf->end < ctx->out_buf->last) {
+        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "corrupted output buffer: end (%p) < last (%p)",
+                      ctx->out_buf->end, ctx->out_buf->last);
         return NGX_ERROR;
     }
 
-    b->last = ngx_cpymem(b->last, ctx->dcz_dict->frame_header,
-                         NGX_HTTP_ZSTD_DCZ_HEADER_LEN);
-
-    cl = ngx_alloc_chain_link(r->pool);
-    if (cl == NULL) {
-        return NGX_ERROR;
-    }
-
-    cl->buf = b;
-    cl->next = NULL;
-
-    *ctx->last_out = cl;
-    ctx->last_out = &cl->next;
-
-    ctx->bytes_out += NGX_HTTP_ZSTD_DCZ_HEADER_LEN;
-    ctx->dcz_header_sent = 1;
-
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "zstd dcz: 40-byte frame header queued (dict \"%V\")",
-                   &ctx->dcz_dict->file);
+    ctx->buffer_out.size = ctx->out_buf->end - ctx->out_buf->last;
 
     return NGX_OK;
 }
