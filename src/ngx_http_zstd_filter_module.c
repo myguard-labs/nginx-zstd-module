@@ -127,6 +127,80 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
 #define NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG  23
 
 
+/*
+ * The effective ZSTD_c_windowLog for a dcz (RFC 9842 dictionary-compressed)
+ * response. Pure arithmetic, no libzstd and no request state, because the
+ * SAME value has to be computed in two places that must never disagree:
+ *
+ *   1. ngx_http_zstd_acquire_cctx(), BEFORE the CCtx ring key is packed --
+ *      the slot a request borrows is keyed on the window it will actually
+ *      use, not on zstd_window_log alone. Keying on the unset directive let
+ *      a dcz request borrow a slot vetted for the default window and then
+ *      permanently raise that slot's retained workspace (ZSTD_sizeof_CCtx()
+ *      does not shrink on reset), so every later plain request mapped to the
+ *      same key inherited the dcz floor -- exactly the contamination the
+ *      three-field key documented at the ring exists to prevent.
+ *
+ *   2. ngx_http_zstd_filter_init_cctx(), where the value is pushed into
+ *      libzstd.
+ *
+ * The window sizing itself: the window must reach back across the whole
+ * prefix from the end of the content or the far end of the dictionary stops
+ * matching, so it is sized to dictionary + expected content (a 1 MB guess
+ * when the length is unknown), rounded up to a power of two and capped by
+ * ngx_http_zstd_ceil_log2() at NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG.
+ *
+ * Two operator ceilings clamp it back down, and both are ceilings of the
+ * SAME class -- a memory bound the operator asked for, which a dictionary
+ * must not silently void (that was audit C2/R1's lesson with the CDict
+ * path):
+ *
+ *   - "zstd_window_log" (conf_window_log > 0): the pre-existing clamp,
+ *     unchanged.
+ *   - "zstd_max_cctx_memory" (budget_window_cap > 0): the largest window log
+ *     whose estimated CCtx memory still fits the budget, computed ONCE at
+ *     config load by ngx_http_zstd_dcz_window_cap(). Without this the
+ *     nginx -t gate vets a figure the dcz path then exceeds at request time
+ *     (measured, libzstd 1.5.7, level 3: 3 663 393 B at the default window
+ *     vs 9 954 849 B at wlog 23 -- 2.72x).
+ *
+ * Both ceilings are OPT-IN. With neither directive set -- the default
+ * configuration -- no clamp applies and the dcz window is exactly what it
+ * was before this function existed. That scoping is deliberate: the fix
+ * changes dcz wire bytes only for operators who explicitly asked for a
+ * memory bound.
+ *
+ * The result is always in [10, 23] -- ZSTD_WINDOWLOG_MIN to
+ * NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG -- so it is always inside
+ * ngx_http_zstd_profile_pack()'s 6-bit window_log field and never trips
+ * that packer's domain assert.
+ */
+static ngx_inline ngx_int_t
+ngx_http_zstd_dcz_window_log(size_t dict_len, off_t pledged_size,
+    ngx_int_t conf_window_log, ngx_int_t budget_window_cap)
+{
+    size_t     required;
+    ngx_int_t  wlog;
+
+    required = dict_len
+               + (pledged_size >= 0
+                  ? (size_t) pledged_size
+                  : 1024 * 1024);
+
+    wlog = (ngx_int_t) ngx_http_zstd_ceil_log2(required);
+
+    if (conf_window_log > 0 && conf_window_log < wlog) {
+        wlog = conf_window_log;
+    }
+
+    if (budget_window_cap > 0 && budget_window_cap < wlog) {
+        wlog = budget_window_cap;
+    }
+
+    return wlog;
+}
+
+
 typedef struct {
     ngx_str_t                    dict_file;
     /* explicit opt-in for the non-RFC-9842 dict mode; S1/RFC1 */
@@ -321,6 +395,16 @@ typedef struct {
     ngx_flag_t                   long_mode;
     /* config-load assert: per-request CCtx memory budget */
     ssize_t                      max_cctx_memory;
+    /*
+     * Largest window log whose estimated CCtx memory still fits
+     * "zstd_max_cctx_memory", computed ONCE at config load by
+     * ngx_http_zstd_dcz_window_cap(). 0 means "no cap": either the
+     * operator set no budget, or the build cannot compute an estimate
+     * (no ZSTD_STATIC_LINKING_ONLY / libzstd < 1.4.0, in which case an
+     * explicit budget is already rejected at config load). Only the dcz
+     * path consults it -- see ngx_http_zstd_dcz_window_log().
+     */
+    ngx_int_t                    dcz_window_cap;
 
     /* ngx_http_complex_value_t: per-request bypass */
     ngx_array_t                 *bypass;
@@ -600,8 +684,16 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
  * Why there is no runtime memory cap: ZSTD_sizeof_CCtx() does not shrink on
  * reset, so an unbounded cache would pin each worker's RSS at its
  * largest-ever footprint. Each slot is therefore keyed on the COMPLETE set
- * of parameters that drive that workspace, and every one of them is fixed at
- * config load: zstd_comp_level, zstd_long and zstd_window_log.
+ * of parameters that drive that workspace: zstd_comp_level, zstd_long and
+ * the window log.
+ *
+ * The first two are fixed at config load. The window log is the EFFECTIVE
+ * one, which for an ordinary request is zstd_window_log but for a dcz
+ * (RFC 9842) request is derived per request from the negotiated dictionary
+ * -- see ngx_http_zstd_cctx_profile_from_conf_wlog(). Keying dcz requests on
+ * the unset directive instead was a real contamination path, not a
+ * hypothetical one: they borrowed slots vetted for a small window and raised
+ * those slots' floors permanently.
  *
  * An earlier revision keyed on the level alone, on a measurement that said
  * windowLog did not move ZSTD_sizeof_CCtx() at a fixed level. That
@@ -808,12 +900,31 @@ ngx_http_zstd_profile_unpack(uint64_t key, ngx_int_t *level,
 }
 
 
+/*
+ * Build a profile key from a location's config and the window log the
+ * request will ACTUALLY compress at.
+ *
+ * The window is a parameter rather than being read from zlcf because a dcz
+ * (RFC 9842) request does not use zlcf->window_log: it computes its own
+ * window from the negotiated dictionary. Keying such a request on
+ * zlcf->window_log let it borrow a slot vetted for a different -- typically
+ * much smaller -- window and permanently raise that slot's retained
+ * workspace, since ZSTD_sizeof_CCtx() never shrinks on reset. Every later
+ * plain request matching the same key then reused a context whose floor was
+ * the dcz figure: precisely the cross-profile contamination the three-field
+ * key exists to prevent, arriving through the one field that was not
+ * effective.
+ *
+ * The keyed window is therefore the effective one, and dcz requests
+ * naturally partition into their own slots.
+ */
 static void
-ngx_http_zstd_cctx_profile_from_conf(ngx_http_zstd_cctx_profile_t *profile,
-    ngx_http_zstd_loc_conf_t *zlcf)
+ngx_http_zstd_cctx_profile_from_conf_wlog(
+    ngx_http_zstd_cctx_profile_t *profile, ngx_http_zstd_loc_conf_t *zlcf,
+    ngx_int_t window_log)
 {
     profile->key = ngx_http_zstd_profile_pack(zlcf->level, zlcf->long_mode,
-        zlcf->window_log);
+        window_log);
 }
 
 
@@ -2471,6 +2582,7 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
     ngx_pool_cleanup_t             *cln;
     ngx_http_zstd_cctx_slot_t      *slot, *free_slot, *lender;
     ngx_http_zstd_cctx_profile_t    zlcf_profile;
+    ngx_int_t                       eff_window_log;
 
     /*
      * The cleanup slot is registered BEFORE the context is claimed, so a
@@ -2482,7 +2594,23 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
         return NGX_ERROR;
     }
 
-    ngx_http_zstd_cctx_profile_from_conf(&zlcf_profile, zlcf);
+    /*
+     * The window this request will really compress at -- see
+     * ngx_http_zstd_cctx_profile_from_conf_wlog() for why the key must not
+     * use zlcf->window_log directly. ctx->dcz_dict is already set by the
+     * time acquisition runs: dcz negotiation completes in the header filter,
+     * while a CCtx is only acquired on the first body buffer.
+     */
+    if (ctx->dcz_dict != NULL) {
+        eff_window_log = ngx_http_zstd_dcz_window_log(
+                             ctx->dcz_dict->bytes.len, ctx->pledged_size,
+                             zlcf->window_log, zlcf->dcz_window_cap);
+    } else {
+        eff_window_log = zlcf->window_log;
+    }
+
+    ngx_http_zstd_cctx_profile_from_conf_wlog(&zlcf_profile, zlcf,
+                                              eff_window_log);
 
     borrowed = 0;
     free_slot = NULL;
@@ -2556,8 +2684,8 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
 
         if (free_slot != NULL) {
             free_slot->cctx = ctx->cctx;
-            ngx_http_zstd_cctx_profile_from_conf(&free_slot->profile,
-                zlcf);
+            ngx_http_zstd_cctx_profile_from_conf_wlog(&free_slot->profile,
+                zlcf, eff_window_log);
             free_slot->busy = 1;
             lender = free_slot;
             borrowed = 1;
@@ -2691,35 +2819,22 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
     }
 
     if (ctx->dcz_dict != NULL) {
-        size_t     required;
         ngx_int_t  wlog;
 
         /*
-         * RFC 9842 window bound. The client guarantees a decode window of
-         * max(8 MB, 1.25 x dict size); staying at or under 2^23 keeps every
-         * frame inside that guarantee unconditionally. Within the cap, the
-         * window must reach back across the whole prefix from the end of
-         * the content or the far end of the dictionary stops matching —
-         * so size it to dictionary + expected content (1 MB guess when the
-         * length is unknown), rounded up to a power of two. An operator
-         * zstd_window_log below the computed value still wins: it is a
-         * memory ceiling, and a dictionary must not silently void it
-         * (that was audit C2/R1's lesson with the CDict path).
+         * RFC 9842 window bound, plus both operator memory ceilings. The
+         * whole computation lives in ngx_http_zstd_dcz_window_log() because
+         * ngx_http_zstd_acquire_cctx() must derive the IDENTICAL value
+         * before it packs the CCtx ring key -- a request that borrows a slot
+         * keyed on one window and then compresses at another contaminates
+         * that slot's retained workspace for every later borrower. Read that
+         * function's comment for the sizing rationale and for why both
+         * clamps are opt-in.
          */
-        required = ctx->dcz_dict->bytes.len
-                   + (ctx->pledged_size >= 0
-                      ? (size_t) ctx->pledged_size
-                      : 1024 * 1024);
-
-        /* Compute the minimum window log that fits both dictionary and
-         * content. ngx_http_zstd_ceil_log2() returns the smallest k such that
-         * 2^k >= required, capped at NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG (23),
-         * bounded at minimum by ZSTD_WINDOWLOG_MIN (10). */
-        wlog = ngx_http_zstd_ceil_log2(required);
-
-        if (zlcf->window_log > 0 && zlcf->window_log < wlog) {
-            wlog = zlcf->window_log;
-        }
+        wlog = ngx_http_zstd_dcz_window_log(ctx->dcz_dict->bytes.len,
+                                            ctx->pledged_size,
+                                            zlcf->window_log,
+                                            zlcf->dcz_window_cap);
 
         if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_windowLog, (int) wlog,
                                     "windowLog(dcz)")
@@ -2984,6 +3099,12 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
     conf->window_log = NGX_CONF_UNSET;
     conf->long_mode = NGX_CONF_UNSET;
     conf->max_cctx_memory = NGX_CONF_UNSET;
+    /*
+     * Not NGX_CONF_UNSET: this is derived, never inherited and never
+     * written by a directive. It is (re)computed for every location that
+     * carries a budget, after the budget itself has merged. 0 = no cap.
+     */
+    conf->dcz_window_cap = 0;
     conf->bufs_unsafe = NGX_CONF_UNSET;
     conf->bypass = NGX_CONF_UNSET_PTR;
     conf->dcz_dicts = NGX_CONF_UNSET_PTR;
@@ -3182,7 +3303,7 @@ ngx_http_zstd_open_dict_file(ngx_conf_t *cf, ngx_str_t *path,
  */
 static char *
 ngx_http_zstd_estimate_cctx_memory(ngx_conf_t *cf,
-    ngx_http_zstd_loc_conf_t *conf, size_t *est)
+    ngx_http_zstd_loc_conf_t *conf, ngx_int_t window_log, size_t *est)
 {
     ZSTD_CCtx_params  *cp;
     size_t             srv;
@@ -3204,15 +3325,15 @@ ngx_http_zstd_estimate_cctx_memory(ngx_conf_t *cf,
         return NGX_CONF_ERROR;
     }
 
-    if (conf->window_log > 0) {
+    if (window_log > 0) {
         srv = ZSTD_CCtxParams_setParameter(cp, ZSTD_c_windowLog,
-                                           (int) conf->window_log);
+                                           (int) window_log);
         if (ZSTD_isError(srv)) {
             ZSTD_freeCCtxParams(cp);
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                "ZSTD_CCtxParams_setParameter("
                                "windowLog=%i) failed: %s",
-                               conf->window_log,
+                               window_log,
                                ZSTD_getErrorName(srv));
             return NGX_CONF_ERROR;
         }
@@ -3274,7 +3395,7 @@ ngx_http_zstd_estimate_cctx_memory(ngx_conf_t *cf,
          * and under-report by two orders of magnitude.
          */
 
-        ldm_wlog = conf->window_log > 0 ? conf->window_log
+        ldm_wlog = window_log > 0 ? window_log
                                         : NGX_HTTP_ZSTD_LDM_WINDOWLOG;
 
         ldm_hlog = ldm_wlog - 7;
@@ -3373,6 +3494,72 @@ ngx_http_zstd_estimate_cctx_memory(ngx_conf_t *cf,
     }
 
     *est = e;
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * Largest window log whose estimated CCtx memory still fits
+ * "zstd_max_cctx_memory", for the dcz path to clamp against.
+ *
+ * Why this exists: the nginx -t gate below vets ONE figure, computed from
+ * conf->window_log. A dcz (RFC 9842) request does not use that window -- it
+ * derives its own from the negotiated dictionary, up to
+ * NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG -- so it walks straight through a budget
+ * config load already accepted. Measured on libzstd 1.5.7 at level 3, the
+ * escape is 3 663 393 B (default window) vs 9 954 849 B (wlog 23), 2.72x;
+ * at level 1 it is 6.74x. "zstd_max_cctx_memory" is a memory ceiling of the
+ * same class as "zstd_window_log", and the module already holds that a
+ * dictionary must not silently void such a ceiling (audit C2/R1).
+ *
+ * Why at config load: the answer depends only on config -- level, long mode,
+ * target block size, budget -- so it is computed ONCE here and the request
+ * path does a min(). ZSTD_estimateCStreamSize_usingCCtxParams() per request
+ * would be a hot-path regression for a constant.
+ *
+ * Search is a downward walk from NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG to
+ * ZSTD_WINDOWLOG_MIN: at most 14 estimate calls, once, and monotonicity of
+ * workspace in the window is not assumed. The floor is ZSTD_WINDOWLOG_MIN --
+ * returning less would push an invalid windowLog into libzstd. If not even
+ * the minimum window fits, the cap is the minimum anyway: the existing
+ * nginx -t gate is what refuses an impossible budget, and this function must
+ * not invent a second, differently-worded rejection for the same config.
+ *
+ * Writes 0 ("no cap") and succeeds when no budget is configured -- the
+ * default, where dcz behaviour must be exactly what it was.
+ */
+static char *
+ngx_http_zstd_dcz_window_cap(ngx_conf_t *cf, ngx_http_zstd_loc_conf_t *conf,
+    ngx_int_t *cap)
+{
+    ngx_int_t  wlog;
+    size_t     est;
+
+    *cap = 0;
+
+    if (conf->max_cctx_memory == NGX_CONF_UNSET
+        || conf->max_cctx_memory <= 0)
+    {
+        return NGX_CONF_OK;
+    }
+
+    for (wlog = NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG;
+         wlog > ZSTD_WINDOWLOG_MIN;
+         wlog--)
+    {
+        if (ngx_http_zstd_estimate_cctx_memory(cf, conf, wlog, &est)
+            != NGX_CONF_OK)
+        {
+            return NGX_CONF_ERROR;
+        }
+
+        if (est <= (size_t) conf->max_cctx_memory) {
+            break;
+        }
+    }
+
+    *cap = wlog;
 
     return NGX_CONF_OK;
 }
@@ -3932,7 +4119,8 @@ close:
 #if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
         size_t  est;
 
-        if (ngx_http_zstd_estimate_cctx_memory(cf, conf, &est)
+        if (ngx_http_zstd_estimate_cctx_memory(cf, conf,
+                                               conf->window_log, &est)
             != NGX_CONF_OK)
         {
             return NGX_CONF_ERROR;
@@ -3947,6 +4135,20 @@ close:
                                "lower \"zstd_window_log\", disable "
                                "\"zstd_long\", or raise the budget",
                                est, conf->max_cctx_memory, conf->level);
+            return NGX_CONF_ERROR;
+        }
+
+        /*
+         * The gate above vets conf->window_log. A dcz request derives its
+         * own, larger window from the negotiated dictionary and would walk
+         * straight through the budget, so precompute the largest window log
+         * that still fits it; ngx_http_zstd_dcz_window_log() clamps to this.
+         * Config-load work for a value that is constant per location -- the
+         * request path only does a min().
+         */
+        if (ngx_http_zstd_dcz_window_cap(cf, conf, &conf->dcz_window_cap)
+            != NGX_CONF_OK)
+        {
             return NGX_CONF_ERROR;
         }
 #else
@@ -3979,7 +4181,8 @@ close:
 #if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
         size_t  est;
 
-        if (ngx_http_zstd_estimate_cctx_memory(cf, conf, &est)
+        if (ngx_http_zstd_estimate_cctx_memory(cf, conf,
+                                               conf->window_log, &est)
             != NGX_CONF_OK)
         {
             return NGX_CONF_ERROR;

@@ -1,5 +1,40 @@
 Changes with http-zstd
 
+    *) Bugfix: a dcz (RFC 9842) request escaped "zstd_max_cctx_memory"
+       and contaminated a worker CCtx ring slot. A dcz response does not
+       compress at "zstd_window_log": it derives its own window from the
+       negotiated dictionary, up to the RFC's 8 MB client guarantee.
+       Two consequences, both reachable on a default configuration by
+       any client that wins dcz negotiation.
+
+       First, the ring. Each slot is keyed on the parameters that drive
+       its retained workspace, because ZSTD_sizeof_CCtx() never shrinks
+       on reset. The key used "zstd_window_log" rather than the window
+       the request would actually use, so a dcz request borrowed a slot
+       vetted for the (typically much smaller) configured window and
+       raised that slot's retained workspace permanently; every later
+       plain request matching the same key then reused a context whose
+       floor was the dcz figure. The key now carries the EFFECTIVE
+       window log, so dcz requests occupy their own slots and a slot's
+       retained size again equals the figure config load vetted for it.
+
+       Second, the budget. "zstd_max_cctx_memory" is vetted at config
+       load against "zstd_window_log" only, so the dcz window walked
+       straight through a bound the operator had asked for and config
+       load had accepted (measured, libzstd 1.5.7 at level 3: 3663393
+       bytes at the default window versus 9954849 at window log 23, a
+       2.72x escape; 6.74x at level 1). When "zstd_max_cctx_memory" is
+       set, the dcz window is now clamped to the largest window log
+       whose estimated CCtx memory still fits the budget -- the same
+       treatment "zstd_window_log" already got, since both are memory
+       ceilings and a dictionary must not silently void one. The cap is
+       computed once at config load, so the request path only compares.
+
+       The clamp is OPT-IN and changes dcz wire bytes only for operators
+       who explicitly configured a memory bound. With neither
+       "zstd_window_log" nor "zstd_max_cctx_memory" set -- the default
+       configuration -- the dcz window is exactly what it was before.
+
     *) Feature: "zstd_buffers number size" now bounds the aggregate
        number x size product at config load, in four tiers. The
        directive previously delegated entirely to nginx core's

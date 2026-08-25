@@ -229,6 +229,20 @@ jobs:
           # refusal of out-of-domain values — needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_cctx_profile_pack.sh
 
+      - name: dcz window-log unit fixture (clamps + range)
+        run: |
+          # ngx_http_zstd_dcz_window_log() is the single source of truth for
+          # a value derived in TWO places that must never disagree: the CCtx
+          # ring key and the windowLog pushed into libzstd. Extracts it (and
+          # ngx_http_zstd_ceil_log2(), its dependency) verbatim and sweeps
+          # every dictionary size across the power-of-two boundaries x both
+          # pledged-size branches x every value of both operator ceilings,
+          # asserting the default is unchanged when neither is set, that a
+          # ceiling only ever lowers the window, that the lower of the two
+          # wins, and that the result stays inside the 6-bit window_log
+          # field the profile packer refuses to mask. Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_dcz_window_log_unit.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
@@ -1534,6 +1548,26 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18104 --backend-port 18105
           echo "✓ window-cap + dictionary effect test passed"
+
+      - name: Run dcz budget + CCtx ring-key regression
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # A dcz (RFC 9842) request does not compress at zstd_window_log:
+          # it derives its own window from the negotiated dictionary, up to
+          # 2^23. Nothing coupled that to either memory control before.
+          # Asserts three things the fix has to hold at once: the dcz
+          # request lands in its OWN CCtx ring slot (keyed on the effective
+          # window, so it cannot raise a plain slot's permanently-retained
+          # workspace), zstd_max_cctx_memory clamps the dcz window to the
+          # budget-derived cap, and with NEITHER directive set the dcz
+          # window is unchanged -- the clamp is opt-in and must not move
+          # wire bytes for operators who never asked for a memory bound.
+          # Needs --with-debug: the ring witnesses are debug log lines.
+          python3 ci/tools/test_dcz_budget_ring.py \
+            --nginx-binary "$TEST_NGINX_BINARY" \
+            --port 18160 --backend-port 18162
+          echo "✓ dcz budget + CCtx ring-key regression passed"
           # Config-load regression: "zstd_long on" + "zstd_max_cctx_memory"
           # made nginx -t die with SIGFPE, because libzstd's estimator
           # divides by an LDM sub-parameter that is only derived lazily
