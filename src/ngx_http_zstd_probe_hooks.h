@@ -99,6 +99,19 @@ typedef enum {
  *
  *   fault_codec=<n>         n in 1..999   -> ERROR outcome on the nth call
  *   fault_codec=<1000 + n>  n in 1..999   -> ZERO-OUTPUT outcome on the nth
+ *   fault_codec=<negative>                -> disarm
+ *
+ * "the nth call" counts FROM THE ARM, not from process start: arming
+ * resets that site's counter. So fault_codec=1 always means "the very
+ * next call at this site", whatever traffic the worker served before.
+ * Counting absolutely instead would let any earlier compressed request
+ * push the counter past a low nth, and the arm would then silently never
+ * fire -- a false green, since a request that was never faulted looks
+ * exactly like one whose fault was handled.
+ *
+ * Values outside those three sets are REFUSED (NGX_DECLINED) rather than
+ * stored, so a mistyped nth surfaces at the probe endpoint instead of
+ * arming something that never fires.
  *
  * WHY ENCODE RATHER THAN ADD A KEY. The ZERO outcome is not optional
  * decoration: the suppression arm in the filter gates on

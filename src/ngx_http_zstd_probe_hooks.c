@@ -79,11 +79,24 @@ static ngx_int_t  ngx_http_zstd_probe_fault_codec_nth     = -1;
 static ngx_int_t  ngx_http_zstd_probe_fault_codec_end_nth = -1;
 
 /*
- * Per-site event counters, counting ZSTD_compressStream2 calls seen since
- * process start. Same single-worker rationale as the armed values above.
- * These advance on EVERY call, armed or not, so that an arm issued
- * mid-stream still counts from a well-defined origin rather than from
- * whenever the arm happened to land.
+ * Per-site event counters. These count calls SINCE THE SITE WAS ARMED,
+ * not since process start, and fault_set_global resets them to 0 on every
+ * arm.
+ *
+ * That distinction is the whole correctness of the feature. An absolute
+ * process-lifetime counter makes `nth` mean "the nth call this worker has
+ * ever made", so any earlier compressed request -- a warm-up, an
+ * unrelated test case, a previous case in the same file -- pushes the
+ * counter past a low nth and `fault_codec=1` then silently never fires.
+ * The request succeeds, the test sees a normal response, and a case
+ * written to assert a fault path passes by testing nothing. That is a
+ * FALSE GREEN, the exact failure class this fault site exists to remove,
+ * and it is invisible: there is no error, no log line, nothing to
+ * distinguish "the fault did not fire" from "the code handled the fault".
+ *
+ * Counting from the arm instead gives `fault_codec=N` one unambiguous
+ * meaning -- the Nth call at this site after you armed it -- which holds
+ * no matter what traffic preceded it.
  */
 static ngx_uint_t  ngx_http_zstd_probe_codec_calls;
 static ngx_uint_t  ngx_http_zstd_probe_codec_end_calls;
@@ -127,11 +140,12 @@ ngx_http_zstd_probe_note_ctx_state(ngx_uint_t free_links,
  * Codec fault decision. See the header for the outcome encoding and for
  * why the outcome rides inside `nth` instead of a second query key.
  *
- * Advances the site's event counter, then answers whether THIS call is
- * the armed nth. One-shot by construction: matching is `==`, so a site
- * armed at nth=1 trips on exactly one call and every later call in the
- * process is unarmed again -- a test does not have to disarm to keep the
- * rest of its traffic clean.
+ * Advances the site's event counter -- which fault_set_global zeroed when
+ * the site was armed, so it counts calls since the arm -- then answers
+ * whether THIS call is the armed nth. One-shot by construction: matching
+ * is `==`, so a site armed at nth=1 trips on exactly one call and every
+ * later call is unarmed again, and a test does not have to disarm to keep
+ * the rest of its traffic clean.
  *
  * Unarmed cost: one increment and one compare against -1 that predicts
  * perfectly, before any of the decode arithmetic runs.
@@ -207,15 +221,57 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
 
 
 /*
+ * Is `nth` a value the codec-site encoding actually defines?
+ *
+ * Negative disarms; 1..999 is the ERROR form; ZERO_BASE+1..ZERO_BASE+999
+ * is the ZERO form. Everything else -- 0, exactly ZERO_BASE, and anything
+ * above the ZERO range -- is refused rather than stored, because the
+ * decoder would otherwise accept a wider set than the header documents
+ * (2000..9999 would arm ZERO at calls 1000..8999, and 0 / ZERO_BASE would
+ * arm "nth zero", a value the counter never takes since it is
+ * pre-incremented). A test that fat-fingers an nth would then arm
+ * something that can never fire and pass by testing nothing -- the same
+ * false-green class the arm-relative counter exists to prevent.
+ *
+ * Applied per codec site rather than up front: SLAB/PALLOC/TEMPFILE/ACCEPT
+ * decline because the SITE is unimplemented here, which is true whatever
+ * nth says, and conflating the two would answer the wrong question for
+ * them even though both answers happen to be NGX_DECLINED.
+ */
+static ngx_int_t
+ngx_http_zstd_probe_nth_is_valid(ngx_int_t nth)
+{
+    if (nth < 0) {
+        return 1;
+    }
+
+    if (nth >= 1 && nth <= 999) {
+        return 1;
+    }
+
+    if (nth >= NGX_HTTP_ZSTD_PROBE_FAULT_ZERO_BASE + 1
+        && nth <= NGX_HTTP_ZSTD_PROBE_FAULT_ZERO_BASE + 999)
+    {
+        return 1;
+    }
+
+    return 0;
+}
+
+
+/*
  * fault_set_global hook: zstd wires no SLAB/PALLOC/TEMPFILE/ACCEPT
  * injection points -- decline those. CODEC/CODEC_END are stored raw,
  * outcome encoding and all; ngx_http_zstd_probe_codec_fault() decodes
  * them at the single ZSTD_compressStream2 call site in the filter.
  *
- * The stored value is not range-checked here on purpose: the testkit's
- * parser has already bounded it to +/- 4 digits, and an nth that names an
- * event this process never reaches is a test that arms nothing, not an
- * error to report. Anything negative disarms.
+ * The value IS range-checked before it is stored, per codec site: the
+ * testkit's parser only bounds it to +/- 4 digits, which is wider than
+ * the outcome encoding defines, so a value outside the documented sets
+ * is refused here rather than stored as an arm that can never fire --
+ * see ngx_http_zstd_probe_nth_is_valid(). Anything negative disarms, and
+ * arming (or disarming) resets that site's call counter so nth counts
+ * from the arm.
  */
 static ngx_int_t
 ngx_http_zstd_probe_fault_set_global(ngx_test_probe_fault_e fault,
@@ -224,11 +280,26 @@ ngx_http_zstd_probe_fault_set_global(ngx_test_probe_fault_e fault,
     switch (fault) {
 
     case NGX_TEST_PROBE_FAULT_CODEC:
+        if (!ngx_http_zstd_probe_nth_is_valid(nth)) {
+            return NGX_DECLINED;
+        }
+
         ngx_http_zstd_probe_fault_codec_nth = nth;
+        /*
+         * Count from the arm, not from process start -- see the counter
+         * declarations. Reset on disarm too: it costs nothing and leaves
+         * the site in one well-defined state either way.
+         */
+        ngx_http_zstd_probe_codec_calls = 0;
         return NGX_OK;
 
     case NGX_TEST_PROBE_FAULT_CODEC_END:
+        if (!ngx_http_zstd_probe_nth_is_valid(nth)) {
+            return NGX_DECLINED;
+        }
+
         ngx_http_zstd_probe_fault_codec_end_nth = nth;
+        ngx_http_zstd_probe_codec_end_calls = 0;
         return NGX_OK;
 
     case NGX_TEST_PROBE_FAULT_SLAB:
