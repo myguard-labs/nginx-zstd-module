@@ -4883,20 +4883,6 @@ ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
 
 
 /*
- * Custom setter for zstd_bypass_vary directive. Validates that the value is
- * exactly ONE RFC 9110 field-name token (case-preserving), and rejects:
- *   - Bare wildcard "*", which disables shared caching
- *   - Comma or semicolon (list/parameter separators)
- *   - Quoted strings (DQUOTE), which are never part of a token
- *   - Any non-tchar byte
- *
- * Per RFC 9110 §5.1, tchar includes: ! # $ % & ' * + - . ^ _ ` | ~
- *   and DIGIT / ALPHA.
- *
- * Valid examples: "Accept-Encoding", "X-My-Header", "content-type"
- * Invalid: "*" (alone), "Accept-Encoding, Custom", "Accept-Encoding;q=1"
- */
-/*
  * Validate value as a single RFC 9110 field-name token. Per RFC 9110 §5.1:
  *   tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-"
  *         / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
@@ -4943,6 +4929,20 @@ ngx_http_zstd_validate_field_name_token(ngx_str_t *value)
 }
 
 
+/*
+ * Custom setter for zstd_bypass_vary directive. Validates that the value is
+ * exactly ONE RFC 9110 field-name token (case-preserving), and rejects:
+ *   - Bare wildcard "*", which disables shared caching
+ *   - Comma or semicolon (list/parameter separators)
+ *   - Quoted strings (DQUOTE), which are never part of a token
+ *   - Any non-tchar byte
+ *
+ * Per RFC 9110 §5.1, tchar includes: ! # $ % & ' * + - . ^ _ ` | ~
+ *   and DIGIT / ALPHA.
+ *
+ * Valid examples: "Accept-Encoding", "X-My-Header", "content-type"
+ * Invalid: "*" (alone), "Accept-Encoding, Custom", "Accept-Encoding;q=1"
+ */
 static char *
 ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
