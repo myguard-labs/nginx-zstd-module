@@ -30,20 +30,12 @@
 #include "ngx_http_zstd_common.h"
 
 /*
- * Mirrors just the fields of ngx_http_zstd_ctx_t this file needs to read at
- * probe-render time (free chain head and out_buf). Defined locally rather
- * than pulled from the filter's own (non-exported, file-static) typedef:
- * the filter module passes us the live pointer via
- * ngx_http_zstd_probe_note_ctx(), typed as the opaque
- * `struct ngx_http_zstd_ctx_s *` from the header, and this file only ever
- * reads through it to render JSON -- it never assumes the two structs are
- * layout-compatible.
- *
- * Actually: since ngx_http_zstd_ctx_t is a plain typedef (not a tag'd
- * struct) local to the filter TU, we take the fields we need as explicit
- * parameters from the call site instead of trying to peek through an
- * opaque pointer. See the note_ctx() call site in the filter for the
- * field values passed.
+ * ngx_http_zstd_ctx_t is a plain typedef (not a tag'd struct) local to the
+ * filter TU, so this file cannot name it and never peeks through an opaque
+ * pointer at it. The ctx fields the probe renders (free chain length and
+ * out_buf state) are passed in as explicit parameters by
+ * ngx_http_zstd_probe_note_ctx_state(); see its call sites in the filter
+ * for the values supplied. Nothing here assumes any struct layout.
  */
 
 /* Running per-process counters, bumped inline at each call site. */
