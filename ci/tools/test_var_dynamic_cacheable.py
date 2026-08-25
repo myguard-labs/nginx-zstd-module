@@ -60,19 +60,24 @@ def wait_for_port(port: int, timeout: float = 10.0) -> None:
 
 
 def detect_module_path(explicit: str | None, nginx_binary: pathlib.Path):
+    # Always absolute: nginx resolves a relative load_module path against
+    # its -p prefix, which here is the throwaway temp dir, not the cwd.
     if explicit:
-        return pathlib.Path(explicit)
-    sibling = nginx_binary.parent / "ngx_http_zstd_filter_module.so"
+        return pathlib.Path(explicit).resolve()
+    sibling = (nginx_binary.parent / "ngx_http_zstd_filter_module.so").resolve()
     return sibling if sibling.exists() else None
 
 
 def write_config(
-    conf_path: pathlib.Path, root_dir: pathlib.Path, port: int, module: pathlib.Path
+    conf_path: pathlib.Path,
+    root_dir: pathlib.Path,
+    port: int,
+    module: pathlib.Path | None,
 ) -> None:
+    load_module_line = f"load_module {module};\n" if module else ""
     conf_path.write_text(
         f"""
-load_module {module};
-worker_processes  1;
+{load_module_line}worker_processes  1;
 error_log  logs/error.log info;
 pid        logs/nginx.pid;
 
@@ -141,9 +146,17 @@ def main() -> int:
     if not nginx_binary.exists():
         raise FileNotFoundError(f"nginx binary not found: {nginx_binary}")
 
+    # module is None on a STATIC build, where the filter is linked into
+    # the nginx binary and there is no .so to load_module. That is how CI
+    # builds it, so a missing sibling .so is not an error -- write_config()
+    # simply omits the load_module line, matching the sibling config-policy
+    # tools (test_bypass_vary_config_policy.py). Only an EXPLICIT
+    # --filter-module that does not exist is a real failure.
     module = detect_module_path(args.filter_module, nginx_binary)
-    if module is None or not module.exists():
-        raise FileNotFoundError("ngx_http_zstd_filter_module.so not found")
+    if args.filter_module and (module is None or not module.exists()):
+        raise FileNotFoundError(
+            f"ngx_http_zstd_filter_module.so not found: {args.filter_module}"
+        )
 
     with tempfile.TemporaryDirectory(prefix="zstd-var-cache-") as temp_dir_str:
         temp_dir = pathlib.Path(temp_dir_str)
