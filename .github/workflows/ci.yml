@@ -128,3 +128,18 @@ jobs:
     uses: ./.github/workflows/windows-build.yml
     permissions:
       contents: read
+
+  harness-fault-arms:
+    # NOT in master's required-checks set (ruleset 16557047) -- deliberately.
+    # See harness-fault-arms.yml's own header for why: this job builds a
+    # SEPARATE, harness-instrumented nginx tree (TEST_HARNESS=1 +
+    # -DNGX_TEST_HARNESS) and runs the codec fault-injection scenario
+    # against it, exercising ~5 error/edge arms Phase 3's fault sites made
+    # reachable but that no other job in this suite reaches (plan-testkit-
+    # integration.md Phase 4). Visible on every PR; promoting it to required
+    # is a separate, later, explicitly reviewed step (Phase 5), not a
+    # side effect of adding the row.
+    name: Harness Fault Arms
+    uses: ./.github/workflows/harness-fault-arms.yml
+    permissions:
+      contents: read

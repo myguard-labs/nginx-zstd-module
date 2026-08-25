@@ -1,0 +1,185 @@
+---
+name: Harness Fault Arms
+
+# Runs the TEST_HARNESS-only fault-injection scenario at ci/t/harness-
+# scenarios/fault-arms against a purpose-built harness nginx tree. See
+# plan-testkit-integration.md Phase 4: this is the "real" gate for the
+# codec fault-injection surface Phase 3 wired up -- the testkit-side
+# consumer-zstd scenario that exercises the SAME .so permanently SKIPs on
+# every CI leg (consumers/ is gitignored there), so this repo's own tree
+# is where these arms actually get exercised.
+#
+# DELIBERATELY NOT A REQUIRED CHECK. master carries 13 required checks
+# already (ruleset 16557047); a brand-new required check that never reports
+# on an existing PR blocks it forever. This job is called from ci.yml (so
+# it runs on every PR) but is not in that ruleset -- promoting it to
+# required is a separate, later, explicitly reviewed step (plan Phase 5),
+# not something this file does on its own.
+#
+# Job title is fixed (no matrix/version interpolation) so it stays a stable
+# check name across nginx releases, same convention as every other job in
+# this suite -- see build-test.yml's "build" job comment for why a version
+# in the name breaks required-check tracking.
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_call: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: harness-fault-arms-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  harness-fault-arms:
+    name: Harness Fault Arms
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout module (with harness submodule)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Cache apt packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-harness-${{ runner.os }}-build-essential-libzstd-libpcre2-zlib-openssl
+          restore-keys: apt-harness-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          # builder02 apt profile: loose timeouts -- the box runs jobs
+          # concurrently and never talks to the Azure mirror (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libzstd-dev \
+            libpcre2-dev \
+            zlib1g-dev \
+            libssl-dev \
+            curl \
+            wget
+
+      # Pin matches the mainline this module's other jobs build against
+      # today (see build-test.yml's resolve job for the general case). The
+      # harness scenario does not need to track the newest mainline the way
+      # the functional-test matrix does -- it only needs A build with the
+      # probe compiled in -- so a fixed known-good version keeps this job's
+      # cache stable and avoids coupling it to nginx.org's release cadence.
+      - name: Fetch verified nginx source
+        run: |
+          set -euo pipefail
+          bash ci/tools/fetch-verified-nginx.sh 1.31.4
+          echo "NGINX_SRC_DIR=$GITHUB_WORKSPACE/nginx-1.31.4" >> "$GITHUB_ENV"
+
+      # Both switches are mandatory (see plan-testkit-integration.md Ground
+      # truth): TEST_HARNESS=1 pulls the harness sources into the build,
+      # -DNGX_TEST_HARNESS gates the probe/fault code inside the module's
+      # own sources. ngx_module_cflags has no cflags hook, so the define
+      # MUST ride on CFLAGS, not a configure --with-cc-opt alone.
+      #
+      # Real nginx warning flags, explicit: the harness build's own CFLAGS
+      # from `./configure` alone is bare (no -Wextra -Werror) -- see the
+      # Phase 4 carried-forward finding. Passing them here means a genuine
+      # -Wextra/-Werror regression in this module's harness-only code
+      # (probe hooks, fault-injection block) is caught by THIS job, not
+      # silently skipped the way the harness's own default configure line
+      # would skip it.
+      - name: Configure + build harness nginx
+        run: |
+          set -euo pipefail
+          cd "$NGINX_SRC_DIR"
+          TEST_HARNESS=1 \
+          CFLAGS="$CFLAGS -DNGX_TEST_HARNESS -Wextra -Werror" \
+          ./configure \
+            --prefix=/etc/nginx \
+            --with-http_ssl_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY" \
+            --add-dynamic-module="$GITHUB_WORKSPACE"
+          make -j"$(nproc)"
+          echo "✓ harness nginx built"
+
+      - name: Prove this is a harness build, not a packaged one
+        run: |
+          set -euo pipefail
+          SO="$NGINX_SRC_DIR/objs/ngx_http_zstd_filter_module.so"
+          COUNT=$(nm "$SO" | grep -c ' ngx_test_probe_' || true)
+          echo "ngx_test_probe_* symbols: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::built .so carries zero ngx_test_probe_* symbols" \
+              "-- the harness switches did not take effect, every" \
+              "fault-injection oracle below would pass by testing nothing" \
+              "(see plan-testkit-integration.md Ground truth)"
+            exit 1
+          fi
+
+      - name: Build harness C tools (prober, fakesrv, etc.)
+        run: |
+          set -euo pipefail
+          bash ci/t/harness/ci/prober/build.sh
+
+      - name: Run fault-arms scenario
+        env:
+          PROBER_ROOT: ${{ github.workspace }}
+          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
+          PROBER_MODULE: ngx_http_zstd_filter_module.so
+          PROBER_DIRECTIVE: zstd_probe
+          PROBER_PROBE: "zstd_probe;"
+          # Fault paths log at [crit]/[alert]; without this the prober's log
+          # scrape treats every deliberately-injected failure as a red,
+          # for the wrong reason (Phase 4 carried-forward finding).
+          PROBER_ALLOW_LOG: 'zstd: ZSTD_compressStream2\(\) failed'
+        run: |
+          set -euo pipefail
+          cd ci/t/harness/ci/prober
+          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/fault-arms" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/fault-arms-tap.log"
+
+          # TAP's own "not ok" lines ARE the verdict; run-scenario.sh's exit
+          # status already reflects them (see its own combine-with-log-scrape
+          # step), but re-derive from the log too as a second, independent
+          # check -- a runner that captured a false 0 despite a "not ok" line
+          # would otherwise report green. Belt and braces for a check this
+          # module has never gated on before.
+          if grep -q '^not ok' "$GITHUB_WORKSPACE/fault-arms-tap.log"; then
+            echo "::error::fault-arms scenario reported at least one 'not ok' line"
+            exit 1
+          fi
+
+          # Non-vacuity, mirrored from consumer-zstd/driver.sh: if every
+          # oracle SKIPped, the run banks a green having asserted nothing
+          # about the fault-injection surface, which is exactly the false
+          # green this whole job exists to prevent (Phase 4 task list).
+          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/fault-arms-tap.log" || true)
+          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/fault-arms-tap.log" || true)
+          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
+            echo "::error::every oracle in fault-arms SKIPped -- the" \
+              "scenario asserted nothing about the fault-injection" \
+              "surface; failing rather than banking a vacuous green"
+            exit 1
+          fi
+
+      - name: Upload TAP log
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fault-arms-tap-log
+          path: fault-arms-tap.log
+          retention-days: 14
+          if-no-files-found: ignore
