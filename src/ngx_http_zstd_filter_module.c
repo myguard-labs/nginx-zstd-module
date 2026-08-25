@@ -1200,6 +1200,20 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
  * duplicate count for each via output pointers. The caller must evaluate
  * both in the order they appear in the code (Available-Dictionary first,
  * then Sec-Fetch-Site) to preserve the existing debug log message sequence.
+ *
+ * The name match is a case-SENSITIVE ngx_memcmp against lowercase literals,
+ * because h[i].lowcase_key is already folded by nginx on every protocol and
+ * is never NULL for a header that reached a module:
+ *
+ *   HTTP/1  ngx_http_request.c:1527  allocates it and ngx_strlow()s the name
+ *                                    (or memcpy's the parser's lowcase_header)
+ *   HTTP/2  ngx_http_v2.c:1857       aliases key.data, which is safe because
+ *                                    :3273 rejects any 'A'-'Z' in a field name
+ *   HTTP/3  ngx_http_v3_request.c:685 aliases key.data likewise
+ *
+ * Folding again through ngx_strncasecmp() would re-do work nginx has already
+ * done, once per header per request. If a future protocol module populates
+ * lowcase_key without folding, these two comparisons are what breaks.
  */
 static void
 ngx_http_zstd_collect_dcz_headers(ngx_http_request_t *r,
@@ -1230,19 +1244,17 @@ ngx_http_zstd_collect_dcz_headers(ngx_http_request_t *r,
         }
 
         if (h[i].key.len == sizeof("available-dictionary") - 1
-            && ngx_strncasecmp(h[i].lowcase_key,
-                               (u_char *) "available-dictionary",
-                               sizeof("available-dictionary") - 1) == 0)
+            && ngx_memcmp(h[i].lowcase_key, "available-dictionary",
+                          sizeof("available-dictionary") - 1) == 0)
         {
             (*avail_dict_count)++;
             if (*avail_dict_h == NULL) {
                 *avail_dict_h = &h[i];
             }
-        }
-        else if (h[i].key.len == sizeof("sec-fetch-site") - 1
-                 && ngx_strncasecmp(h[i].lowcase_key,
-                                    (u_char *) "sec-fetch-site",
-                                    sizeof("sec-fetch-site") - 1) == 0)
+
+        } else if (h[i].key.len == sizeof("sec-fetch-site") - 1
+                   && ngx_memcmp(h[i].lowcase_key, "sec-fetch-site",
+                                 sizeof("sec-fetch-site") - 1) == 0)
         {
             (*sec_fetch_site_count)++;
             if (*sec_fetch_site_h == NULL) {
