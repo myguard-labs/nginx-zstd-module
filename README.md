@@ -10,6 +10,7 @@
 [![Windows build](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/windows-build.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/windows-build.yml)
 
 📖 **Background reading:**
+
 - [zstd nginx module: what it does, bugs fixed](https://deb.myguard.nl/articles/zstd-nginx-module-bugs-fixed/)
 - [nginx zstd vs brotli vs zlib-ng — a compression comparison](https://deb.myguard.nl/articles/nginx-zstd-vs-brotli-vs-zlib-ng-compression/)
 
@@ -403,6 +404,7 @@ zstd_types text/html text/plain text/css text/csv application/json
            application/rss+xml application/vnd.api+json
            application/xhtml+xml application/wasm text/wgsl;
 ```
+
 **Context:** `http, server, location`
 
 When omitted, the default covers common textual web representations. If set
@@ -500,7 +502,7 @@ in ascending severity:
 2. **`> 8 MB`, `≤ 256 MB`** — a **warning**, not an error. A config that
    loads today keeps loading after an upgrade:
 
-   ```
+   ```text
    nginx: [warn] "zstd_buffers" (merged value) requests 1 x 8388609 bytes
    = ~8388609 bytes of output-chain memory PER RESPONSE; that is on top
    of the per-request compressor (CCtx) working set -- see the
@@ -515,7 +517,7 @@ in ascending severity:
    times nginx's own default — a refusal by default is the safer
    reading of "this is almost certainly a mistake":
 
-   ```
+   ```text
    nginx: [emerg] "zstd_buffers" (merged value) requests 2147483647 x
    1073741824 bytes = ~2305843008139952128 bytes of output-chain memory
    PER RESPONSE, above the 256 MB hard cap -- that is on top of the
@@ -529,7 +531,7 @@ in ascending severity:
    logged as a **warning** (not silenced) so the acknowledgement remains
    visible in the log:
 
-   ```
+   ```text
    nginx: [warn] "zstd_buffers" (merged value) requests 2147483647 x
    1073741824 bytes = ~2305843008139952128 bytes of output-chain memory
    PER RESPONSE, above the 256 MB hard cap; accepted because
@@ -541,7 +543,7 @@ unconditionally at every tier, including with `zstd_buffers_unsafe on;`
 set — there is no representable acknowledgement for a product that
 cannot exist:
 
-```
+```text
 nginx: [emerg] "zstd_buffers" (explicit directive) requests
 9223372036854775807 buffers of 9223372036854775807 bytes each; that
 product overflows the platform's size_t and cannot be a config any
@@ -719,7 +721,7 @@ anywhere in the inheritance chain therefore still runs the same
 estimate at config load, and emits a **warning** — not an error — when
 the profile needs more than **32 MB** of per-request compressor memory:
 
-```
+```text
 nginx: [warn] the configured zstd parameters need ~144328225 bytes of
 per-request compressor memory (zstd_comp_level 3); each worker retains
 up to 4 such contexts, so worker RSS can reach ~577312900 bytes, and

@@ -29,7 +29,7 @@ ok   an unterminated quoted parameter value does not hang the walk and does not 
 24/24 checks passed
 ```
 
-### Mutation pass
+### Mutation pass: Accept-Encoding parser
 
 All 5 applied to `src/ngx_http_zstd_common.h`, observed, reverted — tree
 diffed clean against a pre-mutation backup after each.
@@ -121,7 +121,7 @@ dynamic `load_module`-based build cannot express that distinction cleanly
 (no directive → unknown directive, config fails to parse, which the module-
 unloaded case already covers via a different binary).
 
-### Mutation pass
+### Mutation pass: Module loading behavior
 
 Ran locally against a hand-built static `--add-module` nginx (not part of
 the fast PR lane; the CI wiring above uses the pipeline's own asan.yml
@@ -346,10 +346,12 @@ Verified rather than assumed, because the whole finding was that this gate
 could not fail before the fix. A `strcpy` into an 8-byte stack buffer appended
 to `src/ngx_http_zstd_filter_module.c`:
 
-    set -o pipefail
-    flawfinder --minlevel=4 --error-level=4 \
-      src/ngx_http_zstd_filter_module.c src/ngx_http_zstd_static_module.c
-    -> exit 1
+```sh
+set -o pipefail
+flawfinder --minlevel=4 --error-level=4 \
+  src/ngx_http_zstd_filter_module.c src/ngx_http_zstd_static_module.c
+-> exit 1
+```
 
 Restored immediately; `git status src/` clean afterwards.
 
@@ -436,9 +438,11 @@ The `fun:malloc` / `fun:memcpy` blocks turned out to be **anchored** to full
 nginx call stacks (`ngx_alloc` → `ngx_set_environment` → …) and could not reach
 this module's frames. The real defect was a single block:
 
-    { <insert_a_suppression_name_here>
-      Memcheck:Cond
-      obj:* }
+```text
+{ <insert_a_suppression_name_here>
+  Memcheck:Cond
+  obj:* }
+```
 
 `Memcheck:Cond` + `obj:*` matches an uninitialised-value conditional in any
 object at any depth, muting that whole class — including in

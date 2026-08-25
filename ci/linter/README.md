@@ -60,7 +60,7 @@ ci/linter/install-linters.sh --check  # report only
 
 Preference order, and why each tool lands where it does:
 
-**apt-get (preferred — distro-managed, no PEP 668 fight)**
+### apt-get (preferred — distro-managed, no PEP 668 fight)
 
 ```sh
 sudo apt-get update
@@ -69,7 +69,7 @@ sudo apt-get install -y --no-install-recommends \
     libperl-critic-perl perl pipx cpanminus
 ```
 
-**pip / pipx (Python tools Debian does not carry at the needed version)**
+### pip / pipx (Python tools Debian does not carry at the needed version)
 
 Use `pipx`, not `pip3`: Debian 12+ marks the system interpreter
 externally-managed, so a bare `pip3 install` fails and
@@ -85,7 +85,7 @@ under you and local stops matching CI. Bump each here and in its CI consumer
 together -- `ruff` in `install-linters.sh`, `semgrep` in
 `security-scanners.yml` too.
 
-**cpan (Perl modules apt does not carry on every target release)**
+### cpan (Perl modules apt does not carry on every target release)
 
 ```sh
 sudo cpanm --notest Test::Nginx::Socket   # also what makes `perl -c` work on ci/t/*.t
@@ -103,7 +103,7 @@ pipx install zizmor                 # GitHub Actions security audit
 is the whole point, and a frozen security scanner stops finding what it was
 added for. A new rule going red is a finding to triage, not drift to suppress.
 
-**upstream binary (no apt/pip/cpan source)**
+### upstream binary (no apt/pip/cpan source)
 
 ```sh
 ver=1.7.7
