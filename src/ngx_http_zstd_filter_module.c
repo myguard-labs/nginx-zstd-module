@@ -545,8 +545,9 @@ static char *ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_fd_t ngx_http_zstd_open_dict_file(ngx_conf_t *cf,
     ngx_str_t *path, ngx_flag_t strict, ngx_file_info_t *info);
-static ngx_table_elt_t *ngx_http_zstd_find_request_header(
-    ngx_http_request_t *r, const char *name, size_t len, ngx_uint_t *count);
+static void ngx_http_zstd_collect_dcz_headers(ngx_http_request_t *r,
+    ngx_table_elt_t **avail_dict_h, ngx_uint_t *avail_dict_count,
+    ngx_table_elt_t **sec_fetch_site_h, ngx_uint_t *sec_fetch_site_count);
 static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
     ngx_http_request_t *r, ngx_http_zstd_loc_conf_t *zlcf);
 static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
@@ -1180,37 +1181,41 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
 
 /*
- * Case-insensitive lookup of a request header nginx keeps no dedicated
- * headers_in slot for (Available-Dictionary, Sec-Fetch-Site). Plain list
- * walk — both headers appear at most once and only on dictionary-aware
- * requests, so a hashed lookup buys nothing here.
+ * Collect two headers (Available-Dictionary and Sec-Fetch-Site) in a single
+ * header-list traversal. Both headers appear at most once and only on
+ * dictionary-aware requests; collecting them together avoids a second walk
+ * through what can be a long header list.
+ *
+ * Neither header appears in nginx's ngx_http_headers_in table, so neither
+ * gets ngx_http_process_unique_header_line's duplicate rejection: a request
+ * may legitimately reach a module carrying two of them. Both are single-valued
+ * by their specifications and a browser never sends either twice, so the
+ * duplicate count for each allows the caller to fail closed on more than one
+ * occurrence — for Sec-Fetch-Site that check is the RFC 9842 SS8.3
+ * cross-origin partitioning gate, and a proxy that merges or forwards a
+ * client-supplied duplicate, or a request-smuggling desync, must not be able
+ * to turn it off by prepending an agreeable value.
+ *
+ * Returns the found-status of each header (NULL if not present) and the
+ * duplicate count for each via output pointers. The caller must evaluate
+ * both in the order they appear in the code (Available-Dictionary first,
+ * then Sec-Fetch-Site) to preserve the existing debug log message sequence.
  */
-/*
- * Find a request header by name. Neither header this is used for
- * (Available-Dictionary, Sec-Fetch-Site) appears in nginx's
- * ngx_http_headers_in table, so neither gets ngx_http_process_unique_
- * header_line's duplicate rejection: a request may legitimately reach a
- * module carrying two of them, and a plain first-match lookup would let
- * whichever line sorts first decide the outcome. Both are single-valued
- * by their specifications and a browser never sends either twice, so
- * `*count` reports how many occurrences exist and the dcz caller fails
- * closed on more than one -- for Sec-Fetch-Site that check is the RFC
- * 9842 SS8.3 cross-origin partitioning gate, and a proxy that merges or
- * forwards a client-supplied duplicate, or a request-smuggling desync,
- * must not be able to turn it off by prepending an agreeable value.
- */
-static ngx_table_elt_t *
-ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
-    size_t len, ngx_uint_t *count)
+static void
+ngx_http_zstd_collect_dcz_headers(ngx_http_request_t *r,
+    ngx_table_elt_t **avail_dict_h, ngx_uint_t *avail_dict_count,
+    ngx_table_elt_t **sec_fetch_site_h, ngx_uint_t *sec_fetch_site_count)
 {
     ngx_uint_t              i;
     const ngx_list_part_t  *part;
-    ngx_table_elt_t        *h, *found;
+    ngx_table_elt_t        *h;
 
     part = &r->headers_in.headers.part;
     h = part->elts;
-    found = NULL;
-    *count = 0;
+    *avail_dict_h = NULL;
+    *sec_fetch_site_h = NULL;
+    *avail_dict_count = 0;
+    *sec_fetch_site_count = 0;
 
     for (i = 0; ; i++) {
 
@@ -1224,18 +1229,27 @@ ngx_http_zstd_find_request_header(ngx_http_request_t *r, const char *name,
             i = 0;
         }
 
-        if (h[i].key.len == len
-            && ngx_strncasecmp(h[i].key.data, (u_char *) name, len) == 0)
+        if (h[i].key.len == sizeof("available-dictionary") - 1
+            && ngx_strncasecmp(h[i].lowcase_key,
+                               (u_char *) "available-dictionary",
+                               sizeof("available-dictionary") - 1) == 0)
         {
-            (*count)++;
-
-            if (found == NULL) {
-                found = &h[i];
+            (*avail_dict_count)++;
+            if (*avail_dict_h == NULL) {
+                *avail_dict_h = &h[i];
+            }
+        }
+        else if (h[i].key.len == sizeof("sec-fetch-site") - 1
+                 && ngx_strncasecmp(h[i].lowcase_key,
+                                    (u_char *) "sec-fetch-site",
+                                    sizeof("sec-fetch-site") - 1) == 0)
+        {
+            (*sec_fetch_site_count)++;
+            if (*sec_fetch_site_h == NULL) {
+                *sec_fetch_site_h = &h[i];
             }
         }
     }
-
-    return found;
 }
 
 
@@ -1346,8 +1360,8 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     u_char                     buf[NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN];
     ngx_int_t                  rc;
     ngx_uint_t                 secure;
-    ngx_uint_t                 i, nheaders;
-    ngx_table_elt_t           *h, *ae;
+    ngx_uint_t                 i, avail_dict_count, sec_fetch_site_count;
+    ngx_table_elt_t           *avail_dict_h, *sec_fetch_site_h, *ae;
     ngx_http_zstd_dcz_dict_t  *dicts;
 
     if (zlcf->dcz_dicts == NULL || zlcf->dcz_dicts->nelts == 0) {
@@ -1409,17 +1423,23 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
         return NULL;
     }
 
-    h = ngx_http_zstd_find_request_header(r, "available-dictionary",
-                                          sizeof("available-dictionary") - 1,
-                                          &nheaders);
-    if (h == NULL) {
+    /*
+     * Collect both dcz-negotiation headers in a single header-list walk.
+     * This eliminates a second traversal over what can be a long list.
+     */
+    ngx_http_zstd_collect_dcz_headers(r, &avail_dict_h,
+                                       &avail_dict_count,
+                                       &sec_fetch_site_h,
+                                       &sec_fetch_site_count);
+
+    if (avail_dict_h == NULL) {
         return NULL;
     }
 
-    if (nheaders > 1) {
+    if (avail_dict_count > 1) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd dcz: skip, %ui Available-Dictionary headers",
-                       nheaders);
+                       avail_dict_count);
         return NULL;
     }
 
@@ -1431,48 +1451,46 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
      * so that attacker-controlled-byte slice can be fuzzed independently
      * of ngx_http_request_t.
      */
-    rc = ngx_http_zstd_dcz_decode_digest(h->value, buf);
+    rc = ngx_http_zstd_dcz_decode_digest(avail_dict_h->value, buf);
 
     if (rc == NGX_DECLINED) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd dcz: malformed Available-Dictionary (%uz bytes)",
-                       h->value.len);
+                       avail_dict_h->value.len);
         return NULL;
     }
 
     if (rc != NGX_OK) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd dcz: Available-Dictionary (%uz bytes) is not a "
-                       "valid base64 SHA-256", h->value.len);
+                       "valid base64 SHA-256", avail_dict_h->value.len);
         return NULL;
     }
-
-    h = ngx_http_zstd_find_request_header(r, "sec-fetch-site",
-                                          sizeof("sec-fetch-site") - 1,
-                                          &nheaders);
 
     /*
      * More than one Sec-Fetch-Site is never a browser and cannot be
      * evaluated: fail closed rather than trust the first line.
      */
-    if (nheaders > 1) {
+    if (sec_fetch_site_count > 1) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd dcz: skip, %ui Sec-Fetch-Site headers",
-                       nheaders);
+                       sec_fetch_site_count);
         return NULL;
     }
 
-    if (h != NULL
-        && !(h->value.len == sizeof("same-origin") - 1
-             && ngx_strncasecmp(h->value.data, (u_char *) "same-origin",
+    if (sec_fetch_site_h != NULL
+        && !(sec_fetch_site_h->value.len == sizeof("same-origin") - 1
+             && ngx_strncasecmp(sec_fetch_site_h->value.data,
+                                (u_char *) "same-origin",
                                 sizeof("same-origin") - 1) == 0)
-        && !(h->value.len == sizeof("none") - 1
-             && ngx_strncasecmp(h->value.data, (u_char *) "none",
+        && !(sec_fetch_site_h->value.len == sizeof("none") - 1
+             && ngx_strncasecmp(sec_fetch_site_h->value.data,
+                                (u_char *) "none",
                                 sizeof("none") - 1) == 0))
     {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd dcz: skip, Sec-Fetch-Site (%uz bytes, "
-                       "not same-origin or none)", h->value.len);
+                       "not same-origin or none)", sec_fetch_site_h->value.len);
         return NULL;
     }
 
