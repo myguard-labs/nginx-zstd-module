@@ -1538,7 +1538,7 @@ static ngx_int_t
 ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
     ngx_int_t                  flush, rc;
-    ngx_chain_t               *cl;
+    ngx_chain_t               *cl, *link;
     ngx_http_zstd_ctx_t       *ctx;
     ngx_http_zstd_loc_conf_t  *zlcf;
 
@@ -1611,15 +1611,13 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
          * link-by-link from the head and never reorder it, so the tracked
          * tail cannot go stale between calls.
          */
-        ngx_chain_t  *link;
-
-        for (ngx_chain_t *src = in; src; src = src->next) {
+        for (cl = in; cl; cl = cl->next) {
             link = ngx_alloc_chain_link(r->pool);
             if (link == NULL) {
                 goto failed;
             }
 
-            link->buf = src->buf;
+            link->buf = cl->buf;
             link->next = NULL;
 
             *ctx->last_in = link;
@@ -2038,9 +2036,9 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     }
 
     /*
-     * ngx_chain_add_copy() above allocated a fresh chain link per incoming
-     * link. Once we have taken its buffer, return the consumed link to the
-     * pool's free list with ngx_free_chain(); otherwise the copied links
+     * The body filter's append loop above allocated a fresh chain link per
+     * incoming link. Once we have taken its buffer, return the consumed
+     * link to the pool's free list with ngx_free_chain(); otherwise the links
      * accumulate in the request pool for the whole request, so a long-lived
      * chunked/SSE response grows worker memory linearly with chunk count
      * even though the output buffers are recycled. The buffer itself stays
