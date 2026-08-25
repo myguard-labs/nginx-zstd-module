@@ -106,7 +106,7 @@ jobs:
           set -euo pipefail
           cd "$NGINX_SRC_DIR"
           TEST_HARNESS=1 \
-          CFLAGS="$CFLAGS -DNGX_TEST_HARNESS -Wextra -Werror" \
+          CFLAGS="${CFLAGS:-} -DNGX_TEST_HARNESS -Wextra -Werror" \
           ./configure \
             --prefix=/etc/nginx \
             --with-http_ssl_module \
