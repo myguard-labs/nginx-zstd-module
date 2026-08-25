@@ -661,15 +661,40 @@ static ngx_int_t ngx_http_zstd_filter_emit_dcz_header(ngx_http_request_t *r,
 #endif
 
 typedef struct {
-    ZSTD_CCtx   *cctx;
     ngx_int_t    level;
     ngx_flag_t   long_mode;
     ngx_int_t    window_log;
-    ngx_uint_t   busy;
+} ngx_http_zstd_cctx_profile_t;
+
+typedef struct {
+    ZSTD_CCtx                       *cctx;
+    ngx_http_zstd_cctx_profile_t     profile;
+    ngx_uint_t                       busy;
 } ngx_http_zstd_cctx_slot_t;
 
 static ngx_http_zstd_cctx_slot_t
     ngx_http_zstd_worker_cctx_slots[NGX_HTTP_ZSTD_CCTX_SLOTS];
+
+
+static void
+ngx_http_zstd_cctx_profile_from_conf(ngx_http_zstd_cctx_profile_t *profile,
+    ngx_http_zstd_loc_conf_t *zlcf)
+{
+    profile->level = zlcf->level;
+    profile->long_mode = zlcf->long_mode;
+    profile->window_log = zlcf->window_log;
+}
+
+
+static ngx_int_t
+ngx_http_zstd_cctx_profiles_match(
+    const ngx_http_zstd_cctx_profile_t *a,
+    const ngx_http_zstd_cctx_profile_t *b)
+{
+    return a->level == b->level
+        && a->long_mode == b->long_mode
+        && a->window_log == b->window_log;
+}
 
 
 static ngx_conf_post_t  ngx_http_zstd_comp_level_bounds = {
@@ -1495,14 +1520,6 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         return ngx_http_next_body_filter(r, in);
     }
 
-    /*
-     * Fetch the location conf once. It cannot change for the lifetime of
-     * a request, so resolving it per inner-loop iteration (as the
-     * zstd_max_length check below previously did) only adds module-index
-     * indirection to the hottest path.
-     */
-    zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
-
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http zstd filter");
 
@@ -1518,6 +1535,13 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     {
         return NGX_OK;
     }
+
+    /*
+     * Fetch the location conf once. It cannot change for the lifetime of
+     * a request, so resolving it only past the no-op early return avoids
+     * module-index indirection on paths that do not need it.
+     */
+    zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
 
     if (!ctx->cctx_ready) {
         /*
@@ -2278,9 +2302,10 @@ static ngx_int_t
 ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
     ngx_http_zstd_loc_conf_t *zlcf)
 {
-    ngx_uint_t                  i, borrowed;
-    ngx_pool_cleanup_t         *cln;
-    ngx_http_zstd_cctx_slot_t  *slot, *free_slot, *lender;
+    ngx_uint_t                      i, borrowed;
+    ngx_pool_cleanup_t             *cln;
+    ngx_http_zstd_cctx_slot_t      *slot, *free_slot, *lender;
+    ngx_http_zstd_cctx_profile_t    zlcf_profile;
 
     /*
      * The cleanup slot is registered BEFORE the context is claimed, so a
@@ -2291,6 +2316,8 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
     if (cln == NULL) {
         return NGX_ERROR;
     }
+
+    ngx_http_zstd_cctx_profile_from_conf(&zlcf_profile, zlcf);
 
     borrowed = 0;
     free_slot = NULL;
@@ -2324,9 +2351,8 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             continue;
         }
 
-        if (slot->level == zlcf->level
-            && slot->long_mode == zlcf->long_mode
-            && slot->window_log == zlcf->window_log)
+        if (ngx_http_zstd_cctx_profiles_match(&slot->profile,
+                                              &zlcf_profile))
         {
             ctx->cctx = slot->cctx;
             slot->busy = 1;
@@ -2350,9 +2376,8 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
 
         if (free_slot != NULL) {
             free_slot->cctx = ctx->cctx;
-            free_slot->level = zlcf->level;
-            free_slot->long_mode = zlcf->long_mode;
-            free_slot->window_log = zlcf->window_log;
+            ngx_http_zstd_cctx_profile_from_conf(&free_slot->profile,
+                zlcf);
             free_slot->busy = 1;
             lender = free_slot;
             borrowed = 1;
