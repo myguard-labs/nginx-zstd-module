@@ -676,40 +676,112 @@ static ngx_http_zstd_cctx_slot_t
 
 
 /*
- * Pack/unpack CCtx profile into a single 64-bit key for collision-free,
- * reversible matching. Layout:
- *   bits  0–17: level + 131072 bias (18 bits; handles -131072..22)
- *   bits 18–22: window_log (5 bits; handles 0..31)
- *   bit  23:    long_mode (1 bit; 0 or 1)
- *   bits 24–63: reserved (zero)
+ * Pack/unpack the CCtx profile into a single 64-bit key, so matching a
+ * candidate slot is one load and one integer compare instead of three field
+ * compares. Layout:
  *
- * The bias shifts negative levels into the unsigned range so bit shifts are
- * well-defined on all compilers (right-shift of negative signed ints is
- * implementation-defined in C).
+ *   bits  0-17: level + NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS  (18 bits)
+ *   bits 18-23: window_log                                 (6 bits)
+ *   bit     24: long_mode                                  (1 bit)
+ *   bits 25-63: reserved, always zero
+ *
+ * The key is COLLISION-FREE and REVERSIBLE by construction, not by hashing:
+ * each field occupies its own disjoint bit range wide enough for its whole
+ * accepted domain, so distinct tuples always differ in at least one bit and
+ * _unpack() recovers the exact inputs. Diagnostics and tests rely on that.
+ *
+ * Why each field fits, with the arithmetic:
+ *
+ *  - level is validated at config load against ZSTD_minCLevel()..
+ *    ZSTD_maxCLevel(). It is legitimately NEGATIVE for libzstd's fast levels,
+ *    so it is biased into an unsigned range before shifting: right-shifting a
+ *    negative signed integer is implementation-defined in C, and a bare cast
+ *    of a negative value would sign-extend across the other fields. The bias
+ *    is 1 << 17 = 131072, and ZSTD_minCLevel() is -131072 on every libzstd
+ *    that defines it, so biased level lands in [0, 131094] -- inside 18 bits
+ *    (max 262143).
+ *
+ *  - window_log is 0 ("unset", keep zstd's level-derived default) or a value
+ *    ngx_http_zstd_check_num_int_max() has already accepted against
+ *    ZSTD_cParam_getBounds(ZSTD_c_windowLog). That upper bound is 31 on
+ *    64-bit libzstd today, but it is a LIBRARY value, not a constant this
+ *    module owns, so the field is given 6 bits (0..63) and the packer
+ *    asserts the value fits rather than masking it. Masking would silently
+ *    alias an out-of-domain window onto another profile and make two
+ *    different compression settings share one CCtx -- a wire-bytes change
+ *    with no diagnostic.
+ *
+ *  - long_mode is an ngx_flag_t already merged to 0 or 1.
+ *
+ * NGX_HTTP_ZSTD_PROFILE_INVALID is returned when a value is out of domain.
+ * It has bit 63 set, which no in-domain key ever has, so it can never be
+ * confused with a real profile.
  */
-#define NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS  131072
+#define NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS   131072
+#define NGX_HTTP_ZSTD_PROFILE_LEVEL_BITS   18
+#define NGX_HTTP_ZSTD_PROFILE_WLOG_BITS    6
+#define NGX_HTTP_ZSTD_PROFILE_LEVEL_MAX \
+    ((1ULL << NGX_HTTP_ZSTD_PROFILE_LEVEL_BITS) - 1)
+#define NGX_HTTP_ZSTD_PROFILE_WLOG_MAX \
+    ((1ULL << NGX_HTTP_ZSTD_PROFILE_WLOG_BITS) - 1)
+#define NGX_HTTP_ZSTD_PROFILE_WLOG_SHIFT   NGX_HTTP_ZSTD_PROFILE_LEVEL_BITS
+#define NGX_HTTP_ZSTD_PROFILE_LONG_SHIFT \
+    (NGX_HTTP_ZSTD_PROFILE_LEVEL_BITS + NGX_HTTP_ZSTD_PROFILE_WLOG_BITS)
+#define NGX_HTTP_ZSTD_PROFILE_INVALID      ((uint64_t) 1 << 63)
 
 static uint64_t
 ngx_http_zstd_profile_pack(ngx_int_t level, ngx_flag_t long_mode,
     ngx_int_t window_log)
 {
-    uint64_t key;
+    uint64_t  biased, wlog;
 
-    key = ((uint64_t)(level + NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS) & 0x3FFFFUL)
-        | (((uint64_t)window_log & 0x1FUL) << 18)
-        | (((uint64_t)long_mode & 1UL) << 23);
+    /*
+     * Refuse rather than mask. Every caller feeds config-validated values, so
+     * this is a structural guard: if a future directive change widens a
+     * domain past its field, profiles start comparing unequal (a redundant
+     * CCtx, harmless) instead of silently aliasing (a shared CCtx with the
+     * wrong parameters, which changes bytes on the wire).
+     */
+    if (level < -NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS) {
+        return NGX_HTTP_ZSTD_PROFILE_INVALID;
+    }
 
-    return key;
+    biased = (uint64_t) (level + NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS);
+
+    if (biased > NGX_HTTP_ZSTD_PROFILE_LEVEL_MAX) {
+        return NGX_HTTP_ZSTD_PROFILE_INVALID;
+    }
+
+    if (window_log < 0) {
+        return NGX_HTTP_ZSTD_PROFILE_INVALID;
+    }
+
+    wlog = (uint64_t) window_log;
+
+    if (wlog > NGX_HTTP_ZSTD_PROFILE_WLOG_MAX) {
+        return NGX_HTTP_ZSTD_PROFILE_INVALID;
+    }
+
+    return biased
+        | (wlog << NGX_HTTP_ZSTD_PROFILE_WLOG_SHIFT)
+        | ((uint64_t) (long_mode ? 1 : 0) << NGX_HTTP_ZSTD_PROFILE_LONG_SHIFT);
 }
 
 
-static void __attribute__((unused))
+/*
+ * Inverse of ngx_http_zstd_profile_pack() for diagnostics and tests. Kept
+ * adjacent to the packer on purpose: the two encode one layout, and splitting
+ * them is how a pack/unpack pair drifts.
+ */
+static void
 ngx_http_zstd_profile_unpack(uint64_t key, ngx_int_t *level,
     ngx_flag_t *long_mode, ngx_int_t *window_log)
 {
-    *level = (ngx_int_t)((key & 0x3FFFFUL) - NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS);
-    *window_log = (ngx_int_t)((key >> 18) & 0x1FUL);
-    *long_mode = (ngx_flag_t)((key >> 23) & 1UL);
+    *level = (ngx_int_t) (key & NGX_HTTP_ZSTD_PROFILE_LEVEL_MAX)
+             - NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS;
+    *window_log = (ngx_int_t) ((key >> NGX_HTTP_ZSTD_PROFILE_WLOG_SHIFT)
+                               & NGX_HTTP_ZSTD_PROFILE_WLOG_MAX);
+    *long_mode = (ngx_flag_t) ((key >> NGX_HTTP_ZSTD_PROFILE_LONG_SHIFT) & 1);
 }
 
 
@@ -2416,9 +2488,24 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             lender = slot;
             borrowed = 1;
 
-            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                           "zstd: reusing worker cctx %p (slot:%ui)",
-                           ctx->cctx, i);
+            {
+            ngx_int_t   dbg_level, dbg_wlog;
+            ngx_flag_t  dbg_long;
+
+            /*
+             * Unpack rather than read zlcf: this prints what the SLOT was
+             * built for, which is the thing a reuse decision turns on, and
+             * it exercises the key's reversibility on the hot debug path.
+             */
+            ngx_http_zstd_profile_unpack(slot->profile.key, &dbg_level,
+                                         &dbg_long, &dbg_wlog);
+
+            ngx_log_debug5(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "zstd: reusing worker cctx %p (slot:%ui) "
+                           "level:%i long:%i window_log:%i",
+                           ctx->cctx, i, dbg_level, (ngx_int_t) dbg_long,
+                           dbg_wlog);
+            }
             break;
         }
     }

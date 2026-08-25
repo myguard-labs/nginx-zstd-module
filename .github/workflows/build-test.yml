@@ -217,6 +217,18 @@ jobs:
           # through 2^23 included) — needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_ceil_log2_unit.sh
 
+      - name: CCtx profile key unit fixture (collision-free + reversible)
+        run: |
+          # The worker CCtx ring partitions slots on a packed 64-bit key
+          # built from (level, long_mode, window_log). The key must be
+          # collision-free and reversible, NOT a hash: two profiles sharing
+          # a key would share a CCtx and silently change bytes on the wire.
+          # Extracts the packer, unpacker and their layout defines verbatim
+          # from the module and sweeps the full in-domain tuple space,
+          # asserting reversibility (hence injectivity) plus fail-closed
+          # refusal of out-of-domain values — needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_cctx_profile_pack.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the

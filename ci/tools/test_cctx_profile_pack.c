@@ -1,92 +1,158 @@
 /*
- * Unit test for ngx_http_zstd_cctx_profile_pack/unpack
- * Extracted live from src/ngx_http_zstd_filter_module.c
- * Verifies: no collisions, reversibility over the full accepted domain
+ * Unit oracle for the CCtx profile 64-bit key.
+ *
+ * The packer and unpacker (and their layout #defines) are EXTRACTED VERBATIM
+ * from src/ngx_http_zstd_filter_module.c by test_cctx_profile_pack.sh into
+ * generated_profile_pack.inc -- this file never re-implements the arithmetic,
+ * so it cannot quietly agree with a stale copy of itself.
+ *
+ * What the row demands, and therefore what is asserted here:
+ *
+ *   1. REVERSIBLE   -- unpack(pack(t)) == t for every in-domain tuple t.
+ *   2. COLLISION-FREE -- distinct tuples never produce the same key. Proved
+ *      here without an O(n^2) compare and without a hash set: because (1)
+ *      holds for every tuple in the swept domain, pack is injective on that
+ *      domain by construction (a left inverse exists), so a collision is
+ *      impossible. The sweep additionally checks the reserved high bits are
+ *      clear and that no in-domain key ever equals the INVALID sentinel,
+ *      which is the only way a real profile could be confused with a refusal.
+ *   3. FAIL-CLOSED  -- out-of-domain inputs return NGX_HTTP_ZSTD_PROFILE_INVALID
+ *      rather than being masked into a valid-looking key. Masking is what
+ *      would let two different compression settings share one CCtx, which
+ *      changes bytes on the wire with no diagnostic.
+ *
+ * Domain swept: the full range the config layer can deliver.
+ *   level      -131072 .. 22   (ZSTD_minCLevel()..ZSTD_maxCLevel();
+ *                               negative values are libzstd's fast levels)
+ *   window_log 0 .. 63         (0 = "unset"; the accepted maximum is a
+ *                               libzstd bound -- 31 on 64-bit today -- so the
+ *                               field is 6 bits wide and the WHOLE field is
+ *                               swept, not just today's library limit)
+ *   long_mode  0 .. 1
  */
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-#define NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS  131072
+/* Minimal nginx-typedef shim: the extracted code uses these two names. */
+typedef long  ngx_int_t;
+typedef long  ngx_flag_t;
 
-typedef int ngx_int_t;
-typedef unsigned int ngx_flag_t;
+#include "generated_profile_pack.inc"
 
-static uint64_t
-ngx_http_zstd_profile_pack(ngx_int_t level, ngx_flag_t long_mode,
-    ngx_int_t window_log)
+#define LEVEL_MIN  (-131072)
+#define LEVEL_MAX  (22)
+#define WLOG_MAX   ((ngx_int_t) NGX_HTTP_ZSTD_PROFILE_WLOG_MAX)
+
+int
+main(void)
 {
-    uint64_t key;
+    ngx_int_t   level, window_log, long_mode;
+    ngx_int_t   u_level, u_window_log;
+    ngx_flag_t  u_long;
+    uint64_t    key;
+    long long   swept = 0;
+    long long   revfail = 0;
+    long long   sentinel_clash = 0;
+    long long   reserved_dirty = 0;
+    int         rc = 0;
 
-    key = ((uint64_t)(level + NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS) & 0x3FFFFUL)
-        | (((uint64_t)window_log & 0x1FUL) << 18)
-        | (((uint64_t)long_mode & 1UL) << 23);
-
-    return key;
-}
-
-
-static void
-ngx_http_zstd_profile_unpack(uint64_t key, ngx_int_t *level,
-    ngx_flag_t *long_mode, ngx_int_t *window_log)
-{
-    *level = (ngx_int_t)((key & 0x3FFFFUL) - NGX_HTTP_ZSTD_PROFILE_LEVEL_BIAS);
-    *window_log = (ngx_int_t)((key >> 18) & 0x1FUL);
-    *long_mode = (ngx_flag_t)((key >> 23) & 1UL);
-}
-
-
-int main() {
-    int level, window_log, long_mode;
-    int up_level, up_window_log, up_long_mode;
-    uint64_t key;
-    int collisions = 0;
-    int total_tuples = 0;
-    int failures = 0;
-
-    /* Sweep across representative ranges:
-     * level: -131072 to 22 (typical ZSTD range)
-     * window_log: 0 to 31 (typical window sizes)
-     * long_mode: 0, 1 (boolean)
-     */
-
-    printf("Sweeping collision test and reversibility...\n");
-    printf("Testing: level [-131072, 22], window_log [0, 31], long_mode [0, 1]\n");
-
-    for (level = -131072; level <= 22; level++) {
-        for (window_log = 0; window_log <= 31; window_log++) {
+    for (level = LEVEL_MIN; level <= LEVEL_MAX; level++) {
+        for (window_log = 0; window_log <= WLOG_MAX; window_log++) {
             for (long_mode = 0; long_mode <= 1; long_mode++) {
-                total_tuples++;
-                key = ngx_http_zstd_profile_pack(level, long_mode, window_log);
 
-                /* Test reversibility */
-                ngx_http_zstd_profile_unpack(key, &up_level, (unsigned int *)&up_long_mode,
-                    &up_window_log);
+                key = ngx_http_zstd_profile_pack(level,
+                                                 (ngx_flag_t) long_mode,
+                                                 window_log);
+                swept++;
 
-                if (up_level != level || up_window_log != window_log
-                    || up_long_mode != long_mode)
+                if (key == NGX_HTTP_ZSTD_PROFILE_INVALID) {
+                    sentinel_clash++;
+                    continue;
+                }
+
+                /* Nothing above the long_mode bit may ever be set. */
+                if ((key >> (NGX_HTTP_ZSTD_PROFILE_LONG_SHIFT + 1)) != 0) {
+                    reserved_dirty++;
+                }
+
+                ngx_http_zstd_profile_unpack(key, &u_level, &u_long,
+                                             &u_window_log);
+
+                if (u_level != level
+                    || u_window_log != window_log
+                    || (ngx_int_t) u_long != long_mode)
                 {
-                    printf("FAIL: reversibility at (%d, %d, %d) -> key %llu\n",
-                           level, long_mode, window_log, (unsigned long long)key);
-                    printf("      unpacked as (%d, %d, %d)\n",
-                           up_level, up_long_mode, up_window_log);
-                    failures++;
+                    if (revfail < 5) {
+                        fprintf(stderr,
+                                "REVERSIBILITY: (%ld,%ld,%ld) -> key %llu -> "
+                                "(%ld,%ld,%ld)\n",
+                                (long) level, (long) long_mode,
+                                (long) window_log,
+                                (unsigned long long) key,
+                                (long) u_level, (long) u_long,
+                                (long) u_window_log);
+                    }
+                    revfail++;
                 }
             }
         }
     }
 
-    printf("\nTotal tuples tested: %d\n", total_tuples);
-    printf("Reversibility failures: %d\n", failures);
-    printf("Collision count: %d\n", collisions);
+    printf("swept %lld in-domain tuples "
+           "(level %d..%d, window_log 0..%ld, long_mode 0..1)\n",
+           swept, LEVEL_MIN, LEVEL_MAX, (long) WLOG_MAX);
+    printf("  reversibility failures : %lld\n", revfail);
+    printf("  INVALID-sentinel clashes: %lld\n", sentinel_clash);
+    printf("  reserved bits set       : %lld\n", reserved_dirty);
 
-    if (failures == 0 && collisions == 0) {
-        printf("\nOK: All tests passed\n");
-        return 0;
-    } else {
-        printf("\nFAIL: Tests failed\n");
+    if (revfail || sentinel_clash || reserved_dirty) {
+        rc = 1;
+    }
+
+    /*
+     * Injectivity follows from reversibility over the swept domain: unpack is
+     * a left inverse of pack there, so pack cannot map two distinct tuples to
+     * one key. State it rather than implying it.
+     */
+    if (!rc) {
+        printf("  => pack is injective over the swept domain "
+               "(left inverse exists for every tuple): 0 collisions\n");
+    }
+
+    /* --- fail-closed checks: out-of-domain must REFUSE, not mask. --- */
+    {
+        struct { ngx_int_t lvl, wlog; const char *what; } bad[] = {
+            { LEVEL_MIN - 1,   0, "level below bias" },
+            { 1 << 20,         0, "level above field" },
+            { 0,  WLOG_MAX + 1,  "window_log above field" },
+            { 0,            -1,  "window_log negative" },
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            key = ngx_http_zstd_profile_pack(bad[i].lvl, 0, bad[i].wlog);
+            if (key != NGX_HTTP_ZSTD_PROFILE_INVALID) {
+                fprintf(stderr,
+                        "FAIL-CLOSED: %s (level=%ld window_log=%ld) returned "
+                        "%llu, expected INVALID\n",
+                        bad[i].what, (long) bad[i].lvl, (long) bad[i].wlog,
+                        (unsigned long long) key);
+                rc = 1;
+            }
+        }
+        if (!rc) {
+            printf("  => all %zu out-of-domain inputs refused "
+                   "(no silent masking)\n", sizeof(bad) / sizeof(bad[0]));
+        }
+    }
+
+    if (rc) {
+        printf("FAIL\n");
         return 1;
     }
+
+    printf("PASS\n");
+    return 0;
 }
