@@ -908,6 +908,13 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * nothing stable to seek into. */
     r->allow_ranges = 1;
 
+    /* HEAD fast path: send headers only, skip body buffer allocation.
+     * r->header_only covers more than HEAD (304/204), so check method
+     * explicitly to avoid breaking other status codes. */
+    if (r->method == NGX_HTTP_HEAD) {
+        return ngx_http_send_header(r);
+    }
+
     b = ngx_calloc_buf(r->pool);
     if (b == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
