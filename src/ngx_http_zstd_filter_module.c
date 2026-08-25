@@ -126,6 +126,15 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
  */
 #define NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG  23
 
+/*
+ * ZSTD_WINDOWLOG_MIN, spelled without the libzstd macro: that name lives in
+ * the experimental (ZSTD_STATIC_LINKING_ONLY) section, and this floor has to
+ * hold on the non-static build too. ngx_http_zstd_ceil_log2() already
+ * returns nothing below it; the constant exists so the clamps cannot go
+ * under it either.
+ */
+#define NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG  10
+
 
 /*
  * The effective ZSTD_c_windowLog for a dcz (RFC 9842 dictionary-compressed)
@@ -195,6 +204,23 @@ ngx_http_zstd_dcz_window_log(size_t dict_len, off_t pledged_size,
 
     if (budget_window_cap > 0 && budget_window_cap < wlog) {
         wlog = budget_window_cap;
+    }
+
+    /*
+     * Floor, as defence in depth. Both ceilings are already constrained to
+     * >= 10 by their producers -- zstd_window_log is validated against
+     * ZSTD_cParam_getBounds(ZSTD_c_windowLog), whose lowerBound is
+     * ZSTD_WINDOWLOG_MIN, and ngx_http_zstd_dcz_window_cap()'s search is
+     * bounded below by the same constant -- so this cannot fire today. It
+     * is here because the [10, 23] postcondition is what keeps the value
+     * inside ngx_http_zstd_profile_pack()'s window_log field, and that
+     * guarantee should rest on this function rather than on two validators
+     * in other files staying correct. A future bound change that let a
+     * smaller ceiling through would otherwise push an invalid windowLog
+     * into libzstd and a domain-refused key into the ring.
+     */
+    if (wlog < NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG) {
+        wlog = NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG;
     }
 
     return wlog;

@@ -54,7 +54,7 @@ typedef unsigned long  ngx_uint_t;
 
 #include "generated_dcz_window_log.inc"
 
-#define WLOG_MIN  10
+#define WLOG_MIN  ((ngx_int_t) NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG)
 #define UNKNOWN   ((off_t) -1)
 
 static long long failures;
@@ -148,6 +148,9 @@ main(void)
                     if (budget > 0 && budget < want) {
                         want = budget;
                     }
+                    if (want < WLOG_MIN) {
+                        want = WLOG_MIN;   /* the defence-in-depth floor */
+                    }
 
                     /* 2 + 3: either ceiling binds, the lower one wins. */
                     if (got != want) {
@@ -171,6 +174,10 @@ main(void)
                     if (got > NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG) {
                         fail("range(above-cap)", dict, pledged, conf, budget,
                              got, NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG);
+                    }
+                    if (got < WLOG_MIN) {
+                        fail("range(below-floor)", dict, pledged, conf,
+                             budget, got, WLOG_MIN);
                     }
                 }
             }

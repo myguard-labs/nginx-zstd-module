@@ -46,11 +46,17 @@ if [ -z "$CEIL_SIG" ]; then
 fi
 read -r CEIL_START CEIL_END < <(extract "$((CEIL_SIG - 1))" "ceil_log2")
 
-# --- the RFC 9842 window cap #define -------------------------------------
+# --- the window bound #defines -------------------------------------------
 CAP_LINE="$(grep -n '^#define NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG' "$SRC" \
             | head -1 | cut -d: -f1)"
 if [ -z "$CAP_LINE" ]; then
     echo "FAIL: could not locate NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG in $SRC" >&2
+    exit 1
+fi
+MIN_LINE="$(grep -n '^#define NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG' "$SRC" \
+            | head -1 | cut -d: -f1)"
+if [ -z "$MIN_LINE" ]; then
+    echo "FAIL: could not locate NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG in $SRC" >&2
     exit 1
 fi
 
@@ -71,6 +77,7 @@ read -r DCZ_START DCZ_END < <(extract "$((DCZ_SIG - 1))" "dcz_window_log")
     echo " *   dcz_window_log lines ${DCZ_START}-${DCZ_END}"
     echo " * Do not edit; re-run the script to regenerate. */"
     sed -n "${CAP_LINE}p" "$SRC"
+    sed -n "${MIN_LINE}p" "$SRC"
     echo
     sed -n "${CEIL_START},${CEIL_END}p" "$SRC"
     echo
@@ -81,6 +88,7 @@ read -r DCZ_START DCZ_END < <(extract "$((DCZ_SIG - 1))" "dcz_window_log")
 # that still compiles and "passes".
 for marker in 'ngx_http_zstd_ceil_log2(size_t x)' \
               'NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG' \
+              'NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG' \
               'ngx_http_zstd_dcz_window_log(size_t dict_len' \
               'budget_window_cap'; do
     if ! grep -q "$marker" "$OUT/generated_dcz_window_log.inc"; then
