@@ -27,4 +27,12 @@ if ! nm "$SO" 2>/dev/null | grep -q ' ngx_test_probe_'; then
     exit 1
 fi
 
+# Oracle 4 decodes the response and compares it against the origin file, so a
+# missing decoder would silently weaken it to "200 and nonempty". Fail here
+# instead: a gate that cannot run its assertion is not a gate.
+if ! command -v zstd >/dev/null 2>&1; then
+    echo "zstd(1) not found -- oracle 4 decodes the CODEC_END ZERO response and compares it byte-for-byte with the origin file"
+    exit 1
+fi
+
 exit 0

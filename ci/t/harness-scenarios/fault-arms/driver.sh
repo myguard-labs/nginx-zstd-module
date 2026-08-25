@@ -152,17 +152,20 @@ disarm codec_end || true
 # actually targets (documented ok-for-3+ manually: 1002-1999 all complete
 # cleanly on this body).
 #
-# "Completes with a 200" alone would still be vacuous -- a compressible
-# 200-KB body of identical bytes and an unfaulted request both give the same
-# ~26-byte frame -- so this also requires the response to be a COMPLETE,
-# parseable zstd frame (not merely a 200 status), which a truncated/aborted
-# transfer is not.
+# "Completes with a 200" alone would be vacuous -- a compressible 200-KB body
+# of identical bytes and an unfaulted request both give the same ~26-byte
+# frame -- so the response must also DECODE: a complete, parseable zstd frame
+# whose plaintext is byte-for-byte the origin file. A truncated or aborted
+# transfer fails `zstd -d`, and a frame that decodes to the wrong bytes fails
+# the cmp. Checking only `[ -s ]` here would accept both.
 END_ZERO_OUT="$PROBER_PREFIX/codec-end-zero.out"
 END_ZERO_OK=0
 if arm codec_end 1002 && fetch /body.bin "$END_ZERO_OUT"; then
     if grep -q '^HTTP/1.1 200' "$END_ZERO_OUT.hdrs" \
         && ! grep -qE '^(curl:|$)' "$END_ZERO_OUT.stderr" 2>/dev/null \
-        && [ -s "$END_ZERO_OUT" ]
+        && [ -s "$END_ZERO_OUT" ] \
+        && zstd -d -q -f -o "$END_ZERO_OUT.plain" "$END_ZERO_OUT" 2>/dev/null \
+        && cmp -s "$END_ZERO_OUT.plain" "$PROBER_PREFIX/www/body.bin"
     then
         END_ZERO_OK=1
     fi
