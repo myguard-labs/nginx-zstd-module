@@ -144,7 +144,11 @@ WORKLOAD_SCALES: dict[str, list[int]] = {
     # docstring's baseline table already exercised (32000 locations, 246.5ms).
     "locations-same-profile": [10, 500, 4000, 16000],
     "locations-multi-profile": [10, 500, 4000, 16000],
-    "dcz-dicts": [10, 150, 300, 600],
+    # 16000 (not 600) so the largest point clears SCALE_MIN_HI_SECONDS with
+    # margin: 600 entries measured 5.8ms, below the 50ms floor. 5000 measured
+    # 30.9ms, 10000 measured 98.7ms, and 16000 measured 182.3ms on a
+    # contemporary dev box in 2026-08 -- the largest point ~3.6x the floor.
+    "dcz-dicts": [10, 600, 5000, 16000],
 }
 
 # The distinct (level, long_mode, window_log) tuples cycled through by the
