@@ -1,5 +1,38 @@
 Changes with http-zstd
 
+    *) Security: "zstd_dict_strict_path on" enforced its trust policy
+       only on the final path component and ignored file ownership.
+
+       The open used O_NOFOLLOW on the whole path, which the kernel
+       applies to the leaf alone -- every intermediate component was
+       resolved normally, so "/srv/current/dict.bin" with "current" a
+       symlink was followed silently. A local writer able to repoint an
+       intermediate component therefore chose the bytes a privileged
+       reload snapshotted into every worker, despite strict mode being
+       on, and despite the release-symlink layout being the exact case
+       the directive documents itself as refusing. Strict mode now
+       resolves the path one component at a time with
+       openat(O_NOFOLLOW|O_DIRECTORY) and opens the leaf relative to the
+       verified parent descriptor, so no component is traversed through
+       a symlink. It additionally requires an absolute path with no
+       "." or ".." component, which the walk cannot otherwise verify.
+
+       Separately, the trust check tested only S_IWGRP|S_IWOTH. A
+       dictionary owned by an unprivileged account at an ordinary mode
+       0644 passed while a root master read it -- and that owner can
+       rewrite the file at will, steering what the next privileged
+       reload loads, which is precisely the less-privileged writer the
+       directive exists to exclude. Strict mode now also requires the
+       file to be owned by the effective uid of the config-parsing
+       master, or by root.
+
+       Both rules are confined to "zstd_dict_strict_path on". The
+       default ("off") is byte-for-byte unchanged, so a release-symlink
+       deployment keeps working unconfigured. On a platform without
+       POSIX.1-2008 openat() (including Windows) strict mode now fails
+       closed at config load rather than degrading silently to the
+       leaf-only guarantee.
+
     *) Bugfix: a dcz (RFC 9842) request escaped "zstd_max_cctx_memory"
        and contaminated a worker CCtx ring slot. A dcz response does not
        compress at "zstd_window_log": it derives its own window from the

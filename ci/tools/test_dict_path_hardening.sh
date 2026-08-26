@@ -218,6 +218,130 @@ r=$(conf_test "    zstd_dict_strict_path on;
     zstd_dcz_dict_file $WORK/html/link.dict;")
 check "symlink, strict on (zstd_dcz_dict_file)" reject "$r"
 
+# ── M3: INTERMEDIATE symlink component, strict on rejects ────────────
+#
+# The regression this pins: O_NOFOLLOW on the whole path guards only the
+# LEAF. Build /…/rel-1/inter.dict and point a sibling symlink "current"
+# at rel-1, then load /…/current/inter.dict -- every component but the
+# last is a perfectly ordinary directory to the kernel, so a leaf-only
+# O_NOFOLLOW open follows "current" silently and strict mode loads
+# whatever the symlink's owner aimed it at. This is the release-symlink
+# swap the README warning claims strict mode defends against.
+#
+# NON-VACUITY: the SAME dictionary reached through its REAL path must
+# still load under strict on (the fixture directly below). Without that
+# pair, "rejected" here could just mean the file or the directory layout
+# is broken, and the assertion would pass for the wrong reason.
+mkdir -p "$WORK/html/rel-1"
+cp "$WORK/html/regular.dict" "$WORK/html/rel-1/inter.dict"
+chmod 0755 "$WORK/html/rel-1"
+chmod 0644 "$WORK/html/rel-1/inter.dict"
+ln -s "$WORK/html/rel-1" "$WORK/html/current"
+
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/current/inter.dict;")
+check "intermediate symlink component, strict on (zstd_dict_file)" reject "$r"
+
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dcz_dict_file $WORK/html/current/inter.dict;")
+check "intermediate symlink component, strict on (zstd_dcz_dict_file)" reject "$r"
+
+# Positive control for the pair above: the identical bytes via the real
+# directory path load fine under strict on.
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/rel-1/inter.dict;")
+check "real (non-symlink) path, strict on still loads (zstd_dict_file)" regular "$r"
+
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dcz_dict_file $WORK/html/rel-1/inter.dict;")
+check "real (non-symlink) path, strict on still loads (zstd_dcz_dict_file)" regular "$r"
+
+# The intermediate-symlink path must STILL LOAD with strict off, so the
+# fix cannot be mistaken for a blanket path restriction and the
+# documented release-symlink deployment keeps working unconfigured.
+r=$(conf_test "    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/current/inter.dict;")
+check "intermediate symlink component, strict off / default" regular "$r"
+
+# ── M4: OWNER-writable / foreign-owned dictionary, strict on rejects ──
+#
+# The regression this pins: strict mode used to test only S_IWGRP |
+# S_IWOTH, so a dictionary owned by an unprivileged account with an
+# entirely ordinary mode 0644 passed while a root master read it -- and
+# that owner can rewrite the file, steering what the next privileged
+# reload snapshots. Strict mode now additionally requires the file to be
+# owned by the loading principal (geteuid()) or by root.
+#
+# COVERAGE HONESTY -- READ BEFORE TRUSTING THIS FIXTURE.
+#
+# Which half runs depends on whether this script has the privilege to
+# create a file it does not own:
+#
+#   * as root  -- chown to an unprivileged uid gives a genuine
+#                 foreign-owned dictionary and the real M4 case runs.
+#   * non-root -- an unprivileged CI user CANNOT chown a file away from
+#                 itself, so the foreign-owner half is NOT COVERED here
+#                 and is reported as such. What IS asserted instead is
+#                 the complementary, fully observable half: the check is
+#                 reached and the positive path (a file owned by
+#                 geteuid(), mode 0644) still loads. This is deliberately
+#                 NOT dressed up as a pass for the uncovered half.
+if [ "$(id -u)" -eq 0 ]; then
+    foreign_uid=""
+    for cand in nobody daemon bin; do
+        if id -u "$cand" >/dev/null 2>&1; then
+            foreign_uid="$(id -u "$cand")"
+            break
+        fi
+    done
+
+    if [ -n "$foreign_uid" ]; then
+        cp "$WORK/html/regular.dict" "$WORK/html/foreign.dict"
+        chmod 0644 "$WORK/html/foreign.dict"
+        chown "$foreign_uid" "$WORK/html/foreign.dict"
+
+        r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/foreign.dict;")
+        check "foreign-owned 0644 dictionary, strict on (zstd_dict_file)" reject "$r"
+
+        r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dcz_dict_file $WORK/html/foreign.dict;")
+        check "foreign-owned 0644 dictionary, strict on (zstd_dcz_dict_file)" reject "$r"
+
+        # Complement: the same foreign-owned file must still load with
+        # strict OFF, so the ownership rule is confined to strict mode
+        # and does not change the default deployment's behaviour.
+        r=$(conf_test "    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/foreign.dict;")
+        check "foreign-owned 0644 dictionary, strict off / default" regular "$r"
+    else
+        echo "::warning::no unprivileged account (nobody/daemon/bin) found;"
+        echo "  M4 foreign-owner half NOT COVERED in this run"
+    fi
+else
+    echo "• M4 foreign-owner half NOT COVERED: running as uid $(id -u), which"
+    echo "  cannot chown a file away from itself. The observable complement"
+    echo "  (self-owned 0644 still loads under strict on) is asserted below."
+fi
+
+# Observable in every environment, privileged or not: a dictionary owned
+# by the loading principal with a sane mode is accepted under strict on.
+# This is what keeps the M4 ownership rule from being a blanket refusal,
+# and it is the half the unprivileged CI user genuinely covers.
+cp "$WORK/html/regular.dict" "$WORK/html/selfowned.dict"
+chmod 0644 "$WORK/html/selfowned.dict"
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/selfowned.dict;")
+check "self-owned 0644 dictionary, strict on loads (zstd_dict_file)" regular "$r"
+
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dcz_dict_file $WORK/html/selfowned.dict;")
+check "self-owned 0644 dictionary, strict on loads (zstd_dcz_dict_file)" regular "$r"
+
 # ── Fixture: world-writable regular file, strict on rejects ───────────
 cp "$WORK/html/regular.dict" "$WORK/html/writable.dict"
 chmod 0666 "$WORK/html/writable.dict"
