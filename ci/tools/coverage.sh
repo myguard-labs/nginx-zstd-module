@@ -17,6 +17,14 @@
 # Env:
 #   COVERAGE_FAIL_UNDER  optional; if set, gcovr --fail-under-line is used.
 #                        Unset by default -- see the header note above.
+#   COVERAGE_HARNESS     optional, default 1. When 1, the coverage tree is
+#                        built with the TEST_HARNESS probe compiled in and the
+#                        ci/t/harness-scenarios/* scenarios are run against it
+#                        after the Test::Nginx suites, so the libzstd FAULT
+#                        paths (which no ci/t/ test can reach -- there is no
+#                        way to make libzstd fail from the outside) are counted
+#                        instead of being reported as dead lines. Set to 0 to
+#                        reproduce the pre-harness number.
 #
 # gcovr flag note: --object-directory is used, NOT --gcov-object-directory,
 # which fails argparse on gcovr below 7.0. --object-directory is accepted by
@@ -36,8 +44,23 @@ command -v gcovr >/dev/null || {
     exit 2
 }
 
+COVERAGE_HARNESS="${COVERAGE_HARNESS:-1}"
+
 echo "== coverage: building $FLAVOR ${VERSION:-<mainline>} in coverage mode =="
-bash "$SCRIPT_DIR/ci-build.sh" "$FLAVOR" "$VERSION" coverage
+if [ "$COVERAGE_HARNESS" = "1" ]; then
+    # BOTH switches, always together. TEST_HARNESS=1 alone compiles the probe
+    # sources and still yields a probe-free .so -- measured in this repo
+    # (packaged=0 probe symbols, TEST_HARNESS=1 alone=0, both=18). With a
+    # probe-free .so every scenario below would SKIP or fail to arm, and the
+    # coverage number would silently be the pre-harness one while claiming
+    # otherwise. Verified compatible with --coverage: the coverage tree builds
+    # clean with the probe in and emits .gcno for every unit.
+    echo "   (with TEST_HARNESS -- fault paths will be exercised)"
+    TEST_HARNESS=1 CFLAGS="${CFLAGS:-} -DNGX_TEST_HARNESS" \
+        bash "$SCRIPT_DIR/ci-build.sh" "$FLAVOR" "$VERSION" coverage
+else
+    bash "$SCRIPT_DIR/ci-build.sh" "$FLAVOR" "$VERSION" coverage
+fi
 
 # ci-build.sh resolves an empty VERSION to the current mainline; recover the
 # resolved value from the build tree it actually created rather than
@@ -73,6 +96,65 @@ touch -d @1541504307 ci/t/suite/test ci/t/suite/test.zst
 export TEST_NGINX_SERVROOT="$MODULE_DIR/ci/t/servroot-static"
 mkdir -p "$TEST_NGINX_SERVROOT"
 prove -v ci/t/01-static.t
+
+# The harness scenarios. These are the ONLY thing in this repo that reaches
+# the libzstd failure arms: a ZSTD_compressStream2() error cannot be provoked
+# from outside the process, so every ci/t/ test above walks the success path
+# and the error branches read as dead lines. Running them here folds those
+# branches into the same .gcda set the report is built from.
+#
+# Failure here is NOT fatal to the report. This script publishes a number and
+# is explicitly never a gate (see the header); a scenario that cannot boot on
+# some host should cost the run those lines and say so, not abort a coverage
+# report the rest of which is valid. The scenario suites themselves gate in
+# CI -- harness-fault-arms.yml on every PR, harness-memcheck monthly.
+if [ "$COVERAGE_HARNESS" = "1" ]; then
+    echo "== coverage: exercising the fault paths via ci/t/harness-scenarios =="
+    if [ ! -x "$MODULE_DIR/ci/t/harness/ci/prober/run-scenario.sh" ]; then
+        echo "WARNING: harness submodule not checked out" \
+             "(git submodule update --init ci/t/harness) --" \
+             "fault-path lines will report as uncovered" >&2
+    else
+        # Build the prober's own C tools if they are not there yet; the engine
+        # does not build them and a missing binary bails the scenario.
+        if [ ! -x "$MODULE_DIR/ci/t/harness/ci/prober/prober" ]; then
+            bash "$MODULE_DIR/ci/t/harness/ci/prober/build.sh" || true
+        fi
+
+        # VERSION may be empty (ci-build.sh resolves mainline itself), but
+        # run-scenario.sh needs a concrete flavor/version pair to recompute
+        # the same build path lib.sh will. Recover it from the tree that was
+        # actually built rather than re-resolving -- a second nginx.org scrape
+        # could race a release and disagree, which is the same reasoning the
+        # SRCDIR block above uses.
+        scen_version="${SRCDIR##*/}"          # e.g. nginx-1.31.4-coverage
+        scen_version="${scen_version%-coverage}"
+        scen_version="${scen_version#"$FLAVOR-"}"
+
+        for scen in fault-arms alloc-neutral; do
+            scen_dir="$MODULE_DIR/ci/t/harness-scenarios/$scen"
+            [ -d "$scen_dir" ] || continue
+            echo "-- scenario: $scen"
+            (
+                cd "$MODULE_DIR/ci/t/harness/ci/prober"
+                # PROBER_ALLOW_LOG exempts exactly the [alert] the module logs
+                # for a DELIBERATELY injected libzstd failure. Without it the
+                # prober's log scrape reds the run for the fault it was asked
+                # to inject. It cannot exempt a sanitizer/valgrind diagnostic
+                # (PROBER_SANITIZER_RE is never exemptable), so it does not
+                # weaken anything else.
+                PROBER_ROOT="$MODULE_DIR" \
+                PROBER_BUILD="$SRCDIR" \
+                PROBER_MODULE=ngx_http_zstd_filter_module.so \
+                PROBER_DIRECTIVE=zstd_probe \
+                PROBER_PROBE="zstd_probe;" \
+                PROBER_ALLOW_LOG='zstd: ZSTD_compressStream2\(\) failed' \
+                    ./run-scenario.sh "$scen_dir" "$FLAVOR" "$scen_version"
+            ) || echo "WARNING: scenario $scen did not pass;" \
+                      "its lines will be missing from the report" >&2
+        done
+    fi
+fi
 
 echo "== coverage: gcovr over src/ only =="
 REPORT_DIR="$MODULE_DIR/.build/coverage-report"

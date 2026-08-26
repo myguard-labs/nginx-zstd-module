@@ -1,13 +1,27 @@
 ---
 name: Harness Fault Arms
 
-# Runs the TEST_HARNESS-only fault-injection scenario at ci/t/harness-
-# scenarios/fault-arms against a purpose-built harness nginx tree. See
-# plan-testkit-integration.md Phase 4: this is the "real" gate for the
+# Runs the TEST_HARNESS-only harness scenarios against a purpose-built
+# harness nginx tree -- BOTH of them, sharing the one build:
+#
+#   ci/t/harness-scenarios/fault-arms      libzstd failure arms (CODEC,
+#                                          CODEC_END), injected via the probe
+#   ci/t/harness-scenarios/alloc-neutral   per-request allocation neutrality
+#                                          (cycle-pool + fd deltas)
+#
+# See plan-testkit-integration.md Phase 4: this is the "real" gate for the
 # codec fault-injection surface Phase 3 wired up -- the testkit-side
 # consumer-zstd scenario that exercises the SAME .so permanently SKIPs on
 # every CI leg (consumers/ is gitignored there), so this repo's own tree
-# is where these arms actually get exercised.
+# is where these arms actually get exercised. alloc-neutral is re-homed from
+# that same skipping upstream scenario for exactly the same reason: upstream
+# its own requires-gate says "a SKIP reads as a pass", and here the .so is
+# our own build product, so the oracle actually runs.
+#
+# The job NAME stays "Harness Fault Arms" even though it now runs two
+# scenarios: it is a check-name contract (ruleset 16557047 tracking, and the
+# Phase 5 promotion still to come), and renaming a check silently drops
+# whatever was tracking the old name.
 #
 # DELIBERATELY NOT A REQUIRED CHECK. master carries 13 required checks
 # already (ruleset 16557047); a brand-new required check that never reports
@@ -175,11 +189,62 @@ jobs:
             exit 1
           fi
 
+      - name: Run alloc-neutral scenario
+        env:
+          PROBER_ROOT: ${{ github.workspace }}
+          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
+          PROBER_MODULE: ngx_http_zstd_filter_module.so
+          PROBER_DIRECTIVE: zstd_probe
+          PROBER_PROBE: "zstd_probe;"
+          # No PROBER_ALLOW_LOG here, deliberately: this scenario injects no
+          # faults, so a [crit]/[alert] line during it is a real defect and
+          # must red the job. Exempting one would blind the run for the sake
+          # of symmetry with the step above.
+        run: |
+          set -euo pipefail
+          cd ci/t/harness/ci/prober
+          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/alloc-neutral" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/alloc-neutral-tap.log"
+
+          # Same belt-and-braces verdict re-derivation as the fault-arms step:
+          # TAP's "not ok" lines are the verdict, independent of exit status.
+          if grep -q '^not ok' "$GITHUB_WORKSPACE/alloc-neutral-tap.log"; then
+            echo "::error::alloc-neutral scenario reported at least one 'not ok' line"
+            exit 1
+          fi
+
+          # Non-vacuity: oracles 3-6 are the only ones measuring allocation
+          # neutrality. If every oracle SKIPped, the run banks a green having
+          # asserted nothing about the property in the scenario's own title.
+          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/alloc-neutral-tap.log" || true)
+          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/alloc-neutral-tap.log" || true)
+          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
+            echo "::error::every oracle in alloc-neutral SKIPped -- the" \
+              "scenario asserted nothing about per-request allocation" \
+              "neutrality; failing rather than banking a vacuous green"
+            exit 1
+          fi
+
+          # The allocation oracles specifically. Oracle 6 has a LEGITIMATE
+          # environmental skip (/proc/<master>/fd unreadable), but 3, 4 and 5
+          # do not -- they read the probe document, which this tree is gated
+          # to carry. If all three skipped, the delta surface went unmeasured
+          # while oracles 1, 2 and 7 (readiness, signature, health) still
+          # printed ok, which reads as a pass for a property nothing checked.
+          ALLOC_SKIPS=$(grep -cE '^ok [345] .*# SKIP' "$GITHUB_WORKSPACE/alloc-neutral-tap.log" || true)
+          if [ "$ALLOC_SKIPS" -eq 3 ]; then
+            echo "::error::oracles 3-5 (cycle_used, cycle_blocks/large," \
+              "worker fds) all SKIPped -- no allocation delta was measured"
+            exit 1
+          fi
+
       - name: Upload TAP log
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: fault-arms-tap-log
-          path: fault-arms-tap.log
+          name: harness-scenario-tap-logs
+          path: |
+            fault-arms-tap.log
+            alloc-neutral-tap.log
           retention-days: 14
           if-no-files-found: ignore

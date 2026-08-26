@@ -14,7 +14,8 @@ name: CI Deep
 # hours the fuzz and helgrind legs need.
 #
 # Jobs: build-flavors (nginx mainline/stable + angie) · fuzz (14400s/target) ·
-#   memcheck soak · helgrind soak · scanners · coverage (src/).
+#   memcheck soak · harness-memcheck (fault-injection scenarios under
+#   memcheck) · helgrind soak · scanners · coverage (src/).
 #   * memcheck AND helgrind run under ci/tools/soak.sh, which already passes
 #     --suppressions=valgrind.suppress and --error-exitcode=99 for BOTH tools
 #     (see ci/tools/soak.sh) — the drift-fix baseline for every module.
@@ -443,6 +444,192 @@ jobs:
             "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
             -d "$payload" || true
 
+  harness-memcheck:
+    name: Valgrind Memcheck (harness scenarios)
+    # Runs the TEST_HARNESS scenarios -- fault-arms and alloc-neutral -- with
+    # the whole nginx under valgrind memcheck. This is the ONLY oracle in the
+    # suite that can see a leak on a libzstd ERROR path:
+    #
+    #   * the ASan legs run detect_leaks=0 (the testkit forces it in
+    #     prober_heap_env, because nginx never frees its configuration pool),
+    #     so LSan reports nothing at all there;
+    #   * LSan-at-exit in general is structurally blind to a chain link leaked
+    #     into r->pool, because nginx frees the request pool on teardown;
+    #   * the PR-lane memcheck soak (valgrind.yml) drives only HAPPY-PATH
+    #     traffic -- no fault is ever armed, so the error paths it would need
+    #     to walk are never entered.
+    #
+    # Arming a codec fault under memcheck is what closes that gap. Kept in
+    # ci-deep (monthly) rather than the PR lane because memcheck runs the
+    # worker 20-50x slower; this matches the testkit README's own guidance
+    # that whole-server memcheck is a scheduled job, not a PR gate.
+    if: ${{ contains(fromJSON('["all","memcheck+coverage"]'), inputs.jobs || 'all') }}
+    runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
+    timeout-minutes: 240
+    steps:
+      - name: Checkout module (with harness submodule)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          # builder02 apt profile: loose timeouts — the box runs jobs
+          # concurrently and never talks to the Azure mirror (PR #121)
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libzstd-dev pkg-config \
+            valgrind wget zlib1g-dev zstd
+      - name: Build harness nginx tree
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" 1.31.4
+          cd "$GITHUB_WORKSPACE/nginx-1.31.4"
+          # Same spelling as harness-fault-arms.yml's build step, deliberately:
+          # BOTH switches, set on the configure invocation itself. TEST_HARNESS=1
+          # alone compiles the probe sources and still yields a probe-free .so
+          # -- measured in this repo (packaged=0 probe symbols, TEST_HARNESS=1
+          # alone=0, both=18) -- and the symbol gate below is what stops that
+          # trap returning silently.
+          #
+          # ${CFLAGS:-}, never a bare $CFLAGS: this step runs under
+          # `set -euo pipefail` and CFLAGS is unset on a clean runner, which
+          # killed this job's sibling the first time the pattern shipped
+          # (red run 32908007375).
+          #
+          # -O0 -g3 because every frame here is read by memcheck; an optimised
+          # build reports inlined frames that do not map back to source lines.
+          TEST_HARNESS=1 \
+          CFLAGS="${CFLAGS:-} -DNGX_TEST_HARNESS" \
+          ./configure \
+            --with-compat --with-debug \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY -g3 -O0 -fno-omit-frame-pointer $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-dynamic-module="$GITHUB_WORKSPACE"
+          # Plain `make`, NOT `make modules`: valgrind runs the SERVER, so this
+          # job needs objs/nginx itself, which `make modules` does not build.
+          make -j"$(nproc)"
+      - name: "Gate: the built .so must carry probe symbols"
+        run: |
+          set -euo pipefail
+          SO="$GITHUB_WORKSPACE/nginx-1.31.4/objs/ngx_http_zstd_filter_module.so"
+          COUNT=$(nm "$SO" | grep -c ' ngx_test_probe_' || true)
+          echo "ngx_test_probe_* symbols: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::built .so carries zero ngx_test_probe_* symbols" \
+              "-- the harness switches did not take effect, so no fault could" \
+              "be armed and this whole job would pass by testing nothing"
+            exit 1
+          fi
+      - name: Build harness C tools (prober, fakesrv, etc.)
+        run: bash ci/t/harness/ci/prober/build.sh
+      - name: Memcheck the harness scenarios (faults armed)
+        env:
+          PROBER_ROOT: ${{ github.workspace }}
+          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
+          PROBER_MODULE: ngx_http_zstd_filter_module.so
+          PROBER_DIRECTIVE: zstd_probe
+          PROBER_PROBE: "zstd_probe;"
+          # memcheck runs the worker 20-50x slower; without this the prober's
+          # own read/boot/delta-settle budgets expire for HARNESS reasons and
+          # the run reads as a false hang. 40 is the testkit's own default in
+          # valgrind-scenarios.sh.
+          PROBER_TIMEOUT_SCALE: "40"
+        run: |
+          set -euo pipefail
+          cd ci/t/harness/ci/prober
+
+          # NO --track-fds=all, deliberately, and this is load-bearing.
+          # On nginx that flag ALWAYS reports the descriptors still open at
+          # exit -- error.log, access.log, the stderr dup, the listening
+          # AF_INET socket and the AF_UNIX master/worker channel -- none of
+          # which are leaks. prober_scrape_valgrind greps
+          # `ERROR SUMMARY: [1-9]`, so those reports make the gate red on
+          # every run regardless of module quality. Measured on this repo
+          # (nginx 1.31.4): alloc-neutral with zero faults armed, all 7
+          # oracles ok and `definitely lost: 0`, still exited 1 with
+          # "ERROR SUMMARY: 9 errors" whose every context was an open-fd
+          # heading; the identical command minus --track-fds=all exits 0.
+          # The testkit's own ci/prober/pr-memcheck already omits the flag for
+          # the same class of reason (inherited fds in forked children).
+          # Consequence to be honest about: the fd-leak class is NOT covered
+          # by this job. Worker/master fd counts are covered instead by
+          # alloc-neutral's oracles 5 and 6, which compare deltas rather than
+          # absolute open-at-exit state.
+          VG="valgrind --error-exitcode=99 --leak-check=full"
+          VG="$VG --errors-for-leak-kinds=definite --track-origins=yes"
+          VG="$VG --suppressions=$PWD/valgrind.supp"
+          export PROBER_VALGRIND="$VG"
+
+          rc=0
+
+          # fault-arms: the error paths. PROBER_ALLOW_LOG exempts the [alert]
+          # the module logs on a deliberately injected failure -- without it
+          # the log scrape reds the run for the fault it was asked to inject.
+          # It exempts ONE exact message and cannot exempt a sanitizer or
+          # valgrind diagnostic (PROBER_SANITIZER_RE is never exemptable).
+          PROBER_ALLOW_LOG='zstd: ZSTD_compressStream2\(\) failed' \
+            ./run-scenario.sh \
+              "$GITHUB_WORKSPACE/ci/t/harness-scenarios/fault-arms" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/vg-fault-arms.log" || rc=1
+
+          # alloc-neutral: no faults armed, so no log exemption either -- a
+          # [crit]/[alert] during it is a real defect and must red the job.
+          ./run-scenario.sh \
+            "$GITHUB_WORKSPACE/ci/t/harness-scenarios/alloc-neutral" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/vg-alloc-neutral.log" || rc=1
+
+          for log in "$GITHUB_WORKSPACE"/vg-fault-arms.log \
+                     "$GITHUB_WORKSPACE"/vg-alloc-neutral.log; do
+            if grep -q '^not ok' "$log"; then
+              echo "::error::$(basename "$log"): scenario reported a 'not ok' line"
+              rc=1
+            fi
+            # A scenario that armed nothing and asserted nothing still prints
+            # a plan and exits 0. Re-derive non-vacuity from the log itself.
+            TOTAL_OK=$(grep -c '^ok ' "$log" || true)
+            SKIPPED=$(grep -c '^ok .*# SKIP' "$log" || true)
+            if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
+              echo "::error::$(basename "$log"): every oracle SKIPped -- the" \
+                "run asserted nothing; failing rather than banking a green"
+              rc=1
+            fi
+          done
+
+          exit "$rc"
+      - name: Upload memcheck TAP logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: harness-memcheck-tap-logs
+          path: |
+            vg-fault-arms.log
+            vg-alloc-neutral.log
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: Notify Discord on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_BUILDS: ${{ secrets.DISCORD_CHANNEL_BUILDS }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_RUN_ID: ${{ github.run_id }}
+        run: |
+          [ -n "$DISCORD_BOT_TOKEN" ] || exit 0
+          msg="🔴 $GH_REPO — CI Deep / harness-memcheck FAILED. $GH_SERVER_URL/$GH_REPO/actions/runs/$GH_RUN_ID"
+          payload=$(python3 -c 'import json,sys; print(json.dumps({"content": sys.argv[1]}))' "$msg")
+          curl -fsS -X POST -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://discord.com/api/v10/channels/$DISCORD_CHANNEL_BUILDS/messages" \
+            -d "$payload" || true
+
   helgrind:
     name: Valgrind Helgrind soak
     if: ${{ (inputs.jobs || 'all') == 'all' }}
@@ -623,7 +810,11 @@ jobs:
     name: Coverage report (src/)
     if: ${{ contains(fromJSON('["all","memcheck+coverage"]'), inputs.jobs || 'all') }}
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
-    timeout-minutes: 30
+    # 30 -> 45: the coverage build now compiles the probe in and runs the two
+    # harness scenarios after the Test::Nginx suites. A job capped below its
+    # own workload can never pass, and the resulting "cancelled" reads as
+    # flakiness rather than as the cap it is.
+    timeout-minutes: 45
     env:
       # This job's own Test::Nginx port band -- see ci/tools/max-port.sh.
       # Distinct from build-flavors' 19300 (width 64) and build-test.yml's
@@ -638,6 +829,13 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
+          # coverage.sh runs the ci/t/harness-scenarios/* scenarios by default
+          # (COVERAGE_HARNESS=1) so the libzstd FAULT paths are counted rather
+          # than reported as dead lines -- no ci/t/ test can reach them, since
+          # libzstd cannot be made to fail from outside the process. Those
+          # scenarios need the harness submodule; without it coverage.sh warns
+          # and silently reports the smaller, pre-harness number.
+          submodules: recursive
       - name: Install dependencies
         run: |
           # builder02 apt profile: loose timeouts — the box runs jobs
