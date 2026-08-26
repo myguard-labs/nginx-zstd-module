@@ -4907,10 +4907,12 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     off_t                      fsize;
     size_t                     size;
     ngx_fd_t                   fd;
-    ngx_str_t                 *value, path, bytes;
+    ngx_str_t                 *value, path, bytes, hexstr;
     ngx_uint_t                 i, have_hash;
     u_char                     c, hi, lo;
     u_char                     hash[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN];
+    u_char                     supplied[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN];
+    u_char                     hex[2 * NGX_HTTP_ZSTD_SHA256_DIGEST_LEN];
     ngx_file_info_t            info;
     ngx_http_zstd_dcz_dict_t  *dict, *dicts;
     ngx_http_zstd_main_conf_t *zmcf;
@@ -4927,24 +4929,24 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     /*
      * Optional second argument: the dictionary's SHA-256 as 64 hex
-     * characters, trusted VERBATIM in place of hashing the file here —
-     * the win is skipping a full read-and-hash pass per dictionary at
-     * every config parse (nginx -t, every reload), which dominates
-     * parse time at hundreds of registered dictionaries. The deploy
-     * tooling that generates the directive list has typically just
-     * computed these hashes anyway (deduplication). The trade, and why
-     * the argument is opt-in: with a self-computed hash a file that
-     * changes on disk after clients stored it simply stops matching
-     * (safe fallback to plain zstd); a stale supplied hash instead
-     * keeps matching and the client decodes against the wrong
-     * dictionary. The frame's content checksum (see checksumFlag in
-     * init_cctx) makes that a visible decode error rather than silent
-     * wrong bytes — visible is still broken, so the generator owns
-     * hash correctness; content-hashed immutable assets are the
-     * intended use.
+     * characters, VERIFIED against the bytes actually read below —
+     * never substituted for hashing them. It is a declaration of what
+     * the operator believes the file to be, so a mismatch is a config
+     * error naming both values, not a silently accepted override.
      *
-     * Validated before the file is opened so a malformed literal is
-     * reported as such, not shadowed by file errors.
+     * It was previously trusted verbatim, skipping the read-and-hash
+     * pass. That made "zstd_dcz_dict_file new.dict <hash-of-old.dict>"
+     * compress with new.dict while advertising the old hash: the client
+     * holds the dictionary matching the advertised hash and cannot
+     * decode the body, so a stale or mistyped literal became silent
+     * undecodable dcz responses and the checksum gave false confidence.
+     * The parse-time saving was never worth an unverifiable negotiation
+     * key — the file has to be read into cf->pool regardless, so the
+     * only cost recovered here is the hash of bytes already in memory.
+     *
+     * The literal's SYNTAX is still validated before the file is opened
+     * so a malformed literal is reported as such, not shadowed by file
+     * errors; the value comparison necessarily waits for the read.
      */
     have_hash = (cf->args->nelts == 3);
 
@@ -4980,7 +4982,7 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 return NGX_CONF_ERROR;
             }
 
-            hash[i] = (u_char) ((hi << 4) | lo);
+            supplied[i] = (u_char) ((hi << 4) | lo);
         }
     }
 
@@ -5091,18 +5093,36 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    if (!have_hash) {
-        ngx_http_zstd_dcz_dict_hash(bytes.data, size, hash,
-                                    &zmcf->dcz_dicts_hashed);
+    /*
+     * Unconditional: the negotiation key is always the hash of the
+     * bytes this load actually read. See the have_hash note above.
+     */
+    ngx_http_zstd_dcz_dict_hash(bytes.data, size, hash,
+                                &zmcf->dcz_dicts_hashed);
+
+    if (have_hash
+        && ngx_memcmp(supplied, hash, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) != 0)
+    {
+        hexstr.data = hex;
+        hexstr.len = ngx_hex_dump(hex, hash,
+                                  NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) - hex;
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "dcz dictionary \"%V\" does not match the "
+                           "supplied hash \"%V\": the file's SHA-256 is "
+                           "\"%V\"",
+                           &path, &value[2], &hexstr);
+
+        return NGX_CONF_ERROR;
     }
 
     /*
      * Two entries with the same hash make the negotiation lookup
      * ambiguous (for computed hashes that means identical content under
      * two paths — almost certainly a config mistake, e.g. a copy that
-     * was meant to be a new version; supplied hashes are compared as
-     * declared). Fail loudly at load rather than silently matching the
-     * first.
+     * was meant to be a new version). Every hash here is computed from
+     * the file's own bytes, so this compares content, not declarations.
+     * Fail loudly at load rather than silently matching the first.
      */
     dicts = zlcf->dcz_dicts->elts;
 
