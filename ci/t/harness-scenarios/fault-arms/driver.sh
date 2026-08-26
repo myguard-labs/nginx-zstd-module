@@ -83,7 +83,7 @@ fetch() {
 # 6  disarming restores normal (uncorrupted) compression -- proves the
 #    fault state is per-arm, not sticky
 # 7  no worker died by signal across the whole run
-echo "1..7"
+echo "1..8"
 
 # --- 1: warm-up -----------------------------------------------------------
 WARMUP="$PROBER_PREFIX/warmup.out"
@@ -220,13 +220,56 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# --- 7: no signal-death across the run --------------------------------------
+# --- 7: terminal zero-output END emits a WRITER-LEGAL zero-size last_buf ----
+#
+# fault_codec_end=1001 is the FIRST end-of-frame call producing no output --
+# the arm oracle 4 deliberately avoids. The module must still emit the
+# zero-length last_buf (the suppression arm lets it through on purpose), and
+# nginx's writer only tolerates a zero-size buffer that ngx_buf_special()
+# accepts: `(flush||last_buf||sync) && !ngx_buf_in_memory(b) && !b->in_file`.
+# out_buf comes from ngx_create_temp_buf(), so `temporary` stays set and
+# ngx_buf_in_memory() stays true even when the buffer is fully drained. That
+# made ngx_http_write_filter log "zero size buf in writer" and abort the
+# response mid-stream.
+#
+# The assertion is on the ALERT and the transfer, NOT on frame validity: this
+# arm suppresses the real terminal call, so the body legitimately is not a
+# complete zstd frame. Asserting `zstd -d` here would be asserting that an
+# injected fault did not happen. What must hold is that the fault degrades the
+# BODY without provoking a writer-level abort or a worker alert.
+#
+# Non-vacuity: the alert grep is scoped to lines logged after this point in
+# the run, and the fetch must genuinely reach the module -- an arm that never
+# fired would leave a full decodable frame, which the size check below rejects.
+END_ZERO1_OUT="$PROBER_PREFIX/codec-end-zero1.out"
+ELOG_MARK_7="$(wc -l < "$ELOG")"
+ARM7_OK=0
+if arm codec_end 1001 && fetch /body.bin "$END_ZERO1_OUT"; then
+    ARM7_OK=1
+fi
+ZEROBUF_7=0
+if [ "$(tail -n +$((ELOG_MARK_7 + 1)) "$ELOG" | grep -c 'zero size buf in writer' || true)" -gt 0 ]; then
+    ZEROBUF_7=1
+fi
+if [ "$ARM7_OK" -eq 1 ] \
+    && [ "$ZEROBUF_7" -eq 0 ] \
+    && grep -q '^HTTP/1.1 200' "$END_ZERO1_OUT.hdrs" 2>/dev/null
+then
+    echo "ok 7 - CODEC_END ZERO on the FIRST end call emitted a writer-legal zero-size last_buf (no \"zero size buf in writer\", no aborted transfer)"
+else
+    echo "not ok 7 - first-call CODEC_END ZERO tripped the writer or aborted the response"
+    tail -n +$((ELOG_MARK_7 + 1)) "$ELOG" | grep -n 'zero size buf in writer' | sed 's/^/# /'
+    FAILED=$((FAILED + 1))
+fi
+disarm codec_end || true
+
+# --- 8: no signal-death across the run --------------------------------------
 if grep -qE 'worker process .* exited on signal|SIGSEGV|SIGABRT|SIGBUS' "$ELOG"; then
-    echo "not ok 7 - a worker died by signal during fault injection"
+    echo "not ok 8 - a worker died by signal during fault injection"
     grep -nE 'exited on signal|SIGSEGV|SIGABRT|SIGBUS' "$ELOG" | sed 's/^/# /'
     FAILED=$((FAILED + 1))
 else
-    echo "ok 7 - no worker died by signal across the whole fault-injection run"
+    echo "ok 8 - no worker died by signal across the whole fault-injection run"
 fi
 
 if [ "$FAILED" -gt 0 ]; then

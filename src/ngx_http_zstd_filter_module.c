@@ -2429,6 +2429,32 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->flush = 0;
     }
 
+    /*
+     * A terminal frame that produced no output bytes (everything drained on a
+     * prior iteration) still has to emit the zero-length last_buf -- that is
+     * what the suppression arm above deliberately lets through. But the writer
+     * only tolerates a zero-size buffer when ngx_buf_special() accepts it, and
+     * that macro requires !ngx_buf_in_memory(b) && !b->in_file. out_buf comes
+     * from ngx_create_temp_buf(), so `temporary` is set and start/end point at
+     * a real allocation: ngx_buf_in_memory() stays true even once the buffer is
+     * fully drained, the special test fails, and ngx_http_write_filter logs
+     * "zero size buf in writer" and aborts the response mid-stream.
+     *
+     * Clearing `temporary` on an empty buffer is exactly what nginx's own gzip
+     * filter does for this case (ngx_http_gzip_filter_module.c, in its
+     * deflateEnd path). `recycled` goes with it: a zero-size buffer has nothing
+     * to reclaim, and leaving the flag set on a buffer the writer treats as
+     * special only invites ngx_chain_update_chains() to reason about a buffer
+     * that no longer describes memory.
+     *
+     * Only the size-0 case is touched, so a normal terminal buffer carrying
+     * bytes keeps both flags and its ordinary in-memory identity.
+     */
+    if (ngx_buf_size(b) == 0) {
+        b->temporary = 0;
+        b->recycled = 0;
+    }
+
     ctx->bytes_out += ngx_buf_size(b);
 
     cl->next = NULL;
