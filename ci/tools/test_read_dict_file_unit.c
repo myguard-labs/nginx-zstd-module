@@ -49,6 +49,15 @@ typedef struct { int unused; } ngx_conf_t;
 #define NGX_LOG_EMERG 2
 
 /*
+ * The extracted function guards its EINTR retry with #if !(NGX_WIN32).
+ * Define it to 0 explicitly: an undefined macro already evaluates to 0
+ * in #if, so this changes nothing, but it makes the POSIX build the
+ * stated intent rather than a side effect of the macro being absent --
+ * and it is the branch the EINTR assertion below exercises.
+ */
+#define NGX_WIN32 0
+
+/*
  * Diagnostics are counted, not printed: the assertions below care that
  * the failing paths REPORT (exactly once, on the right exit), not about
  * the wording. Variadic and ignoring its arguments so any format string

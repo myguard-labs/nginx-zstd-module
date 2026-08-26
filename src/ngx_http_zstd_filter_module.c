@@ -3519,15 +3519,24 @@ ngx_http_zstd_read_dict_file(ngx_conf_t *cf, ngx_fd_t fd, ngx_str_t *path,
 
         if (n < 0) {
 
+#if !(NGX_WIN32)
             /*
              * Interrupted before transferring anything: not an error,
-             * reissue. ngx_errno is the errno of the failed call, read
-             * immediately so nothing between here and the test can
-             * clobber it.
+             * reissue. ngx_errno is read immediately so nothing between
+             * here and the test can clobber it.
+             *
+             * POSIX only, and NGX_WIN32 rather than a "does NGX_EINTR
+             * exist" test because that is the actual reason: win32's
+             * ngx_errno.h defines no NGX_EINTR at all, because ReadFile()
+             * on a synchronous handle is not interruptible -- there is no
+             * such error to retry. Guarding on the platform says so;
+             * guarding on the macro would read as a portability
+             * workaround for a value that is merely spelled differently.
              */
             if (ngx_errno == NGX_EINTR) {
                 continue;
             }
+#endif
 
             ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                                ngx_read_fd_n " \"%V\" failed", path);
