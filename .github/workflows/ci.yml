@@ -1,9 +1,27 @@
 ---
 name: CI
 
-# The single pull_request entry point. Every gate that runs on a PR is reached
-# through this file and nowhere else, so "what does a PR run?" is answered by
-# reading one job list rather than by grepping eight trigger blocks.
+# The single gate entry point. Every gate that runs on a PR is reached through
+# this file and nowhere else, so "what does a PR run?" is answered by reading
+# one job list rather than by grepping eight trigger blocks.
+#
+# It also runs on push: master, i.e. once per merge. That leg is NOT a
+# duplicate of the PR leg -- it is the only thing that produces a master-branch
+# result for these jobs at all. Before it existed, `gh run list --branch master`
+# showed only the weekly build-test.yml/bump.yml schedule runs plus stale push
+# runs from a windows-build.yml trigger since removed; no merge commit ever got
+# a CI result on master. That is the classic PR-only-CI-goes-stale-on-master
+# shape: the default branch can be broken by a merge (semantic conflict between
+# two independently-green PRs, or a runner toolchain upgrade) and nothing
+# reports it until the next innocent PR goes red and gets the blame.
+#
+# The concrete consumer is plan-testkit-integration.md Phase 5, which gates
+# promoting "Harness Fault Arms" to a required check on ">=1 week green on
+# master". That gate was unsatisfiable while nothing ran the job on master --
+# it was waiting on a signal no trigger produced. This leg produces it.
+#
+# Cost is one gate run per merge, and concurrency: below is keyed on
+# github.ref, so the master leg has its own group and never cancels a PR leg.
 #
 # Members keep their own workflow_dispatch: so each can still be run alone from
 # the Actions tab, and build-test.yml and codeql.yml keep their schedule: for
@@ -61,6 +79,8 @@ name: CI
 on:
   pull_request:
     branches: [master, main]
+  push:
+    branches: [master]
   workflow_dispatch: {}
 
 concurrency:
