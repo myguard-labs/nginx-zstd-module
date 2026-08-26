@@ -3440,26 +3440,39 @@ ngx_http_zstd_open_dict_strict(ngx_conf_t *cf, ngx_str_t *path, int flags)
         for (p = start; p < end && *p != '/'; p++) { /* void */ }
 
         /*
-         * The component must be NUL-terminated for openat(). path->data
-         * is nginx's own config-allocated copy and every component is
-         * followed either by '/' or by the string's own terminator, so
-         * the byte at *p is overwritten in place and restored below --
-         * no allocation on the config-load path.
+         * openat() needs a NUL-terminated component. The component is
+         * COPIED into a local buffer rather than NUL-terminated in place:
+         * path->data is nginx's own config string, and writing into it --
+         * even a byte restored immediately afterwards -- would mutate
+         * shared config memory that other directives and the error log
+         * still read. A component longer than the buffer cannot name a
+         * file any filesystem will accept, so it is refused rather than
+         * silently truncated (truncation would open a DIFFERENT name).
          */
         {
-            u_char  saved = *p;
+            u_char  comp[NGX_MAX_PATH];
+            size_t  complen = (size_t) (p - start);
             int     last;
+            u_char  *q;
 
-            *p = '\0';
+            if (complen >= sizeof(comp)) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "\"%V\" has a path component longer "
+                                   "than %uz bytes; refused by "
+                                   "\"zstd_dict_strict_path on\"",
+                                   path, sizeof(comp) - 1);
+                ngx_close_file(fd);
+                return NGX_INVALID_FILE;
+            }
+
+            ngx_memcpy(comp, start, complen);
+            comp[complen] = '\0';
 
             last = 1;
-            {
-                u_char  *q;
-                for (q = p; q < end; q++) {
-                    if (*q != '/' && *q != '\0') {
-                        last = 0;
-                        break;
-                    }
+            for (q = p; q < end; q++) {
+                if (*q != '/') {
+                    last = 0;
+                    break;
                 }
             }
 
@@ -3469,8 +3482,7 @@ ngx_http_zstd_open_dict_strict(ngx_conf_t *cf, ngx_str_t *path, int flags)
              * makes the walk's guarantee unstatable, and neither has a
              * legitimate place in a deployed dictionary path.
              */
-            if (ngx_strcmp(start, ".") == 0 || ngx_strcmp(start, "..") == 0) {
-                *p = saved;
+            if (ngx_strcmp(comp, ".") == 0 || ngx_strcmp(comp, "..") == 0) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                    "\"%V\" contains a \".\" or \"..\" "
                                    "component; refused by "
@@ -3491,26 +3503,10 @@ ngx_http_zstd_open_dict_strict(ngx_conf_t *cf, ngx_str_t *path, int flags)
             oflags |= O_CLOEXEC;
 #endif
 
-            next = openat(fd, (char *) start, oflags);
+            next = openat(fd, (char *) comp, oflags);
 
             if (next < 0) {
-                ngx_err_t  err = ngx_errno;
-
-                /*
-                 * Restore the separator BEFORE logging: "%V" prints
-                 * path->data by its own length, and the in-place NUL
-                 * would otherwise truncate the component boundary and
-                 * print "/srv/currentdict.bin" for "/srv/current/dict.bin".
-                 * "%s" on `start` is taken first, into its own copy of
-                 * the still-terminated component.
-                 */
-                u_char  comp[NGX_MAX_PATH];
-
-                ngx_cpystrn(comp, start, ngx_min((size_t) (p - start) + 1,
-                                                 sizeof(comp)));
-                *p = saved;
-
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, err,
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                                    "openat(\"%s\") failed while resolving "
                                    "\"%V\" under "
                                    "\"zstd_dict_strict_path on\" (a "
@@ -3523,7 +3519,6 @@ ngx_http_zstd_open_dict_strict(ngx_conf_t *cf, ngx_str_t *path, int flags)
                 return NGX_INVALID_FILE;
             }
 
-            *p = saved;
             ngx_close_file(fd);
             fd = next;
 
