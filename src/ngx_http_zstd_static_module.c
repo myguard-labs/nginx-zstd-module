@@ -657,7 +657,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * undecodable body — a confusing outage class that nginx's built-in
      * gzip_static also doesn't defend against. The probe is cheap (one
      * offset-explicit read of the frame-header prefix at offset 0 — 18
-     * bytes, or one aligned block under directio — via
+     * bytes, or a pair of aligned blocks under directio — via
      * ngx_http_zstd_static_pread(): pread(2) on POSIX, ngx_read_file()
      * on Win32, both of which take the offset as an argument and so
      * never move the open_file_cache's shared fd position. Using plain
@@ -688,12 +688,19 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      *
      * When the file was opened with O_DIRECT (of.is_directio, set by
      * ngx_open_cached_file when "directio <size>" is configured and the
-     * file meets the threshold), the read must be block-aligned, so the
-     * probe reads one block of max(NGX_HTTP_ZSTD_STATIC_DIO_PROBE,
-     * directio_alignment) bytes into an equally-aligned pool buffer —
-     * honoring the operator's declared geometry the same way the core
-     * copy filter does. The window check in particular must not be
-     * skipped under directio: oversized declared windows are a
+     * file meets the threshold), BOTH the read offset and the length
+     * must be block-aligned, so the probe rounds each frame offset down
+     * to max(NGX_HTTP_ZSTD_STATIC_DIO_PROBE, directio_alignment) and
+     * reads two such blocks into an equally-aligned pool buffer,
+     * parsing the frame at its offset inside them — honoring the
+     * operator's declared geometry the same way the core copy filter
+     * does. Rounding the OFFSET is what the skippable-frame walk needs:
+     * the second and later probes are at whatever offset the previous
+     * frame's declared length produced (40 for a canonical dcz prefix),
+     * which an O_DIRECT descriptor rejects with EINVAL if passed raw.
+     *
+     * The window check in particular must not be skipped under
+     * directio: oversized declared windows are a
      * systematic build-pipeline product, not rare corruption, and every
      * browser rejects them. If the aligned read STILL fails, the file
      * is DECLINED, not served: for a validation read, falling back to
