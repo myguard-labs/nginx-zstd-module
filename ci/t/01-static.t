@@ -1224,3 +1224,51 @@ bypass origin body
 --- error_log
 declares a 134217728-byte decompression window
 above the 8 MB limit browsers enforce for Content-Encoding: zstd
+
+
+
+=== TEST 46: a dcz-style skippable prefix on a directio file IS served
+# M1 regression. Under directio the probe buffer is aligned and the
+# first read at offset 0 succeeds, but the skippable walk then moves
+# `pos` to 40 (the canonical dcz SHA-256 prefix: 8-byte skippable
+# header + 32-byte payload) and the NEXT read used that offset raw. An
+# O_DIRECT descriptor rejects an unaligned file offset with EINVAL, so
+# the read returned -1, the probe took the "aligned probe ... returned
+# -1" branch and DECLINED — every request for a dcz-shaped .zst on a
+# directio location silently lost its precompressed variant (a 404 with
+# "zstd_static always" and no identity file). The fix rounds the read
+# offset down to the alignment and parses the frame at its offset
+# inside the block.
+#
+# Fail-first control (observed): reverting the alignment (reading at
+# `pos` instead of `base`) turns this into "! Content-Encoding" plus
+# the "returned -1" error line, so both the 200-with-zstd assertion and
+# the --- no_error_log [error] assertion go red.
+#
+# The .zst is padded past the "directio 512" threshold so the open
+# really is O_DIRECT; "aligned probe on directio file" is the positive
+# witness that is_directio was set for this request, so the block
+# cannot pass vacuously through the stack-read path on a filesystem
+# where O_DIRECT does not take.
+--- config
+    location /skip/ {
+        zstd_static on;
+        directio 512;
+        root html;
+    }
+--- user_files eval
+">>> skip/dioprefix.js\ndirectio prefix origin\n>>> skip/dioprefix.js.zst\n"
+. pack("C*", 0x50, 0x2A, 0x4D, 0x18, 0x20, 0x00, 0x00, 0x00)
+. ("\0" x 32)
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x19, 0x00, 0x00)
+. "hi\n"
+. ("\0" x 1024)
+--- request
+GET /skip/dioprefix.js
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- error_code: 200
+--- no_error_log
+[error]
