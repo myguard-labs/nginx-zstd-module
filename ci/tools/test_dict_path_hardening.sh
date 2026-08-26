@@ -29,11 +29,52 @@ set -euo pipefail
 NGINX="${1:?usage: test_dict_path_hardening.sh <nginx-binary> <module-dir>}"
 MODDIR="${2:?usage: test_dict_path_hardening.sh <nginx-binary> <module-dir>}"
 
+# Both arguments MUST be absolutized before anything else. Every fixture
+# below runs nginx with -p "$WORK" (a mktemp dir), and nginx resolves a
+# relative load_module path against that prefix -- so a caller passing
+# "nginx-1.31.4/objs" yields load_module /tmp/tmp.XXXX/nginx-1.31.4/objs/...
+# and dlopen() fails. The damage is not a plain red: every fixture that
+# EXPECTS a rejection still "passes", because the config was refused for
+# the wrong reason. Resolve here rather than trusting the caller.
+NGINX="$(readlink -f -- "$NGINX")"
+MODDIR="$(readlink -f -- "$MODDIR")"
+
+if [ ! -x "$NGINX" ]; then
+    echo "❌ $NGINX is not an executable nginx binary"
+    exit 1
+fi
+
 FILTER_MOD="$MODDIR/ngx_http_zstd_filter_module.so"
 if [ ! -f "$FILTER_MOD" ]; then
     echo "❌ $FILTER_MOD not found"
     exit 1
 fi
+
+# Non-vacuity gate for the whole matrix. A "rejected cleanly" fixture
+# only means something if the module loads at all in the baseline; a
+# dlopen failure would satisfy every negative fixture for free. Prove
+# the plain config loads BEFORE asserting anything about dictionaries.
+PRELUDE_WORK="$(mktemp -d)"
+mkdir -p "$PRELUDE_WORK/conf" "$PRELUDE_WORK/logs"
+cat >"$PRELUDE_WORK/conf/nginx.conf" <<EOF
+daemon off;
+master_process off;
+load_module $FILTER_MOD;
+error_log $PRELUDE_WORK/logs/error.log info;
+pid $PRELUDE_WORK/logs/nginx.pid;
+events { worker_connections 16; }
+http { access_log off; }
+EOF
+if ! timeout 10 "$NGINX" -t -p "$PRELUDE_WORK" \
+        -c "$PRELUDE_WORK/conf/nginx.conf" >"$PRELUDE_WORK/out" 2>&1; then
+    echo "❌ baseline config with $FILTER_MOD does not even load --"
+    echo "   every rejection fixture below would pass vacuously. Aborting."
+    cat "$PRELUDE_WORK/out"
+    rm -rf "$PRELUDE_WORK"
+    exit 1
+fi
+rm -rf "$PRELUDE_WORK"
+echo "✓ baseline: module loads, rejection fixtures are non-vacuous"
 
 WORK="$(mktemp -d)"
 cleanup() {
