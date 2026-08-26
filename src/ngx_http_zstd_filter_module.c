@@ -707,6 +707,8 @@ static char *ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_fd_t ngx_http_zstd_open_dict_file(ngx_conf_t *cf,
     ngx_str_t *path, ngx_flag_t strict, ngx_file_info_t *info);
+static ngx_int_t ngx_http_zstd_read_dict_file(ngx_conf_t *cf, ngx_fd_t fd,
+    ngx_str_t *path, u_char *buf, size_t size);
 static void ngx_http_zstd_collect_dcz_headers(ngx_http_request_t *r,
     ngx_table_elt_t **avail_dict_h, ngx_uint_t *avail_dict_count,
     ngx_table_elt_t **sec_fetch_site_h, ngx_uint_t *sec_fetch_site_count);
@@ -3439,9 +3441,116 @@ ngx_http_zstd_open_dict_file(ngx_conf_t *cf, ngx_str_t *path,
         }
     }
 
+    /*
+     * Clear O_NONBLOCK now that the target is confirmed regular.
+     *
+     * The flag exists only so the open() above cannot block the
+     * config-parsing master on a FIFO with no writer (see the FIFO
+     * discussion in this function's header); that job is done the
+     * moment fstat() + ngx_is_file() have accepted the target. Leaving
+     * it set on a regular fd invites the non-blocking-regular-file
+     * behaviour some filesystems have and ext4/xfs do not: on a 9p or
+     * drvfs mount a read() of a regular file can return a SHORT count.
+     * The read loop handles a short count correctly either way, so this
+     * is defence in depth rather than a correctness requirement --
+     * blocking reads simply return the whole file in fewer syscalls.
+     *
+     * fcntl() failure is ignored deliberately: the fd is valid and the
+     * flags are defined, there is no meaningful failure mode here, and
+     * refusing to load a perfectly good dictionary over a hardening
+     * detail would be the worse outcome.
+     */
+    {
+        int  fl = fcntl(fd, F_GETFL);
+
+        if (fl != -1) {
+            (void) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+        }
+    }
+
 #endif
 
     return fd;
+}
+
+
+/*
+ * Read exactly `size` bytes of a dictionary file into `buf`, or fail.
+ *
+ * Both dictionary loaders (zstd_dict_file and the dcz loader) previously
+ * issued ONE ngx_read_fd() and treated any short count as fatal. That is
+ * wrong twice over:
+ *
+ *   - read() on a regular file is permitted to return fewer bytes than
+ *     requested. It usually does not on a local ext4/xfs file, which is
+ *     why the single-read form survived, but it is not a guarantee the
+ *     kernel makes. A 9p/drvfs mount (a WSL /mnt/c dictionary, a Plan 9
+ *     export) returns a short count on a regular file as normal
+ *     behaviour, and a large enough dictionary then fails config load.
+ *   - EINTR. A signal delivered mid-read returns early with no bytes
+ *     lost and nothing wrong; the caller is expected to reissue. The
+ *     master is parsing configuration here, so it is squarely in a
+ *     window where signals arrive. This one is independent of the file
+ *     system AND of O_NONBLOCK -- clearing that flag (which the opener
+ *     does, and should) does not remove it.
+ *
+ * Loop until the buffer is full, treating a short count as "continue"
+ * rather than "fail", and reissue on EINTR. Two failures remain fatal
+ * and are reported distinctly, because they mean different things to an
+ * operator: a read error (the file became unreadable) and early EOF (the
+ * file shrank between fstat() and here, so the dictionary on disk is not
+ * the dictionary whose size we validated and allocated for). Neither may
+ * be silently tolerated -- a partially-populated buffer handed to
+ * ZSTD_createCDict() is a dictionary made partly of uninitialised heap.
+ *
+ * Callers have already validated `size` (non-zero, <= MAX_DICT_SIZE) and
+ * allocated `buf` for exactly that many bytes.
+ */
+static ngx_int_t
+ngx_http_zstd_read_dict_file(ngx_conf_t *cf, ngx_fd_t fd, ngx_str_t *path,
+    u_char *buf, size_t size)
+{
+    ssize_t  n;
+    size_t   done;
+
+    for (done = 0; done < size; /* void */) {
+
+        n = ngx_read_fd(fd, (void *) (buf + done), size - done);
+
+        if (n < 0) {
+
+            /*
+             * Interrupted before transferring anything: not an error,
+             * reissue. ngx_errno is the errno of the failed call, read
+             * immediately so nothing between here and the test can
+             * clobber it.
+             */
+            if (ngx_errno == NGX_EINTR) {
+                continue;
+            }
+
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                               ngx_read_fd_n " \"%V\" failed", path);
+            return NGX_ERROR;
+        }
+
+        if (n == 0) {
+            /*
+             * EOF with bytes still owed. The file is shorter than the
+             * fstat() that sized this buffer said it was -- it was
+             * truncated or replaced underneath us mid-load.
+             */
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "dictionary file \"%V\" ended after %uz of "
+                               "%uz bytes; it changed size during config "
+                               "load", path, done, size);
+            return NGX_ERROR;
+        }
+
+        done += (size_t) n;
+    }
+
+    return NGX_OK;
 }
 
 
@@ -3830,7 +3939,6 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_fd_t                    fd;
     off_t                       fsize;
     size_t                      size;
-    ssize_t                     n;
     char                       *rc;
     u_char                     *buf;
     ngx_file_info_t             info;
@@ -4093,21 +4201,11 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                     goto close;
                 }
 
-                n = ngx_read_fd(fd, (void *) buf, size);
-                if (n < 0) {
-                    ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                                       ngx_read_fd_n " %V\" failed",
-                                       &zmcf->dict_file);
-
-                    rc = NGX_CONF_ERROR;
-                    goto close;
-
-                } else if ((size_t) n != size) {
-                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                       ngx_read_fd_n " \"%V\" incomplete "
-                                       "read",
-                                       &zmcf->dict_file);
-
+                if (ngx_http_zstd_read_dict_file(cf, fd,
+                                                 &zmcf->dict_file,
+                                                 buf, size)
+                    != NGX_OK)
+                {
                     rc = NGX_CONF_ERROR;
                     goto close;
                 }
@@ -4773,7 +4871,6 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     off_t                      fsize;
     size_t                     size;
-    ssize_t                    n;
     ngx_fd_t                   fd;
     ngx_str_t                 *value, path, bytes;
     ngx_uint_t                 i, have_hash;
@@ -4947,15 +5044,9 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         goto failed;
     }
 
-    n = ngx_read_fd(fd, (void *) bytes.data, size);
-    if (n < 0) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                           ngx_read_fd_n " \"%V\" failed", &path);
-        goto failed;
-
-    } else if ((size_t) n != size) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           ngx_read_fd_n " \"%V\" incomplete read", &path);
+    if (ngx_http_zstd_read_dict_file(cf, fd, &path, bytes.data, size)
+        != NGX_OK)
+    {
         goto failed;
     }
 

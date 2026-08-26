@@ -243,6 +243,16 @@ jobs:
           # field the profile packer refuses to mask. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_dcz_window_log_unit.sh
 
+          # ngx_http_zstd_read_dict_file(): the shared read-to-completion
+          # loop both dictionary loaders use. Extracts the helper verbatim
+          # and drives it against a scripted ngx_read_fd stub, because the
+          # three behaviours that matter -- a short count is resumed, EINTR
+          # is retried without losing progress, and early EOF is fatal --
+          # are not reachable from a config-level fixture on a local
+          # filesystem (see the note in test_dict_path_hardening.sh).
+          # Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_read_dict_file_unit.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
@@ -954,6 +964,26 @@ jobs:
             exit 1
           fi
           echo "✓ loads clean with no gzip_vary anywhere in the config"
+
+      - name: Dictionary path hardening + read-completeness fixtures
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          # Fixture matrix over both dictionary loaders: non-regular
+          # inputs (FIFO/dir/socket/device) are refused without blocking
+          # the config-parsing master, zstd_dict_strict_path refuses a
+          # symlink and a group/world-writable target, a rejected reload
+          # leaves the old cycle serving, and the config-level half of
+          # the read contract (a large dictionary loads; empty and
+          # unreadable are refused). Every fixture is bounded by
+          # `timeout`, so a blocking-open regression fails the job
+          # instead of hanging it.
+          #
+          # This script existed but was wired into no workflow, so none
+          # of the above was actually being checked on any PR.
+          bash ci/tools/test_dict_path_hardening.sh \
+            "nginx-${NGINX_VERSION}/objs/nginx" \
+            "nginx-${NGINX_VERSION}/objs"
 
   # ── Interop against the REAL compression_vary module — the stub above
   #    proves name detection; this proves the semantic contract the
