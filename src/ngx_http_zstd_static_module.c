@@ -657,7 +657,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * undecodable body — a confusing outage class that nginx's built-in
      * gzip_static also doesn't defend against. The probe is cheap (one
      * offset-explicit read of the frame-header prefix at offset 0 — 18
-     * bytes, or one aligned block under directio — via
+     * bytes, or a pair of aligned blocks under directio — via
      * ngx_http_zstd_static_pread(): pread(2) on POSIX, ngx_read_file()
      * on Win32, both of which take the offset as an argument and so
      * never move the open_file_cache's shared fd position. Using plain
@@ -688,12 +688,19 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      *
      * When the file was opened with O_DIRECT (of.is_directio, set by
      * ngx_open_cached_file when "directio <size>" is configured and the
-     * file meets the threshold), the read must be block-aligned, so the
-     * probe reads one block of max(NGX_HTTP_ZSTD_STATIC_DIO_PROBE,
-     * directio_alignment) bytes into an equally-aligned pool buffer —
-     * honoring the operator's declared geometry the same way the core
-     * copy filter does. The window check in particular must not be
-     * skipped under directio: oversized declared windows are a
+     * file meets the threshold), BOTH the read offset and the length
+     * must be block-aligned, so the probe rounds each frame offset down
+     * to max(NGX_HTTP_ZSTD_STATIC_DIO_PROBE, directio_alignment) and
+     * reads two such blocks into an equally-aligned pool buffer,
+     * parsing the frame at its offset inside them — honoring the
+     * operator's declared geometry the same way the core copy filter
+     * does. Rounding the OFFSET is what the skippable-frame walk needs:
+     * the second and later probes are at whatever offset the previous
+     * frame's declared length produced (40 for a canonical dcz prefix),
+     * which an O_DIRECT descriptor rejects with EINVAL if passed raw.
+     *
+     * The window check in particular must not be skipped under
+     * directio: oversized declared windows are a
      * systematic build-pipeline product, not rare corruption, and every
      * browser rejects them. If the aligned read STILL fails, the file
      * is DECLINED, not served: for a validation read, falling back to
@@ -717,12 +724,12 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
          * that frame layout requires.
          */
         u_char       hdrbuf[18];
-        u_char      *hdr;
-        size_t       want;
+        u_char      *hdr, *frame;
+        size_t       want, align, frame_off, avail;
         ssize_t      n;
         uint64_t     window, skip;
         ngx_uint_t   frames;
-        off_t        pos;
+        off_t        pos, base;
 
         if (of.size < 4) {
             ngx_log_error(NGX_LOG_ERR, log, 0,
@@ -732,17 +739,32 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         }
 
         if (of.is_directio) {
-            want = NGX_HTTP_ZSTD_STATIC_DIO_PROBE;
-            if ((size_t) clcf->directio_alignment > want) {
-                want = (size_t) clcf->directio_alignment;
+            align = NGX_HTTP_ZSTD_STATIC_DIO_PROBE;
+            if ((size_t) clcf->directio_alignment > align) {
+                align = (size_t) clcf->directio_alignment;
             }
 
-            hdr = ngx_pmemalign(r->pool, want, want);
+            /*
+             * TWO blocks, not one. The probe offset is rounded down to
+             * `align` (an O_DIRECT descriptor rejects an unaligned file
+             * offset with EINVAL), so a frame header can start as late
+             * as `align - 1` bytes into the first block and would then
+             * straddle the boundary — parsing only one block would
+             * report that legitimate frame as truncated. A second block
+             * guarantees at least `align` (>= 4096) bytes behind any
+             * in-block start position, far more than the 18 a frame
+             * header can need. Both the length and the buffer stay
+             * `align`-aligned, which is what O_DIRECT requires.
+             */
+            want = align * 2;
+
+            hdr = ngx_pmemalign(r->pool, want, align);
             if (hdr == NULL) {
                 return NGX_HTTP_INTERNAL_SERVER_ERROR;
             }
 
         } else {
+            align = 0;
             hdr = hdrbuf;
             want = sizeof(hdrbuf);
         }
@@ -753,10 +775,20 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
          * Walk a bounded chain of leading skippable frames to reach the
          * first regular frame, so the window guard below cannot be
          * dodged by prepending one (see NGX_HTTP_ZSTD_STATIC_FRAME_SKIP
-         * and NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES). Each iteration
-         * pread()s at the current offset, exactly like the original
-         * single-shot probe did at offset 0; only the offset and the
-         * loop are new.
+         * and NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES).
+         *
+         * Each iteration reads at the current offset. Under directio
+         * the O_DIRECT descriptor rejects an unaligned file offset with
+         * EINVAL, and `pos` after a leading skippable frame is whatever
+         * that frame's length made it (40 for the canonical dcz
+         * SHA-256 prefix) — almost never a multiple of the block size.
+         * So the read offset is rounded DOWN to the alignment and the
+         * frame is parsed at its offset inside the block: `base` is the
+         * aligned read offset, `frame_off` the distance from there to
+         * `pos`, and `avail` the bytes of that block that actually lie
+         * at or after `pos`. Off the directio path `base == pos`,
+         * `frame_off == 0` and this is byte-for-byte the previous
+         * behaviour.
          */
         for (frames = 0; ; frames++) {
 
@@ -772,16 +804,37 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                 return NGX_DECLINED;
             }
 
-            n = ngx_http_zstd_static_pread(of.fd, hdr, want, pos, log,
+            if (of.is_directio) {
+                frame_off = (size_t) ((uint64_t) pos % (uint64_t) align);
+                base = pos - (off_t) frame_off;
+
+            } else {
+                frame_off = 0;
+                base = pos;
+            }
+
+            n = ngx_http_zstd_static_pread(of.fd, hdr, want, base, log,
                                            &path);
-            if (n < 4) {
+
+            /*
+             * Bytes of the block that lie at or after `pos`. A short
+             * read that stopped inside the prefix leaves nothing for
+             * the frame, which is the same "too few bytes" condition as
+             * a short read at offset 0 and takes the same branch.
+             */
+            avail = ((size_t) (n > 0 ? n : 0) > frame_off)
+                        ? (size_t) n - frame_off : 0;
+
+            frame = hdr + frame_off;
+
+            if (n < 0 || avail < 4) {
                 if (of.is_directio) {
                     ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
                                   "zstd static: %uz-byte aligned probe on "
                                   "directio file \"%s\" returned %z — "
                                   "declining; check directio_alignment "
                                   "against the device geometry",
-                                  want, path.data, n);
+                                  align, path.data, n);
                     return NGX_DECLINED;
                 }
 
@@ -803,11 +856,10 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
             if (of.is_directio) {
                 ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
                                "zstd static: %uz-byte aligned probe on "
-                               "directio file \"%s\"", want, path.data);
+                               "directio file \"%s\"", align, path.data);
             }
 
-            switch (ngx_http_zstd_static_probe_frame(hdr, (size_t) n,
-                                                      &window))
+            switch (ngx_http_zstd_static_probe_frame(frame, avail, &window))
             {
 
             case NGX_HTTP_ZSTD_STATIC_FRAME_NOT_ZSTD:
@@ -815,8 +867,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                               "zstd static: \"%s\" is not a zstd frame "
                               "(leading bytes 0x%02xd%02xd%02xd%02xd)",
                               path.data,
-                              (ngx_uint_t) hdr[0], (ngx_uint_t) hdr[1],
-                              (ngx_uint_t) hdr[2], (ngx_uint_t) hdr[3]);
+                              (ngx_uint_t) frame[0], (ngx_uint_t) frame[1],
+                              (ngx_uint_t) frame[2], (ngx_uint_t) frame[3]);
                 return NGX_DECLINED;
 
             case NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED:

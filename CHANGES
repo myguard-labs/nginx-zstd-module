@@ -32,6 +32,29 @@ Changes with http-zstd
        POSIX.1-2008 openat() (including Windows) strict mode now fails
        closed at config load rather than degrading silently to the
        leaf-only guarantee.
+    *) Bugfix: the optional SHA-256 argument to "zstd_dcz_dict_file" was
+       trusted verbatim as the dcz negotiation key and never checked
+       against the dictionary it named. The load-time hashing pass was
+       skipped entirely when the argument was present, so
+       "zstd_dcz_dict_file new.dict <sha256-of-old.dict>" compressed
+       against new.dict while advertising the old dictionary's hash;
+       every client that had stored the old dictionary matched the
+       advertisement, received a frame built from a dictionary it did
+       not hold, and could not decode the body. A stale or mistyped but
+       syntactically valid literal was accepted silently, and the
+       checksum in the directive gave false confidence that the pair
+       had been validated.
+
+       The dictionary is now always hashed from the bytes actually
+       read, and that hash is always the negotiation key. A supplied
+       literal is compared against it and a mismatch aborts config load
+       with an error naming the file, the supplied hash and the
+       computed one, so "nginx -t" catches the desynchronization before
+       any client sees it. The argument keeps its syntax and its
+       meaning as a deploy-time assertion; only the unverified fast
+       path is gone. Configurations whose literal matches the file are
+       unaffected, and "$zstd_dcz_dicts_hashed" now counts every loaded
+       dictionary rather than only those without a literal.
 
     *) Bugfix: a dcz (RFC 9842) request escaped "zstd_max_cctx_memory"
        and contaminated a worker CCtx ring slot. A dcz response does not
