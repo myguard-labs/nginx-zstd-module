@@ -241,6 +241,12 @@ pid logs/nginx.pid;
 events {{ }}
 http {{
     access_log off;
+    # $zstd_bytes_out / $zstd_ratio are log-phase variables (only valid
+    # once the filter has finished writing the response); this format
+    # exists so the dcz byte-accounting oracle below can read the
+    # module's own count of bytes it queued downstream and cross-check
+    # it against the bytes actually received over the socket.
+    log_format zstd_bytes_fmt "$zstd_bytes_out $zstd_ratio";
     types {{ application/javascript js; }}
     default_type application/octet-stream;
     gzip_vary on;
@@ -257,6 +263,7 @@ http {{
         listen 127.0.0.1:{port};
         zstd_dcz_assume_secure_transport on;
         root html;
+        access_log logs/zstd_bytes.log zstd_bytes_fmt;
     }}
 
 {tls_server}
@@ -304,6 +311,27 @@ def content_encoding(headers) -> str:
 
 def vary_values(headers) -> str:
     return ",".join(headers.get_all("Vary") or []).lower()
+
+
+def read_last_log_line(path: pathlib.Path, timeout: float = 10.0) -> str:
+    """Poll for the access log line the most recent request just wrote.
+
+    $zstd_bytes_out / $zstd_ratio are log-phase variables: nginx writes
+    the access_log line only after the response is fully sent, which can
+    race a fast local request. Poll instead of reading once, mirroring
+    test_encoding.py's validate_ratio_log.
+    """
+    deadline = time.time() + timeout
+    line = ""
+    while time.time() < deadline:
+        if path.exists():
+            content = path.read_text(encoding="utf-8", errors="replace")
+            lines = [l for l in content.splitlines() if l.strip()]
+            if lines:
+                line = lines[-1]
+                break
+        time.sleep(0.05)
+    return line
 
 
 def decode_dcz(
@@ -540,6 +568,52 @@ def main() -> int:
                 len(dcz_body) < len(plain_body),
                 f"(dcz {len(dcz_body)} vs zstd {len(plain_body)})",
             )
+
+            # -- $zstd_bytes_out / $zstd_ratio byte-accounting oracle.
+            #
+            # Regression for the 40-byte dcz prefix being counted twice:
+            # ngx_http_zstd_filter_get_buf() advances out_buf->last past
+            # the 40-byte skippable-frame prefix AND used to separately
+            # add 40 to ctx->bytes_out, while the emit path in
+            # ngx_http_zstd_filter_compress() already counts the whole
+            # buffer (prefix included) via ngx_buf_size(). Ground truth
+            # is len(dcz_body): the exact bytes this request put on the
+            # wire, already captured above. $zstd_bytes_out must equal it
+            # exactly -- not "close", not "within 40" -- and $zstd_ratio
+            # (bytes_in*1000/bytes_out, truncated to 3 decimals) must be
+            # derivable from that same bytes_out.
+            bytes_log_line = read_last_log_line(root / "logs" / "zstd_bytes.log")
+            check(
+                "$zstd_bytes_out / $zstd_ratio access_log line was written",
+                bool(bytes_log_line),
+                f"(zstd_bytes.log: {bytes_log_line!r})",
+            )
+            if bytes_log_line:
+                logged_bytes_out_str, logged_ratio_str = bytes_log_line.split(" ", 1)
+                logged_bytes_out = int(logged_bytes_out_str)
+                check(
+                    "$zstd_bytes_out equals the actual dcz response byte "
+                    "length (prefix counted exactly once)",
+                    logged_bytes_out == len(dcz_body),
+                    f"(zstd_bytes_out={logged_bytes_out}, wire body={len(dcz_body)})",
+                )
+
+                # Ground truth is len(dcz_body), NOT logged_bytes_out: the
+                # ratio must match the ACTUAL wire bytes. Deriving the
+                # expectation from logged_bytes_out instead would make
+                # this check vacuous under the exact bug this test guards
+                # against (bytes_out inflated by 40 would inflate the
+                # expectation the same way and the two would always
+                # agree, however wrong bytes_out is).
+                bytes_in = len(resource)
+                scaled = bytes_in * 1000 // len(dcz_body)
+                expected_ratio = f"{scaled // 1000}.{scaled % 1000:03d}"
+                check(
+                    "$zstd_ratio matches bytes_in*1000/bytes_out computed "
+                    "from the actual wire byte count",
+                    logged_ratio_str == expected_ratio,
+                    f"(logged {logged_ratio_str!r}, expected {expected_ratio!r})",
+                )
 
             # -- content checksum (defence in depth): the inner zstd frame
             # starts right after the 40-byte dcz header, so byte 44 is its

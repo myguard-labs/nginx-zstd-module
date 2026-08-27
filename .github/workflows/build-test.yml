@@ -16,6 +16,18 @@ env:
   # the current mainline release and feeds it via needs.resolve.outputs.*; per-
   # job env: blocks below override this placeholder with the resolved value.
   NGINX_VERSION: ""
+  # Single source of truth for every `cpanm ... Test::Nginx::Socket` call
+  # site in this file (keep in sync with ci-deep.yml's own copy). An
+  # unpinned `cpanm Test::Nginx::Socket` resolves to whatever CPAN serves
+  # at run time -- a cold runner can silently change test behaviour with
+  # no repository diff, and a warm cache can retain a different historical
+  # release, so two runners can disagree with nothing in git explaining
+  # it. Pinned to 0.32 because that is what every install site already
+  # resolved to as of this pin (verified against a recent successful CI
+  # run's "Install Test::Nginx::Socket" log: "Test::Nginx::Socket is up to
+  # date. (0.32)"), which is also CPAN's current latest release -- this
+  # pin is a no-op in behaviour, not a dependency bump.
+  TEST_NGINX_SOCKET_VERSION: "0.32"
   # The `resolve` job scrapes nginx.org for the current mainline release at run
   # time and feeds it to every job via `needs.resolve.outputs.nginx_version`
   # (and the build matrix JSON). This makes the weekly cron actually test the
@@ -1388,12 +1400,23 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/perl5
-          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket-${{ env.TEST_NGINX_SOCKET_VERSION }}
 
       - name: Install Test::Nginx::Socket
         run: |
-          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          cpanm -l ~/perl5 --notest "Test::Nginx::Socket@${TEST_NGINX_SOCKET_VERSION}"
           echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+          # Assert the pinned version regardless of whether this came from
+          # a fresh cpanm install or a warm ~/perl5 cache restore -- a
+          # cache-key mismatch (or any other drift) must fail loudly here,
+          # before the test suite runs, rather than as a confusing test
+          # failure downstream.
+          installed="$(perl -I "$HOME/perl5/lib/perl5" -MTest::Nginx::Socket -e 'print $Test::Nginx::Socket::VERSION')"
+          echo "Test::Nginx::Socket installed version: $installed"
+          if [ "$installed" != "$TEST_NGINX_SOCKET_VERSION" ]; then
+            echo "::error::Test::Nginx::Socket version mismatch: pinned $TEST_NGINX_SOCKET_VERSION, got $installed"
+            exit 1
+          fi
 
       - name: Run filter module tests
         env:
@@ -1780,12 +1803,18 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/perl5
-          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket-${{ env.TEST_NGINX_SOCKET_VERSION }}
 
       - name: Install Test::Nginx::Socket
         run: |
-          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          cpanm -l ~/perl5 --notest "Test::Nginx::Socket@${TEST_NGINX_SOCKET_VERSION}"
           echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+          installed="$(perl -I "$HOME/perl5/lib/perl5" -MTest::Nginx::Socket -e 'print $Test::Nginx::Socket::VERSION')"
+          echo "Test::Nginx::Socket installed version: $installed"
+          if [ "$installed" != "$TEST_NGINX_SOCKET_VERSION" ]; then
+            echo "::error::Test::Nginx::Socket version mismatch: pinned $TEST_NGINX_SOCKET_VERSION, got $installed"
+            exit 1
+          fi
 
       - name: Run Perl suites under ASAN+UBSAN
         # Put the static-file / magic-probe / conditional / HEAD paths (covered
@@ -2054,8 +2083,14 @@ jobs:
 
       - name: Install Test::Nginx::Socket
         run: |
-          cpanm -l ~/perl5 --notest Test::Nginx::Socket
+          cpanm -l ~/perl5 --notest "Test::Nginx::Socket@${TEST_NGINX_SOCKET_VERSION}"
           echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
+          installed="$(perl -I "$HOME/perl5/lib/perl5" -MTest::Nginx::Socket -e 'print $Test::Nginx::Socket::VERSION')"
+          echo "Test::Nginx::Socket installed version: $installed"
+          if [ "$installed" != "$TEST_NGINX_SOCKET_VERSION" ]; then
+            echo "::error::Test::Nginx::Socket version mismatch: pinned $TEST_NGINX_SOCKET_VERSION, got $installed"
+            exit 1
+          fi
 
       - name: Verify test port band
         # Before the first `prove` -- see ci/tools/max-port.sh.

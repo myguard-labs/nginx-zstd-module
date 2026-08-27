@@ -2900,7 +2900,17 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
                                              ctx->dcz_dict->frame_header,
                                              NGX_HTTP_ZSTD_DCZ_HEADER_LEN);
 
-            ctx->bytes_out += NGX_HTTP_ZSTD_DCZ_HEADER_LEN;
+            /*
+             * Do NOT add NGX_HTTP_ZSTD_DCZ_HEADER_LEN to ctx->bytes_out
+             * here. Advancing ->last above already grows ngx_buf_size()
+             * of this same buffer by 40 bytes, and the emit path in
+             * ngx_http_zstd_filter_compress() (`ctx->bytes_out +=
+             * ngx_buf_size(b)`) counts this buffer's full size -- prefix
+             * included -- exactly once when it is queued. A separate
+             * increment here double-counted the 40-byte prefix on every
+             * dcz response ($zstd_bytes_out and the $zstd_ratio derived
+             * from it were both 40 bytes too high).
+             */
             ctx->dcz_header_sent = 1;
 
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,

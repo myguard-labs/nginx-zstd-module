@@ -848,3 +848,43 @@ GET /direct
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 33: $zstd_bytes_out / $zstd_ratio resolve without fault on a dcz response
+# Regression for the dcz 40-byte prefix being double-counted:
+# ngx_http_zstd_filter_get_buf() writes the prefix into out_buf and
+# advances ->last past it, then the emit path in
+# ngx_http_zstd_filter_compress() (`ctx->bytes_out += ngx_buf_size(b)`)
+# already counts that whole buffer -- prefix included -- when it queues
+# the buffer downstream. A second, separate `ctx->bytes_out +=
+# NGX_HTTP_ZSTD_DCZ_HEADER_LEN` in get_buf() double-counted the prefix on
+# every dcz response.
+#
+# Exact-value correctness (bytes_out equal to the real wire byte count,
+# and the ratio derived from it) is the province of the byte-oracle in
+# tools/test_dcz.py, which can read the response bytes and the access
+# log; the compressed size otherwise depends on the linked libzstd
+# version and is deliberately not pinned here (see TEST 1's own note on
+# wire-format assertions). This test instead pins the same contract
+# TEST 32/39 in 00-filter.t pin for the plain zstd path: referencing
+# both log-phase variables via `set` on a dcz response must resolve
+# without the get_handler faulting.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        set $unused_bytes_out $zstd_bytes_out;
+        set $unused_ratio     $zstd_ratio;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
