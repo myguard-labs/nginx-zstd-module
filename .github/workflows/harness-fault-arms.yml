@@ -68,10 +68,16 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           # User-owned dir, not the system /var/cache/apt/archives: apt runs
-          # under sudo (root-owned output), so actions/cache's post-step tar
-          # (unprivileged runner user) cannot read archives/lock or
-          # archives/partial there and silently fails to save (c2).
-          path: ${{ runner.temp }}/apt-archives
+          # under sudo, so the post-step tar (unprivileged runner user) cannot
+          # read the root-owned archives/lock or archives/partial (c2).
+          #
+          # Glob the .deb files rather than the directory: apt recreates
+          # `partial/` (0700 _apt:root) and `lock` (root:root) INSIDE whatever
+          # Dir::Cache::archives points at, so caching the dir itself still
+          # gives tar two unreadable entries and it exits 2 -> "Failed to
+          # save" (a warning, so CI stays green while nothing is ever cached).
+          # Only the .deb files are worth caching anyway.
+          path: ${{ runner.temp }}/apt-archives/*.deb
           key: apt-harness-${{ runner.os }}-build-essential-libzstd-libpcre2-zlib-openssl
           restore-keys: apt-harness-${{ runner.os }}-
 
