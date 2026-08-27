@@ -2774,7 +2774,6 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
          */
         if (first_buf && ctx->pledged_size >= 0) {
 
-#if NGX_MAX_OFF_T_VALUE <= 0xFF00FF00FF00FF00ULL
             /*
              * ZSTD_compressBound(n) == n + (n>>8) + margin, margin >= 0
              * always (see zstd.h's ZSTD_COMPRESSBOUND macro) -- so the
@@ -2783,31 +2782,68 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
              * grows it further. When the pledged size is already at
              * least the configured buffer size, `bound` (however it is
              * computed) can therefore never satisfy `bound < buf_size`,
-             * so the clamp two lines down never fires and buf_size is
-             * left exactly as it already is. Skip the call entirely on
-             * that path -- one fewer external libzstd call per known
-             * large response, same buf_size either way.
+             * so the clamp below never fires and buf_size is left
+             * exactly as it already is. Skip the call entirely on that
+             * path -- one fewer external libzstd call per known large
+             * response, same buf_size either way -- PROVIDED the call
+             * could not instead have hit ZSTD_compressBound()'s own
+             * overflow branch (return 0), which the gate below rules out.
              *
-             * Gated on the compile-time proof that `off_t`'s range
-             * cannot reach ZSTD_MAX_INPUT_SIZE: NGX_MAX_OFF_T_VALUE is
-             * nginx's own auto-detected max for the platform's off_t
-             * (objs/ngx_auto_config.h, from auto/types/sizeof), and
-             * ZSTD_MAX_INPUT_SIZE is 0xFF00FF00FF00FF00 on any platform
-             * where zstd.h sees an 8-byte size_t (checked via the same
-             * constant here, not a sizeof, so this is decided at
-             * preprocessing before zstd.h's own size_t-width branch is
-             * evaluated). Every off_t this nginx build can produce is
-             * provably inside ZSTD_MAX_INPUT_SIZE here, so
-             * ZSTD_compressBound() cannot hit its own overflow branch
-             * (return 0) for any value pledged_size can hold -- the skip
-             * is safe. A target where this #if is false keeps the
-             * original call and clamp below, unchanged.
+             * ZSTD_MAX_INPUT_SIZE is NOT platform-invariant: zstd.h
+             * defines it as
+             *   (sizeof(size_t) == 8) ? 0xFF00FF00FF00FF00ULL
+             *                         : 0xFF00FF00U
+             * so on an ILP32 target (32-bit size_t) it is 0xFF00FF00,
+             * not the 64-bit constant. A build with a 32-bit size_t but
+             * a 64-bit off_t (_FILE_OFFSET_BITS=64 is common on such
+             * targets) would satisfy an off_t-only gate while still
+             * being able to pledge a size_t-valued length above
+             * 0xFF00FF00 -- exactly the case where the real
+             * ZSTD_compressBound() would hit its overflow branch and
+             * this skip must not fire.
+             *
+             * Gate on BOTH auto-detected platform maxima, neither derived
+             * from the other, so neither can stand in for the other:
+             *
+             *   NGX_MAX_OFF_T_VALUE  (nginx's own auto-detected off_t
+             *                        max, from auto/types/sizeof into
+             *                        objs/ngx_auto_config.h) proves
+             *                        ctx->pledged_size (an off_t) cannot
+             *                        exceed the 64-bit ZSTD_MAX_INPUT_SIZE
+             *                        constant;
+             *   SIZE_MAX             (the standard <stdint.h> constant,
+             *                        already included above) proves
+             *                        sizeof(size_t) == 8 on this build,
+             *                        i.e. that ZSTD_MAX_INPUT_SIZE
+             *                        actually IS that 64-bit constant and
+             *                        not the 32-bit one. NGX_MAX_SIZE_T_VALUE
+             *                        is NOT usable here even though the
+             *                        name suggests it: nginx defines it as
+             *                        the max value of size_t treated as
+             *                        SIGNED (9223372036854775807LL, i.e.
+             *                        INT64_MAX, for %d-style formatting
+             *                        bounds elsewhere in this file), which
+             *                        is smaller than 0xFF00FF00FF00FF00 on
+             *                        every width -- a ">=" test against it
+             *                        would never fire and silently disable
+             *                        the whole optimization rather than
+             *                        proving anything. SIZE_MAX is the
+             *                        type's true (unsigned) maximum and is
+             *                        the correct comparand.
+             *
+             * Both must hold for the skip to be safe. On a target where
+             * either is false (32-bit off_t, or 32-bit size_t under a
+             * 64-bit off_t) this whole block compiles out and the
+             * original ZSTD_compressBound() call and clamp below run
+             * unchanged -- the optimization is 64-bit-server-only by
+             * design, per the audit's accepted resolution.
              */
+#if NGX_MAX_OFF_T_VALUE <= 0xFF00FF00FF00FF00ULL \
+    && SIZE_MAX >= 0xFF00FF00FF00FF00ULL
             if ((size_t) ctx->pledged_size >= buf_size) {
-                goto skip_bound;
-            }
+                /* Skip: buf_size is already provably the final value. */
+            } else
 #endif
-
             {
                 size_t  bound = ZSTD_compressBound((size_t) ctx->pledged_size);
 
@@ -2828,11 +2864,6 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
                     buf_size = bound;
                 }
             }
-
-#if NGX_MAX_OFF_T_VALUE <= 0xFF00FF00FF00FF00ULL
-skip_bound:
-            ;
-#endif
         }
 
         /*

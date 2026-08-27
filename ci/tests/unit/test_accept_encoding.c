@@ -92,6 +92,7 @@
 #include "../../fuzz/ngx_shim.h"
 #include "../../fuzz/generated_parser.inc"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -385,6 +386,215 @@ case_skip_quoted_unterminated(void)
 }
 
 
+/*
+ * Direct oracle on ngx_http_zstd_parse_q_fraction() itself -- every case
+ * above only ever asks "did the whole header accept or decline", which is
+ * satisfied by any weight > 0 (or, for a q=0 case, is satisfied by any
+ * weight == 0). Neither shape can tell an exact milliweight, or a wrong
+ * cursor, from a correct one: a tens-digit arithmetic mistake that still
+ * lands on "some positive number" or "exactly zero" is invisible to
+ * decide(). These cases call the pure digit-walk helper directly and
+ * assert BOTH of its documented outputs -- the returned weight, and the
+ * cursor position it leaves in *p -- which is the only way to observe
+ * that "10s digit worth 10" specifically (not just "worth something") and
+ * that "a 4th digit is left unconsumed" (the caller's trailing-junk
+ * contract, ngx_http_zstd_eval_qvalue()'s q += ... callers all depend on
+ * *p pointing AT the offending byte, not past it).
+ *
+ * OBSERVED: mutating the tens weight from `* 10` to `* 11` in
+ * ngx_http_zstd_parse_q_fraction() left all 31 pre-existing checks above
+ * still green (every accept/decline decision the header drives is
+ * unaffected by an 11-vs-10 tens digit, since every fixture above uses at
+ * most one nonzero fractional digit or crosses the q>0/q==0 boundary by a
+ * wide margin). case_fraction_exhaustive_three_digit() below is what
+ * catches it -- see ci/adoption-findings.md for the exact command and
+ * its failing output.
+ */
+static void
+run_one_fraction(const char *digits, ngx_int_t want_frac,
+    ptrdiff_t want_consumed, const char *what)
+{
+    u_char        *p;
+    const u_char  *end;
+    ngx_int_t      frac;
+    ptrdiff_t      consumed;
+
+    p = (u_char *) digits;
+    end = (const u_char *) digits + strlen(digits);
+
+    frac = ngx_http_zstd_parse_q_fraction(end, &p);
+    consumed = p - (u_char *) digits;
+
+    if (frac != want_frac || consumed != want_consumed) {
+        printf("FAIL %s (got frac=%ld consumed=%ld, want frac=%ld "
+               "consumed=%ld)\n",
+               what, (long) frac, (long) consumed, (long) want_frac,
+               (long) want_consumed);
+        checks++;
+        failures++;
+        return;
+    }
+
+    check(1, what);
+}
+
+static void
+case_fraction_empty_input(void)
+{
+    /* "" -- end == p already, no digit consumed at all. */
+    run_one_fraction("", 0, 0, "fraction: empty input -> frac=0, cursor=0");
+}
+
+static void
+case_fraction_one_digit(void)
+{
+    run_one_fraction("5", 500, 1, "fraction: one digit '5' -> frac=500, "
+                                  "cursor advances 1");
+}
+
+static void
+case_fraction_two_digit(void)
+{
+    /* This is exactly the boundary the auditor's tens-weight mutation
+     * (10 -> 11) breaks: '5' contributes 50 only if the tens digit is
+     * genuinely worth 10 per unit. */
+    run_one_fraction("05", 50, 2, "fraction: two digits '05' -> frac=50 "
+                                  "(tens digit worth exactly 10/unit), "
+                                  "cursor advances 2");
+}
+
+static void
+case_fraction_three_digit(void)
+{
+    run_one_fraction("123", 123, 3, "fraction: three digits '123' -> "
+                                    "frac=123, cursor advances 3");
+}
+
+static void
+case_fraction_four_digit_leaves_fourth_unconsumed(void)
+{
+    /*
+     * The documented contract this row exists to pin: after three digits
+     * the cursor stops WITHOUT consuming a fourth digit byte, so the
+     * caller's trailing-junk check (ngx_http_zstd_eval_qvalue() /
+     * ngx_http_zstd_coding_weight()'s post-qvalue scan) sees the '4' and
+     * rejects the element. Assert the exact stop position, not just "some
+     * prefix was consumed".
+     */
+    run_one_fraction("1234", 123, 3,
+        "fraction: four digits '1234' -> only the first three are "
+        "consumed (frac=123), the 4th digit is LEFT UNCONSUMED");
+}
+
+static void
+case_fraction_truncated_mid_walk(void)
+{
+    /* `end` reached after one digit: the walk must stop at `end`, not
+     * read past it, and the cursor must sit exactly at `end`. */
+    u_char        buf[1] = { '7' };
+    u_char       *p = buf;
+    const u_char *end = buf + 1;
+    ngx_int_t     frac = ngx_http_zstd_parse_q_fraction(end, &p);
+
+    check(frac == 700 && p == end,
+          "fraction: input truncated after one digit -- cursor stops "
+          "exactly at end, frac=700");
+}
+
+static void
+case_fraction_truncated_mid_walk_two_digits(void)
+{
+    u_char        buf[2] = { '4', '2' };
+    u_char       *p = buf;
+    const u_char *end = buf + 2;
+    ngx_int_t     frac = ngx_http_zstd_parse_q_fraction(end, &p);
+
+    check(frac == 420 && p == end,
+          "fraction: input truncated after two digits -- cursor stops "
+          "exactly at end, frac=420");
+}
+
+static void
+case_fraction_non_digit_terminator_not_consumed(void)
+{
+    /* A non-digit byte (here ';', the real-world terminator after
+     * "q=0.5") must stop the walk WITHOUT consuming it -- the caller
+     * needs *p pointing AT that byte, e.g. to continue scanning
+     * parameters. */
+    run_one_fraction("5;q=1", 500, 1,
+        "fraction: non-digit terminator ';' is not consumed, "
+        "cursor sits on it");
+}
+
+static void
+case_fraction_non_digit_terminator_at_start(void)
+{
+    /* Not even one digit: the very first byte is non-digit, so nothing
+     * is consumed and frac stays 0. */
+    run_one_fraction("x", 0, 0,
+        "fraction: non-digit terminator at position 0 -- frac=0, "
+        "cursor=0 (nothing consumed)");
+}
+
+static void
+case_fraction_exhaustive_three_digit(void)
+{
+    /*
+     * Exhaustive 000..999: every three-digit fraction, asserting the
+     * EXACT returned weight (hundreds*100 + tens*10 + units*1) and that
+     * the cursor always advances by exactly 3. This is the check that
+     * actually catches an arithmetic-weight mutation on any single digit
+     * position -- a spot check on a handful of values can miss a
+     * mutation whose effect happens to cancel out on those particular
+     * inputs, but summing every input in the space cannot.
+     */
+    char       digits[3];
+    int        n, h, t, u;
+    int        local_failures = 0;
+
+    for (n = 0; n < 1000; n++) {
+        h = n / 100;
+        t = (n / 10) % 10;
+        u = n % 10;
+
+        digits[0] = (char) ('0' + h);
+        digits[1] = (char) ('0' + t);
+        digits[2] = (char) ('0' + u);
+
+        {
+            u_char        *p = (u_char *) digits;
+            const u_char  *end = (const u_char *) digits + 3;
+            ngx_int_t      frac = ngx_http_zstd_parse_q_fraction(end, &p);
+            ngx_int_t      want = h * 100 + t * 10 + u;
+            ptrdiff_t      consumed = p - (u_char *) digits;
+
+            checks++;
+
+            if (frac != want || consumed != 3) {
+                if (local_failures < 5) {
+                    printf("FAIL fraction: exhaustive \"%s\" -> got "
+                           "frac=%ld consumed=%ld, want frac=%ld "
+                           "consumed=3\n",
+                           digits, (long) frac, (long) consumed,
+                           (long) want);
+                }
+                local_failures++;
+                failures++;
+            }
+        }
+    }
+
+    if (local_failures == 0) {
+        printf("ok   fraction: exhaustive 000..999 all match "
+               "hundreds*100+tens*10+units*1, cursor always advances 3 "
+               "(1000 cases)\n");
+    } else {
+        printf("FAIL fraction: exhaustive 000..999 -- %d/1000 mismatched "
+               "(first 5 shown above)\n", local_failures);
+    }
+}
+
+
 int
 main(void)
 {
@@ -413,6 +623,17 @@ main(void)
     case_skip_quoted_unterminated();
     case_nonq_param_is_skipped_trailing_q_honoured();
     case_nonq_param_quoted_value_delimiter_scan();
+
+    case_fraction_empty_input();
+    case_fraction_one_digit();
+    case_fraction_two_digit();
+    case_fraction_three_digit();
+    case_fraction_four_digit_leaves_fourth_unconsumed();
+    case_fraction_truncated_mid_walk();
+    case_fraction_truncated_mid_walk_two_digits();
+    case_fraction_non_digit_terminator_not_consumed();
+    case_fraction_non_digit_terminator_at_start();
+    case_fraction_exhaustive_three_digit();
 
     printf("\n%d/%d checks passed\n", checks - failures, checks);
     return failures ? 1 : 0;

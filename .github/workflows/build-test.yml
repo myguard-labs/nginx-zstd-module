@@ -266,6 +266,24 @@ jobs:
           # Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_read_dict_file_unit.sh
 
+      - name: compressBound skip gate unit fixture (size_t-width correctness)
+        run: |
+          # A27-F4: get_buf()'s ZSTD_compressBound() skip is gated on a
+          # compile-time proof that off_t's range cannot reach
+          # ZSTD_MAX_INPUT_SIZE -- but that libzstd constant is itself
+          # size_t-width-dependent (0xFF00FF00FF00FF00 on an 8-byte size_t,
+          # 0xFF00FF00 on a 4-byte one), so an off_t-only gate is wrong on
+          # an ILP32 target built with a 64-bit off_t
+          # (_FILE_OFFSET_BITS=64). This repo builds and tests only on
+          # LP64 hosts, where the old (wrong) and the corrected gate
+          # evaluate identically, so this is the only way to observe the
+          # difference without standing up a cross-compiled ILP32 leg.
+          # Extracts the shipped #if/#endif verbatim and evaluates it
+          # under substituted NGX_MAX_OFF_T_VALUE/SIZE_MAX pairs for
+          # LP64, ILP32+64-bit-off_t and plain ILP32. Needs only a C
+          # compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_compressbound_skip_gate.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
