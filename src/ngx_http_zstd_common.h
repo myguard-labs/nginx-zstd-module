@@ -219,25 +219,27 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
 
             } else {
                 /*
-                 * non-q parameter: skip its value to the next top-level ';'
-                 * (another parameter) or ',' (next element), stepping over a
-                 * quoted-string so an embedded delimiter is not mistaken for
-                 * the value's end.
+                 * RFC 9110 §12.5.3 permits only the optional "weight"
+                 * parameter on an Accept-Encoding element -- a named
+                 * parameter other than "q" is not part of the grammar at
+                 * all, so the element is malformed rather than accepted
+                 * with the unrecognized parameter silently ignored.
+                 * Confirmed against nginx core's own
+                 * ngx_http_gzip_accept_encoding(): its post-';' scan only
+                 * accepts 'q'/'Q' (or OWS) and NGX_DECLINEs on any other
+                 * byte, so "gzip;foo=bar" is already rejected there.
                  */
-                while (p < end && *p != ';' && *p != ',') {
-                    if (*p == '"') {
-                        p = ngx_http_zstd_skip_quoted(p, end);
-                    } else {
-                        p++;
-                    }
-                }
+                return -1;
             }
 
         } else {
-            /* parameter present without a value */
-            if (is_q) {
-                return -1;              /* "q" with no "=value" is malformed */
-            }
+            /*
+             * Parameter present without a value. "q" needs "=value"
+             * (RFC 9110 §12.4.2); any other bare parameter name (e.g.
+             * "zstd;foo") is, like the with-value case above, simply not
+             * part of the Accept-Encoding grammar. Both are malformed.
+             */
+            return -1;
         }
 
         while (p < end && (*p == ' ' || *p == '\t')) {

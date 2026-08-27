@@ -321,6 +321,56 @@ case_generic_weight_wildcard_not_allowed(void)
 }
 
 static void
+case_nonq_param_with_value(void)
+{
+    /*
+     * RFC 9110 §12.5.3 permits only the optional "weight" parameter on an
+     * Accept-Encoding element. A named non-"q" parameter is not part of
+     * the grammar, so the element must not silently default to q=1 --
+     * confirmed as a real divergence against nginx core's
+     * ngx_http_gzip_accept_encoding(), which NGX_DECLINEs the analogous
+     * "gzip;foo=bar" (its post-';' scan only accepts 'q'/'Q'/OWS).
+     */
+    check(decide("zstd;foo=bar") == NGX_DECLINED,
+          "'zstd;foo=bar' (non-q named parameter) does not match");
+}
+
+static void
+case_nonq_param_bare(void)
+{
+    check(decide("zstd;foo") == NGX_DECLINED,
+          "'zstd;foo' (bare non-q parameter, no '=value') does not match");
+}
+
+static void
+case_nonq_param_unterminated_quote(void)
+{
+    check(decide("zstd;foo=\"unterm") == NGX_DECLINED,
+          "'zstd;foo=\"unterm' (non-q parameter with an unterminated "
+          "quoted value) does not match");
+}
+
+static void
+case_nonq_param_then_valid_q(void)
+{
+    /* A rejected non-q parameter must fail the whole element even when a
+     * well-formed "q" parameter follows it -- there is no partial credit. */
+    check(decide("zstd;foo=bar;q=1") == NGX_DECLINED,
+          "a non-q parameter still rejects the element even when a "
+          "well-formed 'q' parameter follows");
+}
+
+static void
+case_q_still_works_with_ows(void)
+{
+    /* Regression coverage: the only parameter still accepted, with OWS
+     * variants, keeps working after the non-q rejection. */
+    check(decide("zstd ; q=0.5") == NGX_OK,
+          "'zstd ; q=0.5' (OWS around ';' and '=') still accepts");
+    check(decide("zstd;q=0.5") == NGX_OK, "'zstd;q=0.5' still accepts");
+}
+
+static void
 case_skip_quoted_unterminated(void)
 {
     /* ngx_http_zstd_skip_quoted() must still terminate (advance past at
@@ -359,6 +409,11 @@ main(void)
     case_end_of_buffer_no_trailing_nul_reliance();
     case_generic_weight_wildcard_not_allowed();
     case_skip_quoted_unterminated();
+    case_nonq_param_with_value();
+    case_nonq_param_bare();
+    case_nonq_param_unterminated_quote();
+    case_nonq_param_then_valid_q();
+    case_q_still_works_with_ows();
 
     printf("\n%d/%d checks passed\n", checks - failures, checks);
     return failures ? 1 : 0;
