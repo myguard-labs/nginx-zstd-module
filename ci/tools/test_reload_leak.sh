@@ -31,6 +31,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tools/lsan_positive_control.sh
+. "$SCRIPT_DIR/lsan_positive_control.sh"
+
 NGINX="${1:?usage: test_reload_leak.sh <nginx-binary> [reloads]}"
 RELOADS="${2:-5}"
 
@@ -43,27 +47,29 @@ mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/html"
 # ── Positive control ─────────────────────────────────────────────────
 # Prove LSan can detect a DELIBERATE leak in this environment before
 # trusting any verdict below; a broken detector must read as
-# indeterminate, never as "no leak".
-if command -v cc >/dev/null 2>&1; then
-    cat >"$WORK/canary.c" <<'EOF'
-#include <stdlib.h>
-int main(void) { malloc(1234); return 0; }
-EOF
-    if cc -fsanitize=address -o "$WORK/canary" "$WORK/canary.c" 2>/dev/null; then
-        set +e
-        ASAN_OPTIONS="detect_leaks=1:exitcode=23" \
-            timeout 30 "$WORK/canary" >/dev/null 2>&1
-        crc=$?
-        set -e
-        if [ "$crc" -ne 23 ]; then
-            echo "::warning::LeakSanitizer failed its positive control" \
-                 "(deliberate leak exited $crc, want 23) — ptrace is likely" \
-                 "blocked on this runner (LXC seccomp / yama). Leak check" \
-                 "INDETERMINATE, not failed; fix the runner profile to" \
-                 "restore coverage."
-            exit 0
-        fi
-    fi
+# indeterminate, never as "no leak". Shared with the smoke-tests step in
+# .github/workflows/build-test.yml via lsan_positive_control.sh so both
+# call sites prove the SAME thing the SAME way.
+#
+# rc=2 ("could not attempt": no cc, or the ASan compile itself failed) is
+# NOT the same fact as rc=1 ("attempted, LSan failed to catch it") -- only
+# rc=1 says anything about whether THIS runner's LSan works, so only rc=1
+# short-circuits here. rc=2 falls through and still runs the real
+# reload-leak test below, exactly as this script did before the positive
+# control existed.
+set +e
+lsan_positive_control
+control_rc=$?
+set -e
+if [ "$control_rc" -eq 1 ]; then
+    echo "::warning::LeakSanitizer failed its positive control" \
+         "(a deliberate canary leak was not caught, so LSan's exit-time" \
+         "check is not provably working here). The most likely cause on" \
+         "this runner pool is ptrace being blocked (LXC seccomp / yama);" \
+         "if that is ruled out, check the ASan toolchain install instead." \
+         "Leak check INDETERMINATE, not failed; fix the runner profile to" \
+         "restore coverage."
+    exit 0
 fi
 
 # A non-trivial dictionary so ZSTD_createCDict() actually allocates.
