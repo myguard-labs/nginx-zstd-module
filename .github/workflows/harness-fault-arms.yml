@@ -8,6 +8,8 @@ name: Harness Fault Arms
 #                                          CODEC_END), injected via the probe
 #   ci/t/harness-scenarios/alloc-neutral   per-request allocation neutrality
 #                                          (cycle-pool + fd deltas)
+#   ci/t/harness-scenarios/fault-palloc    pool-allocation failure handling
+#                                          (PALLOC fault site, issues.md m8)
 #
 # See plan-testkit-integration.md Phase 4: this is the "real" gate for the
 # codec fault-injection surface Phase 3 wired up -- the testkit-side
@@ -18,7 +20,7 @@ name: Harness Fault Arms
 # its own requires-gate says "a SKIP reads as a pass", and here the .so is
 # our own build product, so the oracle actually runs.
 #
-# The job NAME stays "Harness Fault Arms" even though it now runs two
+# The job NAME stays "Harness Fault Arms" even though it now runs three
 # scenarios: it is a check-name contract (ruleset 16557047 tracking, and the
 # Phase 5 promotion still to come), and renaming a check silently drops
 # whatever was tracking the old name.
@@ -238,6 +240,56 @@ jobs:
             exit 1
           fi
 
+      - name: Run fault-palloc scenario
+        env:
+          PROBER_ROOT: ${{ github.workspace }}
+          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
+          PROBER_MODULE: ngx_http_zstd_filter_module.so
+          PROBER_DIRECTIVE: zstd_probe
+          PROBER_PROBE: "zstd_probe;"
+          # Every oracle in this scenario deliberately fails a pool
+          # allocation, and the module logs those at [crit]/[alert] on its
+          # way to failing the request closed. Without the exemption the
+          # prober's log scrape reds the job for the faults it was asked to
+          # inject -- same reasoning as the fault-arms step above. The
+          # pattern stays narrow: only this module's own allocation
+          # diagnostics, so an unrelated alert still reds the run.
+          PROBER_ALLOW_LOG: 'zstd: |ngx_(palloc|pcalloc|pnalloc)'
+        run: |
+          set -euo pipefail
+          cd ci/t/harness/ci/prober
+          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/fault-palloc" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/fault-palloc-tap.log"
+
+          # Same belt-and-braces verdict re-derivation as the steps above.
+          if grep -q '^not ok' "$GITHUB_WORKSPACE/fault-palloc-tap.log"; then
+            echo "::error::fault-palloc scenario reported at least one 'not ok' line"
+            exit 1
+          fi
+
+          # Non-vacuity: if every oracle SKIPped, the run banks a green
+          # having asserted nothing about the allocation-failure surface.
+          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/fault-palloc-tap.log" || true)
+          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/fault-palloc-tap.log" || true)
+          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
+            echo "::error::every oracle in fault-palloc SKIPped -- the" \
+              "scenario asserted nothing about pool-allocation failure" \
+              "handling; failing rather than banking a vacuous green"
+            exit 1
+          fi
+
+          # Oracle 2 is the one that proves the PALLOC site is ARMABLE. If it
+          # is missing or skipped, oracles 3 and 4 could both be passing
+          # because the arm was silently declined and the requests failed for
+          # unrelated reasons -- exactly the false green this scenario was
+          # written to close (issues.md m8). Require it to have really run.
+          if ! grep -q '^ok 2 - PALLOC site accepted the arm' "$GITHUB_WORKSPACE/fault-palloc-tap.log"; then
+            echo "::error::oracle 2 (PALLOC site armable, counter advances)" \
+              "did not pass -- without it the fault oracles below cannot be" \
+              "distinguished from a silently-declined arm"
+            exit 1
+          fi
+
       - name: Upload TAP log
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -246,5 +298,6 @@ jobs:
           path: |
             fault-arms-tap.log
             alloc-neutral-tap.log
+            fault-palloc-tap.log
           retention-days: 14
           if-no-files-found: ignore

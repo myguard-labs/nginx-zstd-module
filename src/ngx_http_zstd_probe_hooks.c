@@ -93,6 +93,15 @@ static ngx_int_t  ngx_http_zstd_probe_fault_codec_end_nth = -1;
 static ngx_uint_t  ngx_http_zstd_probe_codec_calls;
 static ngx_uint_t  ngx_http_zstd_probe_codec_end_calls;
 
+/*
+ * Pool-allocation fault site. Same shape and same arm-relative counting as
+ * the codec sites above; see the header for why the nth is a bare ordinal
+ * here (an allocation has no outcome to encode -- it succeeds or it does
+ * not) and for the "only wrapped sites count" caveat.
+ */
+static ngx_int_t   ngx_http_zstd_probe_fault_palloc_nth = -1;
+static ngx_uint_t  ngx_http_zstd_probe_palloc_calls;
+
 static ngx_int_t ngx_http_zstd_probe_handler(ngx_http_request_t *r);
 
 
@@ -180,6 +189,50 @@ ngx_http_zstd_probe_codec_fault(ngx_uint_t is_end)
 
 
 /*
+ * Pool-allocation fault decision, called once per WRAPPED allocation,
+ * immediately before the real allocator runs. Advances this site's
+ * arm-relative counter and reports whether THIS call is the armed nth.
+ *
+ * One-shot by construction (`==`, not `>=`), so a test arming nth=1 fails
+ * exactly one allocation and every later allocation in the same request --
+ * including the ones nginx core makes to build the error response -- is
+ * unarmed again. That matters: failing *every* allocation after the first
+ * would take down the error path too and the test could not tell a handled
+ * failure from a dead worker.
+ *
+ * Unarmed cost is one increment and one perfectly-predicted compare, and
+ * the whole function does not exist in a build without NGX_TEST_HARNESS.
+ */
+ngx_uint_t
+ngx_http_zstd_probe_palloc_should_fail(void)
+{
+    ngx_uint_t  seq;
+
+    seq = ++ngx_http_zstd_probe_palloc_calls;
+
+    if (ngx_http_zstd_probe_fault_palloc_nth < 0) {
+        return 0;
+    }
+
+    return (ngx_uint_t) ngx_http_zstd_probe_fault_palloc_nth == seq;
+}
+
+
+/*
+ * Wrapped-allocation count since the site was last armed or disarmed.
+ * Rendered at /__probe so a test can assert the counter ADVANCED, rather
+ * than inferring from a failed request that the fault must have fired --
+ * a request can fail for reasons that have nothing to do with the arm, and
+ * an oracle that cannot tell those apart asserts nothing.
+ */
+ngx_uint_t
+ngx_http_zstd_probe_palloc_count(void)
+{
+    return ngx_http_zstd_probe_palloc_calls;
+}
+
+
+/*
  * module_render hook: append this module's zone-independent counters to
  * the top-level "module" object. ngx_test_probe_render_module() has
  * already written the opening `,"module":{` before calling this hook, so
@@ -191,9 +244,11 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
 {
     buf = ngx_slprintf(buf, last,
                         "\"chain_links_allocated\":%ui"
-                        ",\"buffers_allocated\":%ui",
+                        ",\"buffers_allocated\":%ui"
+                        ",\"palloc_calls\":%ui",
                         ngx_http_zstd_probe_chain_links,
-                        ngx_http_zstd_probe_bufs_allocated);
+                        ngx_http_zstd_probe_bufs_allocated,
+                        ngx_http_zstd_probe_palloc_calls);
 
     if (ngx_http_zstd_probe_have_ctx) {
         buf = ngx_slprintf(buf, last,
@@ -225,10 +280,12 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
  * something that can never fire and pass by testing nothing -- the same
  * false-green class the arm-relative counter exists to prevent.
  *
- * Applied per codec site rather than up front: SLAB/PALLOC/TEMPFILE/ACCEPT
- * decline because the SITE is unimplemented here, which is true whatever
- * nth says, and conflating the two would answer the wrong question for
- * them even though both answers happen to be NGX_DECLINED.
+ * Applied per site rather than up front: SLAB/TEMPFILE/ACCEPT decline
+ * because the SITE is unimplemented here, which is true whatever nth says,
+ * and conflating the two would answer the wrong question for them even
+ * though both answers happen to be NGX_DECLINED. The PALLOC site uses this
+ * helper too, but narrows it further -- see its arm, which rejects the
+ * codec-only ZERO_BASE range.
  */
 static ngx_int_t
 ngx_http_zstd_probe_nth_is_valid(ngx_int_t nth)
@@ -252,8 +309,8 @@ ngx_http_zstd_probe_nth_is_valid(ngx_int_t nth)
 
 
 /*
- * fault_set_global hook: zstd wires no SLAB/PALLOC/TEMPFILE/ACCEPT
- * injection points -- decline those. CODEC/CODEC_END are stored raw,
+ * fault_set_global hook: zstd wires no SLAB/TEMPFILE/ACCEPT injection
+ * points -- decline those. CODEC/CODEC_END are stored raw,
  * outcome encoding and all; ngx_http_zstd_probe_codec_fault() decodes
  * them at the single ZSTD_compressStream2 call site in the filter.
  *
@@ -294,8 +351,24 @@ ngx_http_zstd_probe_fault_set_global(ngx_test_probe_fault_e fault,
         ngx_http_zstd_probe_codec_end_calls = 0;
         return NGX_OK;
 
-    case NGX_TEST_PROBE_FAULT_SLAB:
     case NGX_TEST_PROBE_FAULT_PALLOC:
+        /*
+         * Bare ordinal, so only the plain 1..999 form (and negatives) is
+         * accepted -- the ZERO_BASE encoding is codec-specific and an nth
+         * in that range here would arm call 1000+, which no request ever
+         * reaches. Refusing beats storing an arm that can never fire.
+         */
+        if (nth >= NGX_HTTP_ZSTD_PROBE_FAULT_ZERO_BASE
+            || !ngx_http_zstd_probe_nth_is_valid(nth))
+        {
+            return NGX_DECLINED;
+        }
+
+        ngx_http_zstd_probe_fault_palloc_nth = nth;
+        ngx_http_zstd_probe_palloc_calls = 0;
+        return NGX_OK;
+
+    case NGX_TEST_PROBE_FAULT_SLAB:
     case NGX_TEST_PROBE_FAULT_TEMPFILE:
     case NGX_TEST_PROBE_FAULT_ACCEPT:
     default:

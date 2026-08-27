@@ -579,6 +579,17 @@ jobs:
               "$GITHUB_WORKSPACE/ci/t/harness-scenarios/fault-arms" nginx 1.31.4 \
             | tee "$GITHUB_WORKSPACE/vg-fault-arms.log" || rc=1
 
+          # fault-palloc: the pool-allocation failure paths. Worth running
+          # under memcheck specifically -- a request abandoned partway
+          # through its allocations is exactly the shape that strands a
+          # CCtx or leaks a buffer, and no other scenario abandons one.
+          # Same narrow exemption as above: this module's own allocation
+          # diagnostics only, never a valgrind or sanitizer finding.
+          PROBER_ALLOW_LOG='zstd: |ngx_(palloc|pcalloc|pnalloc)' \
+            ./run-scenario.sh \
+              "$GITHUB_WORKSPACE/ci/t/harness-scenarios/fault-palloc" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/vg-fault-palloc.log" || rc=1
+
           # alloc-neutral: no faults armed, so no log exemption either -- a
           # [crit]/[alert] during it is a real defect and must red the job.
           ./run-scenario.sh \
@@ -586,6 +597,7 @@ jobs:
             | tee "$GITHUB_WORKSPACE/vg-alloc-neutral.log" || rc=1
 
           for log in "$GITHUB_WORKSPACE"/vg-fault-arms.log \
+                     "$GITHUB_WORKSPACE"/vg-fault-palloc.log \
                      "$GITHUB_WORKSPACE"/vg-alloc-neutral.log; do
             if grep -q '^not ok' "$log"; then
               echo "::error::$(basename "$log"): scenario reported a 'not ok' line"
@@ -610,6 +622,7 @@ jobs:
           name: harness-memcheck-tap-logs
           path: |
             vg-fault-arms.log
+            vg-fault-palloc.log
             vg-alloc-neutral.log
           retention-days: 14
           if-no-files-found: ignore

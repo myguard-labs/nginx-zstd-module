@@ -147,6 +147,47 @@ typedef enum {
 ngx_http_zstd_probe_codec_outcome_e
     ngx_http_zstd_probe_codec_fault(ngx_uint_t is_end);
 
+
+/*
+ * Pool-allocation fault injection.
+ *
+ * Armed with GET /__probe?fault_palloc=<nth>: the nth pool allocation the
+ * filter makes THROUGH THE WRAPPERS in the filter TU, counted from the arm,
+ * returns NULL instead of memory. Negative disarms. Unlike the codec site
+ * there is no outcome encoding -- an allocation either succeeds or returns
+ * NULL -- so `nth` carries only the ordinal and the valid set is 1..999
+ * plus negatives.
+ *
+ * WHY A MODULE-LOCAL WRAPPER AND NOT A REAL POOL FAILURE. nginx's pool
+ * allocator only fails when the OS refuses memory, which a test cannot
+ * provoke without an ulimit/cgroup that would take the whole worker down
+ * (and with it every oracle in the run). The wrapper narrows the failure to
+ * exactly one call, at exactly one site, leaving the rest of the request
+ * intact -- which is the only way an "allocation failed HERE" branch can be
+ * asserted individually.
+ *
+ * COUNTING IS FROM THE ARM, for the same reason the codec counter is: an
+ * absolute counter makes a low nth unreachable after any earlier traffic,
+ * and an arm that can never fire is a false green (see the codec counter's
+ * comment for the full argument).
+ *
+ * IMPORTANT -- only wrapped call sites are counted. A pool allocation the
+ * filter makes by calling ngx_palloc() directly is invisible to both the
+ * counter and the fault, so `nth` means "the nth WRAPPED allocation", not
+ * "the nth allocation". Which ordinal reaches which site is therefore a
+ * property of the request, not a constant; ci/t/harness-scenarios/
+ * fault-palloc/driver.sh documents the map it relies on and asserts the
+ * counter advanced, so a change in that order fails the oracle loudly
+ * instead of silently aiming it at a different site.
+ *
+ * ngx_http_zstd_probe_palloc_count() exposes the counter so a test can
+ * assert it actually advanced, which is what distinguishes "the fault fired
+ * and the branch handled it" from "the arm was silently refused and the
+ * request failed for some unrelated reason".
+ */
+ngx_uint_t ngx_http_zstd_probe_palloc_should_fail(void);
+ngx_uint_t ngx_http_zstd_probe_palloc_count(void);
+
 #endif /* NGX_TEST_HARNESS */
 
 #endif /* NGX_HTTP_ZSTD_PROBE_HOOKS_H_INCLUDED_ */

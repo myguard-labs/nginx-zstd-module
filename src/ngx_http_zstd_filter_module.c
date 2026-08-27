@@ -23,6 +23,70 @@
 
 
 /*
+ * Pool-allocation wrappers for the per-REQUEST allocation sites in this
+ * file (the ones reached while serving a compressed response). They exist
+ * solely so a test can fail one chosen allocation and assert that the
+ * branch handling it is correct; see ngx_http_zstd_probe_hooks.h's
+ * fault_palloc block for the arming contract and the counting rules.
+ *
+ * COST IN A PACKAGED BUILD IS EXACTLY ZERO -- not "one predictable
+ * branch", zero. Without NGX_TEST_HARNESS each macro expands to the bare
+ * allocator call it wraps, so the preprocessor leaves the identical token
+ * sequence the code had before the wrappers existed and the compiler sees
+ * no fault site at all. That is why these are macros and not functions
+ * with an internal guard: a function would still be a call the optimizer
+ * has to reason about, and the hot path must not pay for a test feature.
+ *
+ * There is no ngx_http_zstd_palloc(): every raw ngx_palloc() in this file
+ * is a cf->pool call, and those are deliberately not wrapped (below). A
+ * wrapper nothing calls would be dead code that looks like coverage.
+ *
+ * CONFIG-TIME sites (cf->pool) are deliberately NOT wrapped. They run once
+ * at startup, their failure mode is "nginx refuses to start" rather than a
+ * mid-request branch, and arming a fault that fires during configuration
+ * would break the probe endpoint itself before any test could use it.
+ */
+#ifdef NGX_TEST_HARNESS
+
+#define ngx_http_zstd_pnalloc(pool, size)                                    \
+    (ngx_http_zstd_probe_palloc_should_fail()                                \
+        ? NULL : ngx_pnalloc(pool, size))
+
+#define ngx_http_zstd_pcalloc(pool, size)                                    \
+    (ngx_http_zstd_probe_palloc_should_fail()                                \
+        ? NULL : ngx_pcalloc(pool, size))
+
+#define ngx_http_zstd_alloc_chain_link(pool)                                 \
+    (ngx_http_zstd_probe_palloc_should_fail()                                \
+        ? NULL : ngx_alloc_chain_link(pool))
+
+#define ngx_http_zstd_create_temp_buf(pool, size)                            \
+    (ngx_http_zstd_probe_palloc_should_fail()                                \
+        ? NULL : ngx_create_temp_buf(pool, size))
+
+#define ngx_http_zstd_list_push(list)                                        \
+    (ngx_http_zstd_probe_palloc_should_fail()                                \
+        ? NULL : ngx_list_push(list))
+
+#define ngx_http_zstd_pool_cleanup_add(pool, size)                           \
+    (ngx_http_zstd_probe_palloc_should_fail()                                \
+        ? NULL : ngx_pool_cleanup_add(pool, size))
+
+#else
+
+#define ngx_http_zstd_pnalloc(pool, size)         ngx_pnalloc(pool, size)
+#define ngx_http_zstd_pcalloc(pool, size)         ngx_pcalloc(pool, size)
+#define ngx_http_zstd_alloc_chain_link(pool)      ngx_alloc_chain_link(pool)
+#define ngx_http_zstd_create_temp_buf(pool, size)                            \
+    ngx_create_temp_buf(pool, size)
+#define ngx_http_zstd_list_push(list)             ngx_list_push(list)
+#define ngx_http_zstd_pool_cleanup_add(pool, size)                            \
+    ngx_pool_cleanup_add(pool, size)
+
+#endif
+
+
+/*
  * Compute the ceiling of log₂(x) for a size_t value: the minimum k such that
  * 2^k >= x. Used for window-log sizing in dcz frame setup, where we must fit
  * a dictionary and expected content within a power-of-two decompression window.
@@ -1323,7 +1387,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     if (zlcf->bypass_vary.len) {
         ngx_table_elt_t  *v;
 
-        v = ngx_list_push(&r->headers_out.headers);
+        v = ngx_http_zstd_list_push(&r->headers_out.headers);
         if (v == NULL) {
             return NGX_ERROR;
         }
@@ -1442,7 +1506,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         return ngx_http_next_header_filter(r);
     }
 
-    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_zstd_ctx_t));
+    ctx = ngx_http_zstd_pcalloc(r->pool, sizeof(ngx_http_zstd_ctx_t));
     if (ctx == NULL) {
         return NGX_ERROR;
     }
@@ -1453,7 +1517,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     ctx->last_in  = &ctx->in;
     ctx->dcz_dict = dcz;
 
-    h = ngx_list_push(&r->headers_out.headers);
+    h = ngx_http_zstd_list_push(&r->headers_out.headers);
     if (h == NULL) {
         return NGX_ERROR;
     }
@@ -1943,7 +2007,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
          * tail cannot go stale between calls.
          */
         for (cl = in; cl; cl = cl->next) {
-            link = ngx_alloc_chain_link(r->pool);
+            link = ngx_http_zstd_alloc_chain_link(r->pool);
             if (link == NULL) {
                 goto failed;
             }
@@ -2401,7 +2465,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_AGAIN;
     }
 
-    cl = ngx_alloc_chain_link(r->pool);
+    cl = ngx_http_zstd_alloc_chain_link(r->pool);
     if (cl == NULL) {
         return NGX_ERROR;
     }
@@ -2683,7 +2747,7 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             buf_size += NGX_HTTP_ZSTD_DCZ_HEADER_LEN;
         }
 
-        ctx->out_buf = ngx_create_temp_buf(r->pool, buf_size);
+        ctx->out_buf = ngx_http_zstd_create_temp_buf(r->pool, buf_size);
         if (ctx->out_buf == NULL) {
             return NGX_ERROR;
         }
@@ -2812,7 +2876,7 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
      * borrowed context can never be stranded with busy set: an allocation
      * failure here happens while the cache is still untouched.
      */
-    cln = ngx_pool_cleanup_add(r->pool, 0);
+    cln = ngx_http_zstd_pool_cleanup_add(r->pool, 0);
     if (cln == NULL) {
         return NGX_ERROR;
     }
@@ -4961,7 +5025,7 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     }
 
     /* Two ngx_uint_t values (up to NGX_INT_T_LEN digits each) + '.' + '\0' */
-    vv->data = ngx_pnalloc(r->pool, NGX_INT_T_LEN * 2 + 2);
+    vv->data = ngx_http_zstd_pnalloc(r->pool, NGX_INT_T_LEN * 2 + 2);
     if (vv->data == NULL) {
         return NGX_ERROR;
     }
@@ -5016,7 +5080,7 @@ ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
 
     value = *(uint64_t *) ((char *) ctx + data);
 
-    vv->data = ngx_pnalloc(r->pool, NGX_INT64_LEN);
+    vv->data = ngx_http_zstd_pnalloc(r->pool, NGX_INT64_LEN);
     if (vv->data == NULL) {
         return NGX_ERROR;
     }
