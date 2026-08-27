@@ -111,7 +111,6 @@ typedef enum {
 } which_call_t;
 
 static which_call_t  fail_call;
-static int           force_ldm_rlog_zero;
 
 ZSTD_CCtx_params *
 ZSTD_createCCtxParams(void)
@@ -211,7 +210,6 @@ reset(void)
     free_count = 0;
     freed_ptr = NULL;
     fail_call = CALL_NONE;
-    force_ldm_rlog_zero = 0;
     log_calls = 0;
 }
 

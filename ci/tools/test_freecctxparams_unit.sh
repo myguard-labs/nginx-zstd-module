@@ -31,13 +31,13 @@ mkdir -p "$OUT"
 # Extracted, never re-typed: NGX_HTTP_ZSTD_LDM_WINDOWLOG feeds directly into
 # the divisor-derivation arithmetic under test.
 DEF_START="$(grep -n '^#define NGX_HTTP_ZSTD_LDM_WINDOWLOG' "$SRC" \
-             | head -1 | cut -d: -f1)"
+             | head -1 | cut -d: -f1 || true)"
 if [ -z "$DEF_START" ]; then
     echo "FAIL: could not locate NGX_HTTP_ZSTD_LDM_WINDOWLOG in $SRC" >&2
     exit 1
 fi
 DEF_END="$(grep -n '^#define NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG' "$SRC" \
-           | head -1 | cut -d: -f1)"
+           | head -1 | cut -d: -f1 || true)"
 if [ -z "$DEF_END" ]; then
     echo "FAIL: could not locate NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG in $SRC" >&2
     exit 1
@@ -48,7 +48,7 @@ fi
 # line above it, as in this file's house style), so extraction survives
 # unrelated edits but fails loudly if the function is renamed or removed.
 SIG_LINE="$(grep -n '^ngx_http_zstd_estimate_cctx_memory(ngx_conf_t \*cf,$' "$SRC" \
-            | head -1 | cut -d: -f1)"
+            | head -1 | cut -d: -f1 || true)"
 if [ -z "$SIG_LINE" ]; then
     echo "FAIL: could not locate ngx_http_zstd_estimate_cctx_memory()'s definition in $SRC" >&2
     exit 1
@@ -60,7 +60,11 @@ if ! sed -n "${FUNC_START}p" "$SRC" | grep -q '^static char \*$'; then
     exit 1
 fi
 
-REL_END="$(tail -n "+${FUNC_START}" "$SRC" | grep -n '^}' | head -1 | cut -d: -f1)"
+REL_END="$(tail -n "+${FUNC_START}" "$SRC" | grep -n '^}' | head -1 | cut -d: -f1 || true)"
+if [ -z "$REL_END" ]; then
+    echo "FAIL: could not find the closing '}' for ngx_http_zstd_estimate_cctx_memory() in $SRC" >&2
+    exit 1
+fi
 FUNC_END=$((FUNC_START + REL_END - 1))
 
 {
