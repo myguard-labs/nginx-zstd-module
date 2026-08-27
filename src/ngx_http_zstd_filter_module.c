@@ -5101,7 +5101,7 @@ ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    vv->len = ngx_sprintf(vv->data, "%L", value) - vv->data;
+    vv->len = ngx_sprintf(vv->data, "%uL", value) - vv->data;
     vv->valid = 1;
     vv->no_cacheable = 0;
 
