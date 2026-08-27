@@ -125,10 +125,35 @@
  */
 #define NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX  (64 * 1024)
 
+/*
+ * Largest byte count the directio probe can ever ask for: PROBE_MAX,
+ * clamped and then doubled to a two-block read (see the "TWO blocks, not
+ * one" comment at the probe call site). Fixed now that #208 caps
+ * `align`, so a worker-lifetime scratch buffer can be sized against a
+ * known ceiling instead of an operator-unbounded one.
+ */
+#define NGX_HTTP_ZSTD_STATIC_DIO_SCRATCH_MAX  \
+    (NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX * 2)
+
 
 typedef struct {
     ngx_uint_t  enable;
 } ngx_http_zstd_static_conf_t;
+
+
+/*
+ * Combined allocation for the response ngx_buf_t and the ngx_file_t it
+ * points b->file at (see the handler's static-GET body-buffer setup).
+ * The two objects share this response's lifetime and are freed together
+ * with r->pool, so one ngx_pcalloc() of this wrapper replaces the
+ * ngx_calloc_buf() + ngx_pcalloc(sizeof(ngx_file_t)) pair without
+ * changing zero-initialization, alignment or failure behaviour: either
+ * both members exist, zeroed, or the allocation failed and neither does.
+ */
+typedef struct {
+    ngx_buf_t   buf;
+    ngx_file_t  file;
+} ngx_http_zstd_static_buf_t;
 
 
 typedef struct {
@@ -466,6 +491,131 @@ ngx_http_zstd_static_pread(ngx_fd_t fd, u_char *buf, size_t size,
 #endif
 }
 
+
+/*
+ * Worker/cycle-lifetime scratch buffer for the directio frame probe.
+ *
+ * The probe's aligned read exists only to inspect an 18-byte frame
+ * header; every byte it reads is discarded the moment
+ * ngx_http_zstd_static_probe_frame() returns. Before #208 capped the
+ * probe alignment, the buffer's size tracked an operator-controlled,
+ * unbounded "directio_alignment", which made a reusable buffer an
+ * unbounded-growth hazard; now that the alignment is clamped to
+ * NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX (see its comment), the largest
+ * possible request is the fixed NGX_HTTP_ZSTD_STATIC_DIO_SCRATCH_MAX, so
+ * one lazily-grown buffer can serve every request this worker process
+ * ever probes under directio, instead of an aligned r->pool allocation
+ * (and its implicit free at request end) on every single hit.
+ *
+ * SAFETY — single-threaded reuse: nginx's event loop runs exactly one
+ * content-phase handler body at a time per worker process; this probe
+ * is entirely synchronous (a direct pread(2)/ReadFile() via
+ * ngx_http_zstd_static_pread(), never posted through a thread pool —
+ * "aio threads" and core's own AIO read govern the RESPONSE BODY copy in
+ * ngx_output_chain/ngx_http_copy_filter_module, a different code path
+ * entirely from this handler-local header probe), so no second request
+ * on this worker can be mid-probe while this one is. `busy` still
+ * guards that invariant explicitly rather than trusting it silently: if
+ * this is ever reached from a path where two probes on the SAME worker
+ * really do overlap (a future refactor onto a thread pool, a signal- or
+ * reentrant-call path nothing here anticipates), the second caller sees
+ * `busy` set and falls back to its own r->pool-scoped ngx_pmemalign()
+ * exactly as before this change, rather than corrupting the shared
+ * buffer or its bookkeeping.
+ *
+ * SAFETY — worker/cycle lifetime, not global/cross-reload: this is a
+ * file-scope `static`, so it is private per OS PROCESS already — a
+ * config reload always forks NEW worker processes (the old ones drain
+ * and exit; nginx does not mutate a running worker's cycle in place),
+ * and each process gets its own zero-initialized copy of this storage
+ * at fork/exec. There is no path by which an old worker's buffer
+ * pointer is visible to, or reused by, a new one: they do not share an
+ * address space. Freed automatically at worker exit with the rest of
+ * the process image — nothing to release explicitly, and nothing for
+ * LSan-at-exit to flag as a leak, since a live, still-reachable
+ * file-scope pointer is not a leak.
+ */
+static u_char  *ngx_http_zstd_static_dio_scratch;
+static size_t   ngx_http_zstd_static_dio_scratch_cap;
+static size_t   ngx_http_zstd_static_dio_scratch_align;
+static ngx_uint_t  ngx_http_zstd_static_dio_scratch_busy;
+
+/*
+ * Returns a buffer of at least `want` bytes, aligned to `align`, good
+ * until the next call on this worker — NOT scoped to `pool`, unlike
+ * every other allocation in this file. `pool` is used only for the
+ * fallback path (request-scoped, exactly the pre-existing behaviour),
+ * so the two return values must not be told apart by the caller: both
+ * are simply "a buffer of at least `want` bytes", freed differently.
+ *
+ * `want` is never above NGX_HTTP_ZSTD_STATIC_DIO_SCRATCH_MAX in this
+ * file (the caller derives it from the same clamped `align`), so the
+ * scratch buffer converges to that fixed size after its first directio
+ * hit and is never grown again; a caller from outside this file passing
+ * a larger `want` still gets a correctly-sized buffer, just not a
+ * reused one.
+ *
+ * Reallocates on an ALIGNMENT decrease too, not just a capacity
+ * increase: `align` in this file only ever takes NGX_HTTP_ZSTD_STATIC_
+ * DIO_PROBE (4096) or _DIO_PROBE_MAX (65536), and 65536 is a multiple
+ * of 4096, so in practice a cached 65536-aligned buffer would already
+ * satisfy a later 4096-aligned request of adequate size. Checking
+ * `align` explicitly here means that property never has to be reasoned
+ * about at every call site, or re-verified if either constant's value
+ * ever changes: a cached buffer is reused only when it is provably
+ * aligned for the CURRENT request, not merely large enough.
+ */
+static u_char *
+ngx_http_zstd_static_dio_buf(ngx_pool_t *pool, size_t want, size_t align)
+{
+    u_char  *p;
+
+    if (ngx_http_zstd_static_dio_scratch_busy) {
+        return ngx_pmemalign(pool, want, align);
+    }
+
+    if (ngx_http_zstd_static_dio_scratch_cap < want
+        || ngx_http_zstd_static_dio_scratch_align < align)
+    {
+        /*
+         * ngx_cycle->pool, not r->pool: worker-lifetime storage, freed
+         * automatically when this worker's cycle pool is destroyed at
+         * process exit, and untouched by any single request's pool
+         * being reset or destroyed. NOT ngx_pmemalign() into the OLD
+         * (too-small) buffer's memory — a fresh allocation, so a probe
+         * already using the previous buffer (there cannot be one, see
+         * `busy` above, but the allocation itself must not assume it)
+         * is never invalidated out from under it.
+         */
+        p = ngx_pmemalign((ngx_pool_t *) ngx_cycle->pool, want, align);
+        if (p == NULL) {
+            return ngx_pmemalign(pool, want, align);
+        }
+
+        ngx_http_zstd_static_dio_scratch = p;
+        ngx_http_zstd_static_dio_scratch_cap = want;
+        ngx_http_zstd_static_dio_scratch_align = align;
+    }
+
+    ngx_http_zstd_static_dio_scratch_busy = 1;
+
+    return ngx_http_zstd_static_dio_scratch;
+}
+
+/*
+ * Pairs with ngx_http_zstd_static_dio_buf(): clears `busy` so the next
+ * request on this worker can reuse the scratch buffer. A no-op when the
+ * caller actually got a pool-scoped fallback buffer instead (busy was
+ * never set in that case), which is why this is safe to call
+ * unconditionally from every return path after the probe, including the
+ * error/decline ones.
+ */
+static void
+ngx_http_zstd_static_dio_buf_release(void)
+{
+    ngx_http_zstd_static_dio_scratch_busy = 0;
+}
+
 #endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */
 
 
@@ -727,8 +877,9 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         size_t       want, align, frame_off, avail;
         ssize_t      n;
         uint64_t     window, skip;
-        ngx_uint_t   frames;
+        ngx_uint_t   frames, scratch;
         off_t        pos, base;
+        ngx_int_t    probe_rc;
 
         if (of.size < 4) {
             ngx_log_error(NGX_LOG_ERR, log, 0,
@@ -736,6 +887,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                           "(%O bytes)", path.data, of.size);
             return NGX_DECLINED;
         }
+
+        scratch = 0;
 
         if (of.is_directio) {
             /*
@@ -768,10 +921,21 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
              */
             want = align * 2;
 
-            hdr = ngx_pmemalign(r->pool, want, align);
+            /*
+             * Worker-lifetime scratch buffer instead of a fresh
+             * ngx_pmemalign(r->pool, ...) on every directio hit — see
+             * ngx_http_zstd_static_dio_buf()'s own comment for the
+             * sizing and reentrancy argument. `scratch` remembers
+             * whether THIS call actually got the shared buffer (vs. a
+             * pool fallback), so the single release point below only
+             * clears the reuse guard when it was this call that set it.
+             */
+            hdr = ngx_http_zstd_static_dio_buf(r->pool, want, align);
             if (hdr == NULL) {
                 return NGX_HTTP_INTERNAL_SERVER_ERROR;
             }
+
+            scratch = (hdr == ngx_http_zstd_static_dio_scratch);
 
         } else {
             align = 0;
@@ -811,7 +975,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                               path.data,
                               (ngx_uint_t)
                                   NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES);
-                return NGX_DECLINED;
+                probe_rc = NGX_DECLINED;
+                goto probe_done;
             }
 
             if (of.is_directio) {
@@ -845,7 +1010,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                                   "declining; check directio_alignment "
                                   "against the device geometry",
                                   align, path.data, n);
-                    return NGX_DECLINED;
+                    probe_rc = NGX_DECLINED;
+                    goto probe_done;
                 }
 
                 /*
@@ -860,7 +1026,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                               "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
                               "(\"%s\", frame header) returned %z",
                               path.data, n);
-                return NGX_DECLINED;
+                probe_rc = NGX_DECLINED;
+                goto probe_done;
             }
 
             if (of.is_directio) {
@@ -879,13 +1046,15 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                               path.data,
                               (ngx_uint_t) frame[0], (ngx_uint_t) frame[1],
                               (ngx_uint_t) frame[2], (ngx_uint_t) frame[3]);
-                return NGX_DECLINED;
+                probe_rc = NGX_DECLINED;
+                goto probe_done;
 
             case NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED:
                 ngx_log_error(NGX_LOG_ERR, log, 0,
                               "zstd static: \"%s\" frame header truncated",
                               path.data);
-                return NGX_DECLINED;
+                probe_rc = NGX_DECLINED;
+                goto probe_done;
 
             case NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG:
                 ngx_log_error(NGX_LOG_ERR, log, 0,
@@ -898,7 +1067,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                               "the compression level's window when not "
                               "told the input size)",
                               path.data, window);
-                return NGX_DECLINED;
+                probe_rc = NGX_DECLINED;
+                goto probe_done;
 
             case NGX_HTTP_ZSTD_STATIC_FRAME_SKIP:
 
@@ -920,7 +1090,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                                   "zstd static: \"%s\" skippable frame "
                                   "header runs past end of file",
                                   path.data);
-                    return NGX_DECLINED;
+                    probe_rc = NGX_DECLINED;
+                    goto probe_done;
                 }
 
                 if (skip > (uint64_t) of.size - (uint64_t) pos - 8) {
@@ -928,7 +1099,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                                   "zstd static: \"%s\" skippable frame "
                                   "declares a %uL-byte skip past end of "
                                   "file", path.data, skip);
-                    return NGX_DECLINED;
+                    probe_rc = NGX_DECLINED;
+                    goto probe_done;
                 }
 
                 pos += (off_t) 8 + (off_t) skip;
@@ -940,6 +1112,37 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
             }
 
             break;
+        }
+
+        /*
+         * Reached only on NGX_HTTP_ZSTD_STATIC_FRAME_OK: the leading
+         * frame is a genuine, in-window zstd frame and the file may be
+         * served. NGX_OK is not itself a meaningful "keep going"
+         * verdict for the caller below (nothing after probe_done reads
+         * probe_rc on this path) — it only has to be distinct from
+         * NGX_DECLINED/NGX_HTTP_INTERNAL_SERVER_ERROR so a future edit
+         * cannot accidentally fall through the release into a stray
+         * early return.
+         */
+        probe_rc = NGX_OK;
+
+    probe_done:
+
+        /*
+         * Single release point for every exit from this block,
+         * including each `goto` above: clears the reuse guard only if
+         * THIS call is the one that set it (see `scratch` and
+         * ngx_http_zstd_static_dio_buf()'s own comment) — a call that
+         * fell back to a pool-scoped buffer never touched the guard and
+         * must not clear it out from under a genuinely concurrent
+         * caller.
+         */
+        if (scratch) {
+            ngx_http_zstd_static_dio_buf_release();
+        }
+
+        if (probe_rc != NGX_OK) {
+            return probe_rc;
         }
     }
 #endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */
@@ -1042,14 +1245,33 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         return ngx_http_send_header(r);
     }
 
-    b = ngx_calloc_buf(r->pool);
-    if (b == NULL) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
+    /*
+     * One ngx_pcalloc() for the ngx_buf_t and its ngx_file_t, instead of
+     * ngx_calloc_buf() (itself ngx_pcalloc(pool, sizeof(ngx_buf_t))) plus
+     * a second ngx_pcalloc() for b->file: the two objects share the same
+     * lifetime (this response) and the same ownership (freed together
+     * with the pool), so there is nothing the split allocation buys.
+     * Only reached for a non-HEAD GET — the HEAD fast path above returns
+     * before this point — so this removes one pool-allocation call per
+     * static GET response body, not per request.
+     *
+     * ngx_http_zstd_static_buf_t is declared solely to size and zero
+     * this combined allocation; nothing outside this function names it.
+     * Both members keep the same zero-initialized start ngx_calloc_buf()/
+     * ngx_pcalloc() gave them, so every field this handler does not set
+     * explicitly below (b->pos, b->last, b->temporary, file.offset, ...)
+     * is still guaranteed zero.
+     */
+    {
+        ngx_http_zstd_static_buf_t  *wrap;
 
-    b->file = ngx_pcalloc(r->pool, sizeof(ngx_file_t));
-    if (b->file == NULL) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        wrap = ngx_pcalloc(r->pool, sizeof(ngx_http_zstd_static_buf_t));
+        if (wrap == NULL) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        b = &wrap->buf;
+        b->file = &wrap->file;
     }
 
     rc = ngx_http_send_header(r);
@@ -1098,7 +1320,16 @@ ngx_http_zstd_static_create_loc_conf(ngx_conf_t *cf)
 {
     ngx_http_zstd_static_conf_t  *conf;
 
-    conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_zstd_static_conf_t));
+    /*
+     * ngx_palloc(), not ngx_pcalloc(): the struct's one field is
+     * unconditionally overwritten two lines below, before anything can
+     * read it, so zero-filling it first is dead work. Do NOT copy this
+     * substitution to a conf struct with more than one field, or one
+     * whose fields are conditionally written — the main conf
+     * (ngx_http_zstd_static_main_conf_t.any_enabled) deliberately
+     * depends on zero-init and must stay ngx_pcalloc().
+     */
+    conf = ngx_palloc(cf->pool, sizeof(ngx_http_zstd_static_conf_t));
     if (conf == NULL) {
         return NULL;
     }
