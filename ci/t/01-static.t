@@ -462,6 +462,7 @@ Accept-Encoding: zstd
 --- error_code: 404
 --- response_headers
 !Content-Encoding
+!Vary
 --- error_log
 is not a zstd frame
 
@@ -518,6 +519,7 @@ Accept-Encoding: zstd
 --- error_code: 404
 --- response_headers
 !Content-Encoding
+!Vary
 
 
 
@@ -772,6 +774,7 @@ GET /isdir/dir.txt
 Accept-Encoding: zstd
 --- response_headers
 ! Content-Encoding
+! Vary
 --- response_body
 plain origin body served because the .zst sibling is a directory
 --- error_code: 200

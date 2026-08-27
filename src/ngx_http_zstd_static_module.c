@@ -449,6 +449,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 {
     u_char                       *p;
     ngx_int_t                     rc;
+    ngx_uint_t                    accepts;
     ngx_uint_t                    level;
     size_t                        root;
     ngx_str_t                     path;
@@ -490,6 +491,15 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     } else {
         rc = NGX_OK;
     }
+
+    /*
+     * Saved separately from `rc`: this local is reused below for
+     * ngx_open_cached_file()'s return, ngx_http_discard_request_body()'s,
+     * and others, so the accept-encoding verdict must survive in its own
+     * variable to reach the Vary decision after the .zst has been
+     * validated (see the emission site near the end of the probe).
+     */
+    accepts = (rc == NGX_OK);
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
@@ -585,38 +595,6 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                       "%s \"%s\" failed", of.failed, path.data);
 
         return NGX_DECLINED;
-    }
-
-    if (zscf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
-        /*
-         * A .zst variant of this URI exists, so which representation
-         * this URI serves depends on Accept-Encoding — including on
-         * the decline path just below, where we hand the request back
-         * for the identity file to be served by the static handler.
-         * That identity response needs the Vary header just as much as
-         * the compressed one does: without it a shared cache filled by
-         * a non-accepting client keeps serving identity to everyone,
-         * and one filled by an accepting client serves zstd to a
-         * client that cannot decode it. The header list we push onto
-         * survives the NGX_DECLINED, so the field lands on whichever
-         * response is finally produced.
-         *
-         * Emitted directly rather than requested via r->gzip_vary, so
-         * correctness does not depend on the operator's "gzip_vary"
-         * directive; duplicate-safe in both of its states. See
-         * ngx_http_zstd_vary_accept_encoding().
-         *
-         * "always" is excluded by the enclosing test on purpose: it
-         * ignores Accept-Encoding, so its response is not a negotiated
-         * variant and must not claim to vary on it. See C5.
-         */
-        if (ngx_http_zstd_vary_accept_encoding(r) != NGX_OK) {
-            return NGX_HTTP_INTERNAL_SERVER_ERROR;
-        }
-
-        if (rc != NGX_OK) {
-            return NGX_DECLINED;
-        }
     }
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "http static fd: %d", of.fd);
@@ -923,6 +901,45 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         }
     }
 #endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */
+
+    if (zscf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
+        /*
+         * Reaching here means the .zst on disk survived is_dir,
+         * !is_file and (when compiled in) the magic-number/frame-header
+         * probe — it is a genuine, usable zstd variant of this URI, so
+         * which representation this URI serves now genuinely depends on
+         * Accept-Encoding. That is true whether or not THIS client
+         * accepts zstd: a shared cache filled by a non-accepting client
+         * must not serve that stored identity body to a client that
+         * does accept, and one filled by an accepting client must not
+         * serve the stored zstd body to one that cannot decode it. So
+         * Vary is still emitted on the decline-to-identity path just
+         * below — the header list we push onto survives the
+         * NGX_DECLINED, landing on whichever response is finally
+         * produced — but ONLY now that the .zst has been proven usable.
+         * A directory, a non-regular file, a truncated/malformed frame,
+         * or an oversized window are not a real negotiated variant: the
+         * identity response that follows one of those declines is not
+         * Accept-Encoding-dependent and must not claim to be, so none of
+         * those earlier bail-outs emit Vary (see m6).
+         *
+         * Emitted directly rather than requested via r->gzip_vary, so
+         * correctness does not depend on the operator's "gzip_vary"
+         * directive; duplicate-safe in both of its states. See
+         * ngx_http_zstd_vary_accept_encoding().
+         *
+         * "always" is excluded by the enclosing test on purpose: it
+         * ignores Accept-Encoding, so its response is not a negotiated
+         * variant and must not claim to vary on it. See C5.
+         */
+        if (ngx_http_zstd_vary_accept_encoding(r) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        if (!accepts) {
+            return NGX_DECLINED;
+        }
+    }
 
     r->root_tested = !r->error_page;
 
