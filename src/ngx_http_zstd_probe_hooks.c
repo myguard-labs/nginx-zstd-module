@@ -89,6 +89,15 @@ static ngx_int_t  ngx_http_zstd_probe_fault_codec_end_nth = -1;
  * Counting from the arm instead gives `fault_codec=N` one unambiguous
  * meaning -- the Nth call at this site after you armed it -- which holds
  * no matter what traffic preceded it.
+ *
+ * Both are also RENDERED by module_render below, which makes them an
+ * assertable observable and not just a fault ordinal: disarm a site
+ * (fault_<site>=-1 zeroes its counter), issue exactly one request, then
+ * read /__probe and the counter is that request's ZSTD_compressStream2()
+ * call count at that site. That is the oracle behind the "one END call per
+ * completed response" assertions in ci/t/00-filter.t -- an assertion that
+ * cannot be satisfied by a merely-correct response, only by a response
+ * that also took the intended number of codec calls.
  */
 static ngx_uint_t  ngx_http_zstd_probe_codec_calls;
 static ngx_uint_t  ngx_http_zstd_probe_codec_end_calls;
@@ -245,10 +254,14 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
     buf = ngx_slprintf(buf, last,
                         "\"chain_links_allocated\":%ui"
                         ",\"buffers_allocated\":%ui"
-                        ",\"palloc_calls\":%ui",
+                        ",\"palloc_calls\":%ui"
+                        ",\"codec_calls\":%ui"
+                        ",\"codec_end_calls\":%ui",
                         ngx_http_zstd_probe_chain_links,
                         ngx_http_zstd_probe_bufs_allocated,
-                        ngx_http_zstd_probe_palloc_calls);
+                        ngx_http_zstd_probe_palloc_calls,
+                        ngx_http_zstd_probe_codec_calls,
+                        ngx_http_zstd_probe_codec_end_calls);
 
     if (ngx_http_zstd_probe_have_ctx) {
         buf = ngx_slprintf(buf, last,

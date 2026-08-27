@@ -302,6 +302,58 @@ jobs:
             exit 1
           fi
 
+      - name: Run codec-call-count scenario
+        env:
+          PROBER_ROOT: ${{ github.workspace }}
+          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
+          PROBER_MODULE: ngx_http_zstd_filter_module.so
+          PROBER_DIRECTIVE: zstd_probe
+          PROBER_PROBE: "zstd_probe;"
+          # No PROBER_ALLOW_LOG, deliberately: this scenario injects no
+          # faults, so a [crit]/[alert] during it is a real defect. The
+          # terminal-frame bug class it guards announces itself exactly there
+          # ("zero size buf in writer"), so exempting anything would blind the
+          # one signal the scenario most needs.
+        run: |
+          set -euo pipefail
+          cd ci/t/harness/ci/prober
+          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/codec-call-count" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/codec-call-count-tap.log"
+
+          # Same belt-and-braces verdict re-derivation as the steps above.
+          if grep -q '^not ok' "$GITHUB_WORKSPACE/codec-call-count-tap.log"; then
+            echo "::error::codec-call-count scenario reported at least one 'not ok' line"
+            exit 1
+          fi
+
+          # Non-vacuity: if every oracle SKIPped, the run banks a green having
+          # asserted nothing about the per-response codec call count.
+          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/codec-call-count-tap.log" || true)
+          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/codec-call-count-tap.log" || true)
+          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
+            echo "::error::every oracle in codec-call-count SKIPped -- the" \
+              "scenario asserted nothing about the per-response" \
+              "ZSTD_compressStream2 call count; failing rather than banking" \
+              "a vacuous green"
+            exit 1
+          fi
+
+          # The COUNT oracles specifically. Every arm here is a PAIR: a decode
+          # check and a call-count check. The decode halves pass on both the
+          # optimized and the un-optimized filter, so a run where only they
+          # survived would look green while measuring nothing about the
+          # property in the scenario's title. Require the count halves to have
+          # really run -- they are the even-numbered oracles 2, 4, 6, 8 and 10.
+          for n in 2 4 6 8 10; do
+            if ! grep -qE "^ok $n - .*total codec calls is" \
+                 "$GITHUB_WORKSPACE/codec-call-count-tap.log"; then
+              echo "::error::oracle $n (a total-codec-calls assertion) did" \
+                "not pass -- without the count halves this scenario cannot" \
+                "distinguish the one-call END path from the two-call one"
+              exit 1
+            fi
+          done
+
       - name: Upload TAP log
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -311,5 +363,6 @@ jobs:
             fault-arms-tap.log
             alloc-neutral-tap.log
             fault-palloc-tap.log
+            codec-call-count-tap.log
           retention-days: 14
           if-no-files-found: ignore
