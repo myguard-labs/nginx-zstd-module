@@ -1,5 +1,20 @@
 Changes with http-zstd
 
+    *) Feature: "zstd_dcz_dict_trust_hashes on" opts out of verifying a
+       supplied dictionary hash literal against the file's bytes: the
+       literal is trusted verbatim as the negotiation key and the
+       load-time SHA-256 is skipped. The verify-always default is
+       unchanged. The hashing pass is the config-load cost at scale --
+       measured at 737 dictionary lines, nginx -t drops from 5.1s to
+       0.9s (user CPU 4.3s to 0.03s; sys identical, the read happens
+       either way) -- so a content-addressed deployment whose tooling
+       derives each literal from the file it ships can reclaim that on
+       every reload, owning the stated risk that a stale or mistyped
+       literal is advertised verbatim. Lines without a literal are
+       hashed as always. The directive is order-enforced like
+       zstd_dict_strict_path: declaring it after a literal-carrying
+       zstd_dcz_dict_file is a config-load error.
+
     *) Bugfix: per-request byte counters for $zstd_bytes_in and
        $zstd_bytes_out wrapped on 32-bit (ILP32) systems for responses
        exceeding 4 GiB. Both counters are now uint64_t.

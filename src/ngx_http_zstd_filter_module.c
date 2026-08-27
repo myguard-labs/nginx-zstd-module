@@ -361,6 +361,49 @@ typedef struct {
     ngx_str_t                    dcz_dict_loaded_before_strict_on_file;
 
     /*
+     * zstd_dcz_dict_trust_hashes: opt OUT of verifying a supplied
+     * hash literal against the file's bytes and use it verbatim as
+     * the negotiation key, skipping the load-time SHA-256 entirely.
+     * Default off = the verify-always behaviour: a mismatch is a
+     * config error, which protects a pipeline whose config generation
+     * and file placement are decoupled (config stamped with file A's
+     * hash, a later stage ships file B).
+     *
+     * The opt-in exists because the hashing pass IS the config-load
+     * cost at scale: measured on a production config with 737
+     * dictionary lines, nginx -t runs 5.10s with the verify pass
+     * (4.26s user -- the SHA-256 alone) against 0.87s with trusted
+     * literals (0.03s user); sys time is identical because the file
+     * is read either way. A content-addressed deployment whose
+     * pipeline derives the literal from the file it ships has nothing
+     * for the verify pass to catch -- any skew that could fool it
+     * breaks far more than dictionaries -- so the operator may take
+     * the ~4s per nginx -t/reload back and own the stated risk: a
+     * stale or mistyped literal is then advertised verbatim, and
+     * clients holding the advertised dictionary receive responses
+     * they may fail to decode. Lines WITHOUT a literal are hashed as
+     * always; trust changes only what a supplied literal means.
+     */
+    ngx_flag_t                   dcz_dict_trust_hashes;
+
+    /*
+     * Ordering record, same trap and same remedy as
+     * dcz_dict_loaded_before_strict_on above: a supplied literal that
+     * was VERIFIED (hashed) because zstd_dcz_dict_trust_hashes did
+     * not yet read as the explicit "on" at that point in the parse.
+     * Harmless to correctness -- the verified key equals the literal
+     * -- but the operator asked for the zero-hashing path and
+     * silently paid the full pass anyway, which at hundreds of
+     * dictionaries is the entire cost the directive exists to remove.
+     * init_main_conf() rejects the ordering when the final value is
+     * "on" so the directive's effect is never position-dependent.
+     */
+    ngx_flag_t                   dcz_dict_verified_before_trust_on;
+
+    /* First such path, for the ordering-rejection error message. */
+    ngx_str_t                    dcz_dict_verified_before_trust_on_file;
+
+    /*
      * Load-time SHA-256 computations over dcz dictionaries in THIS
      * configuration ($zstd_dcz_dicts_hashed). Cycle-owned on purpose:
      * a process-global static is reset and incremented while parsing a
@@ -1204,6 +1247,19 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       ngx_conf_set_flag_slot,
       NGX_HTTP_MAIN_CONF_OFFSET,
       offsetof(ngx_http_zstd_main_conf_t, dict_strict_path),
+      NULL },
+
+    /*
+     * MAIN_CONF like zstd_dict_strict_path, and for the same reason:
+     * what a supplied hash literal MEANS is a property of the whole
+     * load's trust model, not of one location. Must precede every
+     * zstd_dcz_dict_file it applies to (enforced in init_main_conf).
+     */
+    { ngx_string("zstd_dcz_dict_trust_hashes"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      offsetof(ngx_http_zstd_main_conf_t, dcz_dict_trust_hashes),
       NULL },
 
     { ngx_string("zstd_dcz_assume_secure_transport"),
@@ -3415,6 +3471,7 @@ ngx_http_zstd_create_main_conf(ngx_conf_t *cf)
      * pcalloc'd 0 for an already-set value ("is duplicate"). */
     zmcf->dict_unsafe = NGX_CONF_UNSET;
     zmcf->dict_strict_path = NGX_CONF_UNSET;
+    zmcf->dcz_dict_trust_hashes = NGX_CONF_UNSET;
 
     return zmcf;
 }
@@ -3494,6 +3551,35 @@ ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf)
                            "\"zstd_dcz_dict_file\" directive it must "
                            "apply to",
                            &zmcf->dcz_dict_loaded_before_strict_on_file);
+        return NGX_CONF_ERROR;
+    }
+
+    if (zmcf->dcz_dict_trust_hashes == NGX_CONF_UNSET) {
+        zmcf->dcz_dict_trust_hashes = 0;
+    }
+
+    /*
+     * Same ordering rejection as strict_path above, for the same
+     * reason with the opposite polarity: a literal that loaded before
+     * a later "zstd_dcz_dict_trust_hashes on;" was VERIFIED -- correct
+     * bytes, but the full hashing pass the directive exists to skip
+     * was silently paid. Rejecting keeps the directive's effect
+     * position-independent instead of quietly partial.
+     */
+    if (zmcf->dcz_dict_trust_hashes == 1
+        && zmcf->dcz_dict_verified_before_trust_on)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"zstd_dcz_dict_trust_hashes on\" was "
+                           "declared AFTER \"zstd_dcz_dict_file %V\", "
+                           "whose hash literal had already been verified "
+                           "(hashed) by that point. nginx directives are "
+                           "order-independent by convention, but this "
+                           "one is not: move \"zstd_dcz_dict_trust_"
+                           "hashes on;\" before every "
+                           "\"zstd_dcz_dict_file\" directive it must "
+                           "apply to",
+                           &zmcf->dcz_dict_verified_before_trust_on_file);
         return NGX_CONF_ERROR;
     }
 
@@ -5396,7 +5482,7 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_file_info_t            info;
     ngx_http_zstd_dcz_dict_t  *dict, *dicts;
     ngx_http_zstd_main_conf_t *zmcf;
-    ngx_flag_t                 strict;
+    ngx_flag_t                 strict, trust;
 
     (void) cmd;
 
@@ -5409,24 +5495,29 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     /*
      * Optional second argument: the dictionary's SHA-256 as 64 hex
-     * characters, VERIFIED against the bytes actually read below —
-     * never substituted for hashing them. It is a declaration of what
-     * the operator believes the file to be, so a mismatch is a config
-     * error naming both values, not a silently accepted override.
+     * characters. By default it is VERIFIED against the bytes actually
+     * read below — a declaration of what the operator believes the
+     * file to be, so a mismatch is a config error naming both values.
+     * That default protects a pipeline whose config generation and
+     * file placement are decoupled: "zstd_dcz_dict_file new.dict
+     * <hash-of-old.dict>" would otherwise compress with new.dict while
+     * advertising the old hash, and the client holding the advertised
+     * dictionary cannot decode the body.
      *
-     * It was previously trusted verbatim, skipping the read-and-hash
-     * pass. That made "zstd_dcz_dict_file new.dict <hash-of-old.dict>"
-     * compress with new.dict while advertising the old hash: the client
-     * holds the dictionary matching the advertised hash and cannot
-     * decode the body, so a stale or mistyped literal became silent
-     * undecodable dcz responses and the checksum gave false confidence.
-     * The parse-time saving was never worth an unverifiable negotiation
-     * key — the file has to be read into cf->pool regardless, so the
-     * only cost recovered here is the hash of bytes already in memory.
+     * Under "zstd_dcz_dict_trust_hashes on" the literal is instead
+     * trusted verbatim as the negotiation key and the hashing pass is
+     * skipped — the parse-time cost it removes is not the read (the
+     * file lands in cf->pool either way) but the SHA-256 over it,
+     * which at hundreds of dictionaries is essentially ALL of the
+     * config-load CPU (see the flag's comment in the main conf for
+     * the measurement). The opt-in states the trade: the operator's
+     * pipeline, not this module, is then the authority on what the
+     * bytes are.
      *
-     * The literal's SYNTAX is still validated before the file is opened
+     * The literal's SYNTAX is validated before the file is opened
      * so a malformed literal is reported as such, not shadowed by file
-     * errors; the value comparison necessarily waits for the read.
+     * errors — under either policy; trust changes what a well-formed
+     * literal means, not what a malformed one does.
      */
     have_hash = (cf->args->nelts == 3);
 
@@ -5501,6 +5592,22 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         zmcf->dcz_dict_loaded_before_strict_on_file = path;
     }
 
+    /*
+     * Raw read for the same reason as dict_strict_path above: a later
+     * "zstd_dcz_dict_trust_hashes on;" has not been parsed yet when
+     * this line loads, so a literal verified here would silently cost
+     * the full hashing pass the operator asked to skip. Record the
+     * possibility; init_main_conf() rejects the ordering if the flag's
+     * final value turns out to be "on". Only a line WITH a literal is
+     * affected -- unhashed lines are computed under either policy.
+     */
+    trust = (zmcf->dcz_dict_trust_hashes == 1);
+
+    if (have_hash && !trust && !zmcf->dcz_dict_verified_before_trust_on) {
+        zmcf->dcz_dict_verified_before_trust_on = 1;
+        zmcf->dcz_dict_verified_before_trust_on_file = path;
+    }
+
     fd = ngx_http_zstd_open_dict_file(cf, &path, strict, &info);
     if (fd == NGX_INVALID_FILE) {
         return NGX_CONF_ERROR;
@@ -5573,36 +5680,56 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    /*
-     * Unconditional: the negotiation key is always the hash of the
-     * bytes this load actually read. See the have_hash note above.
-     */
-    ngx_http_zstd_dcz_dict_hash(bytes.data, size, hash,
-                                &zmcf->dcz_dicts_hashed);
+    if (have_hash && trust) {
 
-    if (have_hash
-        && ngx_memcmp(supplied, hash, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) != 0)
-    {
-        hexstr.data = hex;
-        hexstr.len = ngx_hex_dump(hex, hash,
-                                  NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) - hex;
+        /*
+         * zstd_dcz_dict_trust_hashes on: the operator opted out of
+         * verification, so the literal IS the negotiation key and the
+         * hashing pass is skipped -- along with its
+         * $zstd_dcz_dicts_hashed increment, which is the observable
+         * witness that the skip actually happened. The trade is the
+         * documented one: a stale or mistyped literal is advertised
+         * verbatim, and a client holding the advertised dictionary
+         * receives responses it may fail to decode or that silently
+         * decode wrong under a same-size stale raw dictionary.
+         */
+        ngx_memcpy(hash, supplied, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
 
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "dcz dictionary \"%V\" does not match the "
-                           "supplied hash \"%V\": the file's SHA-256 is "
-                           "\"%V\"",
-                           &path, &value[2], &hexstr);
+    } else {
 
-        return NGX_CONF_ERROR;
+        /*
+         * Default: the negotiation key is the hash of the bytes this
+         * load actually read. See the have_hash note above.
+         */
+        ngx_http_zstd_dcz_dict_hash(bytes.data, size, hash,
+                                    &zmcf->dcz_dicts_hashed);
+
+        if (have_hash
+            && ngx_memcmp(supplied, hash,
+                          NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) != 0)
+        {
+            hexstr.data = hex;
+            hexstr.len = ngx_hex_dump(hex, hash,
+                                      NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) - hex;
+
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "dcz dictionary \"%V\" does not match the "
+                               "supplied hash \"%V\": the file's SHA-256 is "
+                               "\"%V\"",
+                               &path, &value[2], &hexstr);
+
+            return NGX_CONF_ERROR;
+        }
     }
 
     /*
      * Two entries with the same hash make the negotiation lookup
-     * ambiguous (for computed hashes that means identical content under
-     * two paths — almost certainly a config mistake, e.g. a copy that
-     * was meant to be a new version). Every hash here is computed from
-     * the file's own bytes, so this compares content, not declarations.
-     * Fail loudly at load rather than silently matching the first.
+     * ambiguous. For computed hashes that means identical content
+     * under two paths — almost certainly a config mistake, e.g. a copy
+     * that was meant to be a new version; under trust_hashes a
+     * supplied literal is compared as declared, so this also catches
+     * one literal pasted onto two lines. Fail loudly at load rather
+     * than silently matching the first.
      */
     dicts = zlcf->dcz_dicts->elts;
 

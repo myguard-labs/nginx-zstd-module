@@ -1016,3 +1016,114 @@ GET /t
 Content-Encoding: dcz
 --- no_error_log
 [error]
+
+=== TEST 40: trust_hashes on — the declared literal IS the negotiation key
+# The opt-out's contract, proven the only observable way: the literal
+# deliberately does NOT match the file, and the client advertising the
+# DECLARED value gets dcz. Under the default this exact config is TEST
+# 17's must_die; under trust the operator's pipeline is the authority.
+--- http_config
+    zstd_dcz_dict_trust_hashes on;
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::odd_hex;
+        default_type text/plain;
+        return 200 \"dcz negotiation body: shared-boilerplate compute render\n\";
+    }"
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::odd_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 41: trust_hashes on — the hashing pass is actually skipped
+# The perf contract, witnessed by the same counter that pinned the
+# verify pass in TEST 21: a trusted literal must contribute ZERO to
+# $zstd_dcz_dicts_hashed. Substituting the literal after hashing
+# anyway (trust as a no-op) produces the same negotiation key but
+# reads "1" here.
+--- http_config
+    zstd_dcz_dict_trust_hashes on;
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::dict_hex;
+        default_type text/plain;
+        return 200 \"hashed=\$zstd_dcz_dicts_hashed\n\";
+    }"
+--- request
+GET /t
+--- response_body
+hashed=0
+--- no_error_log
+[error]
+
+
+
+=== TEST 42: trust_hashes on — a line without a literal is still hashed
+# Trust changes what a SUPPLIED literal means, nothing else: an
+# unhashed line has nothing to trust, so it is computed as always and
+# negotiates on the file's real hash.
+--- http_config
+    zstd_dcz_dict_trust_hashes on;
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "hashed=$zstd_dcz_dicts_hashed\n";
+    }
+--- request
+GET /t
+--- response_body
+hashed=1
+--- no_error_log
+[error]
+
+
+
+=== TEST 43: trust_hashes declared AFTER a literal line is a config error
+# Same ordering trap and same remedy as zstd_dict_strict_path: the
+# flag is read at parse time, so a literal above the "on" line was
+# verified — correct bytes, but the full hashing pass the directive
+# exists to skip was silently paid. Reject rather than be quietly
+# position-dependent.
+--- http_config eval
+"    zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::dict_hex;
+    zstd_dcz_dict_trust_hashes on;"
+--- config
+    location /t { return 200 "x"; }
+--- must_die
+--- error_log
+"zstd_dcz_dict_trust_hashes on" was declared AFTER
+--- no_error_log
+[alert]
+
+
+
+=== TEST 44: trust_hashes on does not excuse a malformed literal
+# Trust changes what a well-formed literal means, not what a malformed
+# one does: syntax is validated before the file is opened under either
+# policy.
+--- http_config
+    zstd_dcz_dict_trust_hashes on;
+--- config
+    location /t {
+        zstd on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict zz11;
+        default_type text/plain;
+        return 200 "unreachable\n";
+    }
+--- must_die
+--- error_log
+invalid dcz dictionary hash
+--- no_error_log
+[alert]
