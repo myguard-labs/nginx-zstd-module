@@ -2840,60 +2840,70 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
     lender = NULL;
 
     /*
-     * Borrow a slot whose context is free and was built for this location's
-     * complete memory-affecting profile: compression level, long mode and
-     * window log. A mismatch in any of the three never re-parameterises a
-     * slot: the retained workspace is driven by all three and never shrinks,
-     * so honouring a higher-memory location on an existing slot would raise
-     * that slot's floor for every subsequent request of every other location
-     * mapped to it.
-     *
-     * The same walk records the first slot that is empty AND not on loan, so
-     * a miss can seed it below without a second pass. An empty slot is only
-     * ever seeded, never evicted: a live cached context is not thrown away
-     * mid-flight, and one already on loan is left alone.
+     * Defense-in-depth: INVALID is never cacheable. Multiple out-of-domain
+     * inputs collapse to INVALID, so two different invalid profiles would
+     * compare equal on the borrow path and corrupt the cache. This check is
+     * unreachable today (every field is bounded at config load), but if a
+     * future directive widens a domain, it prevents silent aliasing at the
+     * cost of one more cache miss (a fresh context is always safe).
      */
-    for (i = 0; i < NGX_HTTP_ZSTD_CCTX_SLOTS; i++) {
-        slot = &ngx_http_zstd_worker_cctx_slots[i];
+    if (zlcf_profile.key != NGX_HTTP_ZSTD_PROFILE_INVALID) {
+        /*
+         * Borrow a slot whose context is free and was built for this
+         * location's complete memory-affecting profile: compression level,
+         * long mode and window log. A mismatch in any of the three never
+         * re-parameterises a slot: the retained workspace is driven by all
+         * three and never shrinks, so honouring a higher-memory location on
+         * an existing slot would raise that slot's floor for every
+         * subsequent request of every other location mapped to it.
+         *
+         * The same walk records the first slot that is empty AND not on
+         * loan, so a miss can seed it below without a second pass. An empty
+         * slot is only ever seeded, never evicted: a live cached context is
+         * not thrown away mid-flight, and one already on loan is left alone.
+         */
+        for (i = 0; i < NGX_HTTP_ZSTD_CCTX_SLOTS; i++) {
+            slot = &ngx_http_zstd_worker_cctx_slots[i];
 
-        if (slot->busy) {
-            continue;
-        }
-
-        if (slot->cctx == NULL) {
-            if (free_slot == NULL) {
-                free_slot = slot;
+            if (slot->busy) {
+                continue;
             }
-            continue;
-        }
 
-        if (ngx_http_zstd_cctx_profiles_match(&slot->profile,
-                                              &zlcf_profile))
-        {
-            ctx->cctx = slot->cctx;
-            slot->busy = 1;
-            lender = slot;
-            borrowed = 1;
+            if (slot->cctx == NULL) {
+                if (free_slot == NULL) {
+                    free_slot = slot;
+                }
+                continue;
+            }
 
+            if (ngx_http_zstd_cctx_profiles_match(&slot->profile,
+                                                  &zlcf_profile))
             {
-            ngx_int_t   dbg_level, dbg_wlog;
-            ngx_flag_t  dbg_long;
+                ctx->cctx = slot->cctx;
+                slot->busy = 1;
+                lender = slot;
+                borrowed = 1;
 
-            /*
-             * Unpack rather than read zlcf: this prints what the SLOT was
-             * built for, which is the thing a reuse decision turns on, and
-             * it exercises the key's reversibility on the hot debug path.
-             */
-            ngx_http_zstd_profile_unpack(slot->profile.key, &dbg_level,
-                                         &dbg_long, &dbg_wlog);
+                {
+                ngx_int_t   dbg_level, dbg_wlog;
+                ngx_flag_t  dbg_long;
 
-            ngx_log_debug5(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                           "zstd: reusing worker cctx %p (slot:%ui) "
-                           "level:%i long:%i window_log:%i",
-                           ctx->cctx, i, dbg_level, (ngx_int_t) dbg_long,
-                           dbg_wlog);
+                /*
+                 * Unpack rather than read zlcf: this prints what the SLOT was
+                 * built for, which is the thing a reuse decision turns on, and
+                 * it exercises the key's reversibility on the hot debug path.
+                 */
+                ngx_http_zstd_profile_unpack(slot->profile.key, &dbg_level,
+                                             &dbg_long, &dbg_wlog);
+
+                ngx_log_debug5(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                               "zstd: reusing worker cctx %p (slot:%ui) "
+                               "level:%i long:%i window_log:%i",
+                               ctx->cctx, i, dbg_level, (ngx_int_t) dbg_long,
+                               dbg_wlog);
+                }
+                break;
             }
-            break;
         }
     }
 
@@ -2905,7 +2915,9 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             return NGX_ERROR;
         }
 
-        if (free_slot != NULL) {
+        if (free_slot != NULL
+            && zlcf_profile.key != NGX_HTTP_ZSTD_PROFILE_INVALID)
+        {
             free_slot->cctx = ctx->cctx;
             ngx_http_zstd_cctx_profile_from_conf_wlog(&free_slot->profile,
                 zlcf, eff_window_log);
