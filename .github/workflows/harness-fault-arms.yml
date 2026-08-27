@@ -344,8 +344,14 @@ jobs:
           # survived would look green while measuring nothing about the
           # property in the scenario's title. Require the count halves to have
           # really run -- they are the even-numbered oracles 2, 4, 6, 8 and 10.
+          # The `[^#]*$` tail is load-bearing: without it a SKIP line
+          # ("ok 8 - dcz: total codec calls is 7 # SKIP ...") matches, and this
+          # gate would bank a green for an oracle that asserted nothing --
+          # precisely the false green it exists to prevent. TAP puts the
+          # directive after the description, so requiring no '#' to the end of
+          # the line is what distinguishes a real pass from a SKIP or a TODO.
           for n in 2 4 6 8 10; do
-            if ! grep -qE "^ok $n - .*total codec calls is" \
+            if ! grep -qE "^ok $n - [^#]*total codec calls is [^#]*$" \
                  "$GITHUB_WORKSPACE/codec-call-count-tap.log"; then
               echo "::error::oracle $n (a total-codec-calls assertion) did" \
                 "not pass -- without the count halves this scenario cannot" \

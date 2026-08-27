@@ -37,6 +37,21 @@ if ! command -v zstd >/dev/null 2>&1; then
     exit 1
 fi
 
+# openssl(1) is gated on exactly the same reasoning, and it is the CLI that is
+# required, not libssl: the driver shells out to `openssl dgst`/`openssl base64`
+# to derive the Available-Dictionary hash the dcz arm negotiates with. Without
+# it that arm cannot run.
+#
+# It is a hard gate rather than a driver-side SKIP deliberately. A SKIP prints
+# an "ok ... # SKIP" line, which reads as a pass to every consumer that greps
+# for the oracle -- so the dcz arm would assert nothing while the run stayed
+# green, which is the false green this scenario exists to remove. Failing the
+# whole scenario here is loud and impossible to misread.
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "openssl(1) not found -- the dcz arm derives its Available-Dictionary hash with \"openssl dgst -sha256 | openssl base64\"; the CLI is required, not just libssl"
+    exit 1
+fi
+
 # Stage the dictionary fixture the dcz and trained-dict arms need.
 #
 # It has to exist before nginx runs its CONFIG TEST -- zstd_dcz_dict_file and

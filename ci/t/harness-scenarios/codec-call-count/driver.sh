@@ -88,6 +88,9 @@ mkdir -p "$WWW" "$PROBER_PREFIX/tmp"
 # PROBER_SERVER_BIN is the exported <build>/objs/nginx, so its dirname is
 # the same objs/ dir @BUILD_OBJS@ renders into the conf.
 DICT_FILE="$(dirname "$PROBER_SERVER_BIN")/codec-call-count.dict"
+# openssl(1) presence is already proven by this scenario's `requires` gate, so
+# an empty result here means the dictionary FILE is unreadable, not that the
+# tool is missing -- which is why the failure branch below says so.
 DICT_SHA_B64="$(openssl dgst -sha256 -binary "$DICT_FILE" 2>/dev/null \
                 | openssl base64 -A 2>/dev/null || true)"
 
@@ -294,8 +297,15 @@ if [ -n "$DICT_SHA_B64" ]; then
         "Accept-Encoding: zstd, dcz" \
         "Available-Dictionary: :$DICT_SHA_B64:"
 else
-    ok "dcz: response decodes byte-for-byte to the origin # SKIP openssl unavailable"
-    ok "dcz: total codec calls is 7 # SKIP openssl unavailable"
+    # NOT a SKIP. openssl(1) is a hard requires-gate for this scenario, so
+    # reaching here means the hash derivation failed for some other reason --
+    # an unreadable or truncated dictionary file. A SKIP would print
+    # "ok ... # SKIP", which reads as a pass to anything grepping for the
+    # oracle, so the dcz arm would assert nothing while the run stayed green.
+    # Fail loudly instead, and say what actually broke rather than blaming a
+    # missing tool the gate already proved is present.
+    notok "dcz: response decodes byte-for-byte to the origin (could not derive the dictionary hash from $DICT_FILE)"
+    notok "dcz: total codec calls is 7 (not measured -- no dictionary hash)"
 fi
 
 measure "flush-last" "/flushlast" "$WWW/index.html" zstd 57
