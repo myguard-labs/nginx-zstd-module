@@ -119,7 +119,7 @@ jobs:
           echo "✓ actionlint: workflows valid"
 
       - name: Cache apt packages
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           # User-owned dir, not the system /var/cache/apt/archives: apt runs
           # under sudo (root-owned output), so actions/cache's post-step tar
@@ -385,7 +385,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache apt packages
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           # User-owned dir, not the system /var/cache/apt/archives: apt runs
           # under sudo (root-owned output), so actions/cache's post-step tar
@@ -424,7 +424,7 @@ jobs:
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
       - name: Cache ccache objects
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/.ccache
           key: ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('filter/*.c', 'static/*.c', '*.h', 'config') }}
@@ -434,7 +434,7 @@ jobs:
 
       - name: Cache server source tarball
         id: src-tarball
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ${{ matrix.dir }}.tar.gz
           key: src-${{ matrix.flavor }}-${{ matrix.version }}
@@ -617,7 +617,7 @@ jobs:
 
       - name: Cache libzstd 1.4.x source tarball
         id: zstd-tarball
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: zstd-${{ env.OLD_ZSTD_VERSION }}.tar.gz
           key: zstd-src-${{ env.OLD_ZSTD_VERSION }}
@@ -667,7 +667,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball-old
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
@@ -805,7 +805,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
@@ -1050,7 +1050,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
@@ -1211,7 +1211,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
@@ -1302,7 +1302,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache apt packages
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           # User-owned dir, not the system /var/cache/apt/archives: apt runs
           # under sudo (root-owned output), so actions/cache's post-step tar
@@ -1349,7 +1349,7 @@ jobs:
           echo "✓ nginx binary ready: $(nginx-bin/nginx -v 2>&1)"
 
       - name: Cache Perl modules
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/perl5
           key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
@@ -1741,7 +1741,7 @@ jobs:
           echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/nginx-bin/nginx" >> "$GITHUB_ENV"
 
       - name: Cache Perl modules
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/perl5
           key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
@@ -1965,7 +1965,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
