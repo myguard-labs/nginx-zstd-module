@@ -317,6 +317,33 @@ jobs:
           # ptrace-only fixture. No nginx, no libzstd -- pure Bash.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_soak_asan_verdict_unit.sh
 
+      - name: LSan positive control unit fixture (smoke-tests clean-vs-could-not-run)
+        run: |
+          # The "Run smoke tests under ASAN+UBSAN" step's leak verdict
+          # already told a real finding from a ptrace-blocked log (the
+          # soak_asan_verdict() shape, A27-F9), but a log with NEITHER
+          # signature only means "no finding was written" -- it does not
+          # prove LSan's exit-time check ran at all. Observed in CI: run
+          # 33084048220 ("Tests ASAN+UBSAN" job) printed "All smoke tests
+          # clean under ASAN+UBSAN" from a /tmp/lsan-smoke.* log with
+          # neither shape, and SECONDS later in the SAME job the
+          # zstd_dict_file reload-leak step hit the ptrace-blocked
+          # signature 4/4 -- same runner, same environment. That "clean"
+          # was indistinguishable from "never ran".
+          # ci/tools/lsan_positive_control.sh (extracted from the canary
+          # test_reload_leak.sh already used) now gates the smoke step's
+          # "clean" branch on independently proving a deliberate leak IS
+          # caught here; if the control fails, the step demotes to a
+          # loud, distinct "INDETERMINATE (could not run)" instead of a
+          # silent green. This fixture drives the real if/elif/else +
+          # control shape against finding / ptrace-signature /
+          # clean-but-control-fails / clean-and-control-passes fixtures,
+          # runs the control function for real, and ends with a negative
+          # control proving the pre-fix (no control) shape would have
+          # reported the run-33084048220 case as clean. Needs a working
+          # `cc`; skips (does not fail) if none is on PATH.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_lsan_positive_control_unit.sh
+
       - name: static pread retry/accumulate unit fixture (EINTR, short read, O_DIRECT alignment)
         run: |
           # ngx_http_zstd_static_pread(): the static probe's retry/accumulate
@@ -2019,8 +2046,52 @@ jobs:
                  "to restore coverage."
             echo "⚠ smoke tests passed; leak check INDETERMINATE"
           else
-            echo "✓ no unsuppressed leaks under the smoke tests"
-            echo "✓ All smoke tests clean under ASAN+UBSAN"
+            # A clean log here is NOT proof LSan ran: run 33084048220 printed
+            # this exact "clean" verdict, and seconds later in the SAME job
+            # the reload-leak step's ptrace-blocked signature fired 4/4 --
+            # same runner, same environment. A log with neither a finding
+            # nor the ptrace signature is indistinguishable from "LSan never
+            # attempted its exit-time check at all", so a bare grep miss is
+            # not enough to call this clean. Prove the detector actually
+            # works here first, with the SAME positive control
+            # test_reload_leak.sh uses (ci/tools/lsan_positive_control.sh),
+            # before trusting the "no finding" reading above.
+            #
+            # Three outcomes, not two: rc=2 ("could not even attempt the
+            # control" -- no cc, or the ASan compile failed) is a
+            # different, honest fact from rc=1 ("attempted, LSan failed to
+            # catch the canary" -- ptrace is the known cause here). Only
+            # rc=1 is the run-33084048220 ambiguity this fix closes; rc=2
+            # gets its own loud, distinct label rather than being folded
+            # into either "clean" or the ptrace-specific warning.
+            . "$GITHUB_WORKSPACE/ci/tools/lsan_positive_control.sh"
+            set +e
+            lsan_positive_control
+            control_rc=$?
+            set -e
+            if [ "$control_rc" -eq 0 ]; then
+              echo "✓ no unsuppressed leaks under the smoke tests"
+              echo "✓ positive control confirmed LSan can detect a deliberate leak here"
+              echo "✓ All smoke tests clean under ASAN+UBSAN"
+            elif [ "$control_rc" -eq 2 ]; then
+              echo "::warning::LeakSanitizer's positive control could not even" \
+                   "be attempted (no ASan-capable cc on this runner) --" \
+                   "cannot confirm the clean smoke log above means no leaks." \
+                   "Smoke leak check INDETERMINATE (could not attempt control)."
+              echo "⚠ smoke tests passed; leak check INDETERMINATE (control could not run)"
+            else
+              echo "::warning::LeakSanitizer's positive control failed here" \
+                   "(a deliberate canary leak was not caught, so LSan's" \
+                   "exit-time check is not provably working). The most" \
+                   "likely cause on this runner pool is ptrace being" \
+                   "blocked (LXC seccomp / yama), same as run 33084048220's" \
+                   "reload-leak step; if that is ruled out, check the ASan" \
+                   "toolchain install instead. The clean smoke log above" \
+                   "does NOT mean no leaks; it means the leak check could" \
+                   "not run. Smoke leak check INDETERMINATE, not clean;" \
+                   "fix the runner profile to restore coverage."
+              echo "⚠ smoke tests passed; leak check INDETERMINATE (could not run)"
+            fi
           fi
 
       - name: zstd_dict_file reload leak check (CDict lifecycle)
