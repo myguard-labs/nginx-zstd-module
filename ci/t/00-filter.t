@@ -2796,3 +2796,142 @@ sub {
 first-chunk-second-chunk-third-chunk-fourth-chunk-tail
 --- no_error_log
 [error]
+
+
+
+=== TEST 101: pledged size just below the configured buffer size still round-trips
+# Boundary regression for skipping ZSTD_compressBound() when the pledged
+# Content-Length is already >= the configured zstd_buffers size (that
+# skip cannot shrink buf_size below what the call would have produced --
+# see the get_buf() comment). zstd_buffers is pinned to a small, exact
+# size (1 buffer of 512 bytes) so the boundary sits at an exact byte
+# count instead of the 128 KB default. This case pledges 511 bytes --
+# ONE BYTE UNDER buf_size -- which must still take the ORIGINAL
+# ZSTD_compressBound() path (pledged_size < buf_size), unaffected by the
+# new skip branch. Correctness oracle: byte-exact round-trip.
+--- config eval
+"    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        zstd_buffers 1 512;
+        proxy_pass http://127.0.0.1:\$TEST_NGINX_SERVER_PORT/src;
+    }
+    location /src {
+        default_type text/plain;
+        return 200 \"" . ("A" x 511) . "\";
+    }"
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+!Content-Length
+Content-Encoding: zstd
+--- response_body_filters eval
+sub {
+    my $zstd = $_[0];
+    require File::Temp;
+    my ($tfh, $tmp) = File::Temp::tempfile("zstd_t101_XXXXXX",
+                                           TMPDIR => 1, UNLINK => 1);
+    binmode($tfh); print $tfh $zstd; close($tfh);
+    open(my $r, "-|", "zstd", "-dqc", $tmp) or do { unlink $tmp; return "ERR" };
+    local $/; my $d = <$r>; close($r); my $rc = $?; unlink $tmp;
+    return "ERR-DECODE rc=$rc" if $rc != 0;
+    return $d;
+}
+--- response_body eval
+"A" x 511
+--- no_error_log
+[error]
+
+
+
+=== TEST 102: pledged size EXACTLY EQUAL to the configured buffer size still round-trips
+# The exact boundary the skip's ">=" comparison turns on: pledged_size ==
+# buf_size (512 == 512) takes the NEW skip path (get_buf():
+# "(size_t) ctx->pledged_size >= buf_size"). ZSTD_compressBound(512) + 64
+# is provably >= 512, so the clamp this call feeds would never have fired
+# here either -- this case is the one boundary value where that claim
+# must hold exactly, not just in the general case covered by TEST 103.
+--- config eval
+"    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        zstd_buffers 1 512;
+        proxy_pass http://127.0.0.1:\$TEST_NGINX_SERVER_PORT/src;
+    }
+    location /src {
+        default_type text/plain;
+        return 200 \"" . ("B" x 512) . "\";
+    }"
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+!Content-Length
+Content-Encoding: zstd
+--- response_body_filters eval
+sub {
+    my $zstd = $_[0];
+    require File::Temp;
+    my ($tfh, $tmp) = File::Temp::tempfile("zstd_t102_XXXXXX",
+                                           TMPDIR => 1, UNLINK => 1);
+    binmode($tfh); print $tfh $zstd; close($tfh);
+    open(my $r, "-|", "zstd", "-dqc", $tmp) or do { unlink $tmp; return "ERR" };
+    local $/; my $d = <$r>; close($r); my $rc = $?; unlink $tmp;
+    return "ERR-DECODE rc=$rc" if $rc != 0;
+    return $d;
+}
+--- response_body eval
+"B" x 512
+--- no_error_log
+[error]
+
+
+
+=== TEST 103: pledged size well ABOVE the configured buffer size still round-trips
+# Deep into the skip path: a body several times larger than buf_size,
+# well past the boundary, still round-trips byte-exact with the
+# ZSTD_compressBound() call skipped on the first buffer. (4000 bytes,
+# not larger: nginx's config-file tokenizer has its own line-length
+# limit on a quoted "return" literal, well under a size that would
+# still usefully exercise this boundary -- 4000 is comfortably above
+# both buf_size=512 and that unrelated limit.)
+--- config eval
+"    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        zstd_buffers 4 512;
+        proxy_pass http://127.0.0.1:\$TEST_NGINX_SERVER_PORT/src;
+    }
+    location /src {
+        default_type text/plain;
+        return 200 \"" . ("C" x 4000) . "\";
+    }"
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+!Content-Length
+Content-Encoding: zstd
+--- response_body_filters eval
+sub {
+    my $zstd = $_[0];
+    require File::Temp;
+    my ($tfh, $tmp) = File::Temp::tempfile("zstd_t103_XXXXXX",
+                                           TMPDIR => 1, UNLINK => 1);
+    binmode($tfh); print $tfh $zstd; close($tfh);
+    open(my $r, "-|", "zstd", "-dqc", $tmp) or do { unlink $tmp; return "ERR" };
+    local $/; my $d = <$r>; close($r); my $rc = $?; unlink $tmp;
+    return "ERR-DECODE rc=$rc" if $rc != 0;
+    return $d;
+}
+--- response_body eval
+"C" x 4000
+--- no_error_log
+[error]

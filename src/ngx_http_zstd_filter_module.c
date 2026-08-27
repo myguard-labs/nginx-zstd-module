@@ -2773,24 +2773,66 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
          * streaming case, so this never fires there.
          */
         if (first_buf && ctx->pledged_size >= 0) {
-            size_t  bound = ZSTD_compressBound((size_t) ctx->pledged_size);
 
+#if NGX_MAX_OFF_T_VALUE <= 0xFF00FF00FF00FF00ULL
             /*
-             * ZSTD_compressBound() covers only the compressed payload; pad
-             * it for libzstd's own frame/block header overhead. Never grow
-             * past the configured size, and keep a small floor so
-             * tiny/empty bodies still get a buffer the frame overhead fits
-             * inside.
+             * ZSTD_compressBound(n) == n + (n>>8) + margin, margin >= 0
+             * always (see zstd.h's ZSTD_COMPRESSBOUND macro) -- so the
+             * bound this call would return can never be smaller than
+             * `ctx->pledged_size` itself, and the `+= 64` pad below only
+             * grows it further. When the pledged size is already at
+             * least the configured buffer size, `bound` (however it is
+             * computed) can therefore never satisfy `bound < buf_size`,
+             * so the clamp two lines down never fires and buf_size is
+             * left exactly as it already is. Skip the call entirely on
+             * that path -- one fewer external libzstd call per known
+             * large response, same buf_size either way.
+             *
+             * Gated on the compile-time proof that `off_t`'s range
+             * cannot reach ZSTD_MAX_INPUT_SIZE: NGX_MAX_OFF_T_VALUE is
+             * nginx's own auto-detected max for the platform's off_t
+             * (objs/ngx_auto_config.h, from auto/types/sizeof), and
+             * ZSTD_MAX_INPUT_SIZE is 0xFF00FF00FF00FF00 on any platform
+             * where zstd.h sees an 8-byte size_t (checked via the same
+             * constant here, not a sizeof, so this is decided at
+             * preprocessing before zstd.h's own size_t-width branch is
+             * evaluated). Every off_t this nginx build can produce is
+             * provably inside ZSTD_MAX_INPUT_SIZE here, so
+             * ZSTD_compressBound() cannot hit its own overflow branch
+             * (return 0) for any value pledged_size can hold -- the skip
+             * is safe. A target where this #if is false keeps the
+             * original call and clamp below, unchanged.
              */
-            bound += 64;
+            if ((size_t) ctx->pledged_size >= buf_size) {
+                goto skip_bound;
+            }
+#endif
 
-            if (bound < 256) {
-                bound = 256;
+            {
+                size_t  bound = ZSTD_compressBound((size_t) ctx->pledged_size);
+
+                /*
+                 * ZSTD_compressBound() covers only the compressed
+                 * payload; pad it for libzstd's own frame/block header
+                 * overhead. Never grow past the configured size, and
+                 * keep a small floor so tiny/empty bodies still get a
+                 * buffer the frame overhead fits inside.
+                 */
+                bound += 64;
+
+                if (bound < 256) {
+                    bound = 256;
+                }
+
+                if (bound < buf_size) {
+                    buf_size = bound;
+                }
             }
 
-            if (bound < buf_size) {
-                buf_size = bound;
-            }
+#if NGX_MAX_OFF_T_VALUE <= 0xFF00FF00FF00FF00ULL
+skip_bound:
+            ;
+#endif
         }
 
         /*

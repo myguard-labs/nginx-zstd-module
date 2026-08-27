@@ -87,17 +87,38 @@ ngx_http_zstd_skip_quoted(u_char *p, const u_char *end)
 static ngx_int_t
 ngx_http_zstd_parse_q_fraction(const u_char *end, u_char **p)
 {
-    /* ngx_int_t (not int) so the digit*scale product widens before the
+    /* ngx_int_t (not int) so each digit*weight product widens before the
      * add — avoids a theoretical int overflow CodeQL flags (the operands
      * are tiny in practice). */
-    ngx_int_t  scale = 100;
     ngx_int_t  frac = 0;
     u_char    *q = *p;
 
-    while (q < end && *q >= '0' && *q <= '9' && scale > 0) {
-        frac += (*q - '0') * scale;
-        scale /= 10;
+    /*
+     * RFC 9110's qvalue grammar permits at most three fractional digits
+     * ("0" "." 0*3DIGIT), so the walk is fixed at three guarded steps
+     * with literal weights 100/10/1 instead of a loop counting a
+     * runtime `scale` down by dividing by 10 each iteration. Each step
+     * is behaviour-identical to one loop iteration of the original: it
+     * only fires if the previous step also fired (so a mismatch or
+     * end-of-input at digit N leaves N-1..2 unconsumed, exactly as the
+     * loop's own condition would stop it), and after the third digit
+     * `q` is NOT advanced again -- a fourth or later digit byte is
+     * deliberately left for the caller's trailing-junk check to reject,
+     * the same contract the loop's `scale > 0` guard enforced.
+     */
+    if (q < end && *q >= '0' && *q <= '9') {
+        frac += (*q - '0') * 100;
         q++;
+
+        if (q < end && *q >= '0' && *q <= '9') {
+            frac += (*q - '0') * 10;
+            q++;
+
+            if (q < end && *q >= '0' && *q <= '9') {
+                frac += (*q - '0') * 1;
+                q++;
+            }
+        }
     }
 
     *p = q;
