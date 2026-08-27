@@ -321,6 +321,58 @@ case_generic_weight_wildcard_not_allowed(void)
 }
 
 static void
+case_nonq_param_is_skipped_trailing_q_honoured(void)
+{
+    /*
+     * Deliberate, specified divergence from nginx core. Core's
+     * ngx_http_gzip_accept_encoding() NGX_DECLINEs on any post-';' byte
+     * that is not 'q'/'Q'/OWS, so it drops the whole element on
+     * "gzip;foo=bar" -- losing any weight the client did express.
+     *
+     * This parser instead skips an unrecognized parameter's value to the
+     * next top-level delimiter and keeps parsing, so a trailing "q" on
+     * the SAME element is still found and honoured. That is strictly more
+     * faithful to what the client asked for, in both directions:
+     * q=0 must still suppress, q=1 must still accept. Ignoring an
+     * unrecognized parameter is the standard HTTP robustness posture; the
+     * leniency is a superset that only ever compresses for a client that
+     * explicitly named zstd.
+     */
+    check(decide("zstd;foo=bar;q=0") == NGX_DECLINED,
+          "a skipped non-q parameter must not swallow the trailing q=0 "
+          "(client explicitly refused zstd)");
+    check(decide("zstd;foo=bar;q=1") == NGX_OK,
+          "a skipped non-q parameter must not swallow the trailing q=1");
+    check(decide("zstd;foo=bar") == NGX_OK,
+          "an unrecognized parameter with no q defaults to q=1, rather "
+          "than dropping an element the client explicitly asked for");
+    check(decide("zstd;foo") == NGX_OK,
+          "a bare unrecognized parameter is likewise ignored, not fatal");
+}
+
+
+static void
+case_nonq_param_quoted_value_delimiter_scan(void)
+{
+    /*
+     * The quoted-string arm of the skip loop: a top-level ';' or ',' that
+     * appears INSIDE a quoted parameter value must not be mistaken for the
+     * end of the value, or the trailing q would be parsed out of the wrong
+     * position (or missed entirely).
+     */
+    check(decide("zstd;foo=\"a,b;c\";q=0") == NGX_DECLINED,
+          "a ';' and ',' inside a quoted non-q value do not end the value; "
+          "the real trailing q=0 is still the one honoured");
+    check(decide("zstd;foo=a\"b\";q=0") == NGX_DECLINED,
+          "a quoted run starting mid-value is skipped as one unit and "
+          "parsing resumes at the ';', finding the trailing q=0");
+    check(decide("zstd;foo=\"unterm") == NGX_OK,
+          "an unterminated quoted non-q value runs to end without an OOB "
+          "read and leaves the element at the default q=1");
+}
+
+
+static void
 case_skip_quoted_unterminated(void)
 {
     /* ngx_http_zstd_skip_quoted() must still terminate (advance past at
@@ -359,6 +411,8 @@ main(void)
     case_end_of_buffer_no_trailing_nul_reliance();
     case_generic_weight_wildcard_not_allowed();
     case_skip_quoted_unterminated();
+    case_nonq_param_is_skipped_trailing_q_honoured();
+    case_nonq_param_quoted_value_delimiter_scan();
 
     printf("\n%d/%d checks passed\n", checks - failures, checks);
     return failures ? 1 : 0;
