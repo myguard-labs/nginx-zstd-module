@@ -29,8 +29,8 @@ name: CI Deep
 # supports flavor+version args and sha256-verifies the tarball it downloads.
 #
 # Action pins (keep in sync with build-test.yml header):
-# actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
-# actions/upload-artifact@v5 -> 330a01c490aca151604b8cf639adc76d48f6c5d4
+# actions/checkout@v5.1.0      -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+# actions/upload-artifact@v5   -> 330a01c490aca151604b8cf639adc76d48f6c5d4
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -124,7 +124,7 @@ jobs:
             port: 19320
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -145,7 +145,7 @@ jobs:
             wget zstd libperl-dev cpanminus ccache mold
 
       - name: Cache ccache objects
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: ~/.ccache
           key: ccache-ci-deep-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('ci/tools/ci-build.sh', 'config', 'src/**') }}
@@ -162,7 +162,7 @@ jobs:
       # revision, others stale) is worse than a clean rebuild, since a
       # mismatched .o silently links into a binary that matches nothing.
       - name: Cache build tree
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: .build/${{ matrix.flavor }}-${{ matrix.version }}
           key: build-tree-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('ci/tools/ci-build.sh', 'config', 'src/**') }}
@@ -192,7 +192,7 @@ jobs:
           echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/$build/$MATRIX_FLAVOR" >> "$GITHUB_ENV"
 
       - name: Cache Perl modules
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: ~/perl5
           key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
@@ -249,10 +249,13 @@ jobs:
     name: Fuzz (Accept-Encoding, long)
     if: ${{ (inputs.jobs || 'all') == 'all' }}
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
-    timeout-minutes: 600
+    # 600 on the self-hosted pool (vars.POOL set); GitHub's hosted-runner hard
+    # cap is 360min regardless of what's declared here, so on the
+    # ubuntu-latest fallback (vars.POOL unset) stay under it (c3).
+    timeout-minutes: ${{ vars.POOL && 600 || 350 }}
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -382,7 +385,7 @@ jobs:
     timeout-minutes: 240
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
       - name: Resolve latest mainline nginx
@@ -471,7 +474,7 @@ jobs:
     timeout-minutes: 240
     steps:
       - name: Checkout module (with harness submodule)
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
           submodules: recursive
@@ -653,7 +656,7 @@ jobs:
     timeout-minutes: 240
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
       - name: Resolve latest mainline nginx
@@ -725,7 +728,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
       - name: Install dependencies
@@ -844,7 +847,7 @@ jobs:
       TEST_NGINX_PORT: 19330
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
           # coverage.sh runs the ci/t/harness-scenarios/* scenarios by default
@@ -869,7 +872,7 @@ jobs:
             build-essential curl libpcre2-dev libzstd-dev pkg-config \
             wget zstd libperl-dev cpanminus gcovr
       - name: Cache Perl modules
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: ~/perl5
           key: perl-modules-${{ runner.os }}-Test-Nginx-Socket

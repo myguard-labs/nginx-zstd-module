@@ -4,8 +4,8 @@ name: Build & Test
 # This pin table is the canonical reference for ALL workflow files
 # (build-test.yml, codeql.yml, security-scanners.yml, fuzzing.yml) —
 # keep them consistent.
-# actions/checkout@v5          -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
-# actions/cache@v4             -> 0057852bfaa89a56745cba8c7296529d2fc39830
+# actions/checkout@v5.1.0      -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+# actions/cache@v5.1.0         -> caa296126883cff596d87d8935842f9db880ef25
 # actions/upload-artifact@v5   -> 330a01c490aca151604b8cf639adc76d48f6c5d4
 # actions/download-artifact@v5 -> 634f93cb2916e3fdff6788551b99b062d0335ce0
 # github/codeql-action/*@v4    -> 8aad20d150bbac5944a9f9d289da16a4b0d87c1e
@@ -83,7 +83,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -119,9 +119,13 @@ jobs:
           echo "✓ actionlint: workflows valid"
 
       - name: Cache apt packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
-          path: /var/cache/apt/archives
+          # User-owned dir, not the system /var/cache/apt/archives: apt runs
+          # under sudo (root-owned output), so actions/cache's post-step tar
+          # (unprivileged runner user) cannot read archives/lock or
+          # archives/partial there and silently fails to save (c2).
+          path: ${{ runner.temp }}/apt-archives
           key: apt-validation-${{ runner.os }}-shellcheck-cppcheck-clang-tools-nginx-dev
           restore-keys: apt-validation-${{ runner.os }}-
 
@@ -130,11 +134,13 @@ jobs:
           # apt profile the bare apt-get lines below rely on: loose timeouts
           # for the shared self-hosted box; Azure mirror only on the
           # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          mkdir -p "$RUNNER_TEMP/apt-archives"
           printf '%s\n' \
             'DPkg::Lock::Timeout "120";' \
             'Acquire::Retries "3";' \
             'Acquire::http::Timeout "20";' \
             'Acquire::https::Timeout "20";' \
+            "Dir::Cache::archives \"$RUNNER_TEMP/apt-archives\";" \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
           sudo apt-get install -y \
@@ -374,14 +380,18 @@ jobs:
           echo "### Build: $FLAVOR $VERSION" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Cache apt packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
-          path: /var/cache/apt/archives
+          # User-owned dir, not the system /var/cache/apt/archives: apt runs
+          # under sudo (root-owned output), so actions/cache's post-step tar
+          # (unprivileged runner user) cannot read archives/lock or
+          # archives/partial there and silently fails to save (c2).
+          path: ${{ runner.temp }}/apt-archives
           key: apt-build-${{ runner.os }}-build-essential-libzstd-libpcre2-zlib
           restore-keys: apt-build-${{ runner.os }}-
 
@@ -390,11 +400,13 @@ jobs:
           # apt profile the bare apt-get lines below rely on: loose timeouts
           # for the shared self-hosted box; Azure mirror only on the
           # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          mkdir -p "$RUNNER_TEMP/apt-archives"
           printf '%s\n' \
             'DPkg::Lock::Timeout "120";' \
             'Acquire::Retries "3";' \
             'Acquire::http::Timeout "20";' \
             'Acquire::https::Timeout "20";' \
+            "Dir::Cache::archives \"$RUNNER_TEMP/apt-archives\";" \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
           sudo apt-get install -y \
@@ -412,7 +424,7 @@ jobs:
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
       - name: Cache ccache objects
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: ~/.ccache
           key: ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('filter/*.c', 'static/*.c', '*.h', 'config') }}
@@ -422,7 +434,7 @@ jobs:
 
       - name: Cache server source tarball
         id: src-tarball
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: ${{ matrix.dir }}.tar.gz
           key: src-${{ matrix.flavor }}-${{ matrix.version }}
@@ -583,7 +595,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -605,7 +617,7 @@ jobs:
 
       - name: Cache libzstd 1.4.x source tarball
         id: zstd-tarball
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: zstd-${{ env.OLD_ZSTD_VERSION }}.tar.gz
           key: zstd-src-${{ env.OLD_ZSTD_VERSION }}
@@ -655,7 +667,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball-old
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
@@ -772,7 +784,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -793,7 +805,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
@@ -1010,7 +1022,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -1038,7 +1050,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
@@ -1178,7 +1190,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -1199,7 +1211,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}
@@ -1285,14 +1297,18 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Cache apt packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
-          path: /var/cache/apt/archives
+          # User-owned dir, not the system /var/cache/apt/archives: apt runs
+          # under sudo (root-owned output), so actions/cache's post-step tar
+          # (unprivileged runner user) cannot read archives/lock or
+          # archives/partial there and silently fails to save (c2).
+          path: ${{ runner.temp }}/apt-archives
           key: apt-tests-${{ runner.os }}-libperl-cpanminus-libzstd1
           restore-keys: apt-tests-${{ runner.os }}-
 
@@ -1301,11 +1317,13 @@ jobs:
           # apt profile the bare apt-get lines below rely on: loose timeouts
           # for the shared self-hosted box; Azure mirror only on the
           # ubuntu-latest fallback when vars.POOL is unset (PR #121)
+          mkdir -p "$RUNNER_TEMP/apt-archives"
           printf '%s\n' \
             'DPkg::Lock::Timeout "120";' \
             'Acquire::Retries "3";' \
             'Acquire::http::Timeout "20";' \
             'Acquire::https::Timeout "20";' \
+            "Dir::Cache::archives \"$RUNNER_TEMP/apt-archives\";" \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
           sudo apt-get install -y \
@@ -1331,7 +1349,7 @@ jobs:
           echo "✓ nginx binary ready: $(nginx-bin/nginx -v 2>&1)"
 
       - name: Cache Perl modules
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: ~/perl5
           key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
@@ -1692,7 +1710,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -1723,7 +1741,7 @@ jobs:
           echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/nginx-bin/nginx" >> "$GITHUB_ENV"
 
       - name: Cache Perl modules
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: ~/perl5
           key: perl-modules-${{ runner.os }}-Test-Nginx-Socket
@@ -1925,7 +1943,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -1947,7 +1965,7 @@ jobs:
 
       - name: Cache nginx source tarball
         id: nginx-tarball
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
           path: nginx-${{ env.NGINX_VERSION }}.tar.gz
           key: nginx-src-${{ env.NGINX_VERSION }}

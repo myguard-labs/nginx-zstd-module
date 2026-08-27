@@ -59,15 +59,19 @@ jobs:
 
     steps:
       - name: Checkout module (with harness submodule)
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
           submodules: recursive
 
       - name: Cache apt packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v4
         with:
-          path: /var/cache/apt/archives
+          # User-owned dir, not the system /var/cache/apt/archives: apt runs
+          # under sudo (root-owned output), so actions/cache's post-step tar
+          # (unprivileged runner user) cannot read archives/lock or
+          # archives/partial there and silently fails to save (c2).
+          path: ${{ runner.temp }}/apt-archives
           key: apt-harness-${{ runner.os }}-build-essential-libzstd-libpcre2-zlib-openssl
           restore-keys: apt-harness-${{ runner.os }}-
 
@@ -75,11 +79,13 @@ jobs:
         run: |
           # builder02 apt profile: loose timeouts -- the box runs jobs
           # concurrently and never talks to the Azure mirror (PR #121)
+          mkdir -p "$RUNNER_TEMP/apt-archives"
           printf '%s\n' \
             'DPkg::Lock::Timeout "120";' \
             'Acquire::Retries "3";' \
             'Acquire::http::Timeout "20";' \
             'Acquire::https::Timeout "20";' \
+            "Dir::Cache::archives \"$RUNNER_TEMP/apt-archives\";" \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
           sudo apt-get install -y \
