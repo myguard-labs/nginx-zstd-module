@@ -1,5 +1,6 @@
 /*
  * Copyright (C) Alex Zhang
+ * Copyright (C) 2026 Thijs Eilander
  *
  * Shared helpers used by both the filter module and the static module.
  * Included as a static inline header to avoid a separate compilation unit
@@ -478,6 +479,35 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
 
 
 /*
+ * Push a response header with the given key and value. Handles the
+ * nginx_version >= 1023000 guard that sets next=NULL to prevent linked-list
+ * corruption on HTTP/1.1 responses. Both key and value are ngx_str_t.
+ *
+ * Returns NGX_OK on success, NGX_ERROR on allocation failure.
+ */
+static ngx_inline ngx_int_t
+ngx_http_zstd_push_header(ngx_http_request_t *r, const char *key,
+    const char *value)
+{
+    ngx_table_elt_t  *h;
+
+    h = ngx_list_push(&r->headers_out.headers);
+    if (h == NULL) {
+        return NGX_ERROR;
+    }
+
+    h->hash = 1;
+#if (nginx_version >= 1023000)
+    h->next = NULL;
+#endif
+    ngx_str_set(&h->key, key);
+    ngx_str_set(&h->value, value);
+
+    return NGX_OK;
+}
+
+
+/*
  * ngx_http_zstd_vary_accept_encoding()
  *
  * Make "Vary: Accept-Encoding" safe BY CONSTRUCTION on any response
@@ -533,7 +563,7 @@ static ngx_inline ngx_int_t
 ngx_http_zstd_vary_accept_encoding(ngx_http_request_t *r)
 {
     ngx_uint_t                 i;
-    ngx_table_elt_t           *v, *h;
+    ngx_table_elt_t           *h;
     ngx_list_part_t           *part;
     ngx_http_core_loc_conf_t  *clcf;
 
@@ -588,28 +618,63 @@ ngx_http_zstd_vary_accept_encoding(ngx_http_request_t *r)
 
         if (h[i].key.len == sizeof("Vary") - 1
             && ngx_strncasecmp(h[i].key.data, (u_char *) "Vary",
-                               sizeof("Vary") - 1) == 0
-            && h[i].value.len == sizeof("Accept-Encoding") - 1
-            && ngx_strncasecmp(h[i].value.data, (u_char *) "Accept-Encoding",
-                               sizeof("Accept-Encoding") - 1) == 0)
+                               sizeof("Vary") - 1) == 0)
         {
-            return NGX_OK;
+            /*
+             * Check if "Accept-Encoding" is among the comma-separated tokens
+             * in the Vary value. Parse as comma-separated tokens, trim
+             * whitespace, and compare case-insensitively.
+             */
+            u_char  *p = h[i].value.data;
+            u_char  *end = h[i].value.data + h[i].value.len;
+
+            while (p < end) {
+                u_char  *token_start, *token_end;
+
+                /* Skip leading whitespace */
+                while (p < end && (*p == ' ' || *p == '\t')) {
+                    p++;
+                }
+
+                if (p >= end) {
+                    break;
+                }
+
+                token_start = p;
+
+                /* Find end of token (comma or end of string) */
+                while (p < end && *p != ',') {
+                    p++;
+                }
+
+                token_end = p;
+
+                /* Trim trailing whitespace from token */
+                while (token_end > token_start
+                       && (*(token_end - 1) == ' '
+                           || *(token_end - 1) == '\t'))
+                {
+                    token_end--;
+                }
+
+                /* Check if this token is "Accept-Encoding" */
+                if (token_end - token_start == sizeof("Accept-Encoding") - 1
+                    && ngx_strncasecmp(token_start,
+                                       (u_char *) "Accept-Encoding",
+                                       sizeof("Accept-Encoding") - 1) == 0)
+                {
+                    return NGX_OK;
+                }
+
+                /* Skip past the comma */
+                if (p < end && *p == ',') {
+                    p++;
+                }
+            }
         }
     }
 
-    v = ngx_list_push(&r->headers_out.headers);
-    if (v == NULL) {
-        return NGX_ERROR;
-    }
-
-    v->hash = 1;
-#if (nginx_version >= 1023000)
-    v->next = NULL;
-#endif
-    ngx_str_set(&v->key, "Vary");
-    ngx_str_set(&v->value, "Accept-Encoding");
-
-    return NGX_OK;
+    return ngx_http_zstd_push_header(r, "Vary", "Accept-Encoding");
 }
 
 

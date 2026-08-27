@@ -1,6 +1,7 @@
 
 /*
  * Copyright (C) Alex Zhang
+ * Copyright (C) 2026 Thijs Eilander
  */
 
 
@@ -528,8 +529,8 @@ typedef struct {
      * (config-pool lifetime, outlives the request). */
     ngx_http_zstd_dcz_dict_t    *dcz_dict;
 
-    size_t                       bytes_in;
-    size_t                       bytes_out;
+    uint64_t                     bytes_in;
+    uint64_t                     bytes_out;
 
     /*
      * Original response body length captured in the header filter BEFORE
@@ -738,9 +739,11 @@ static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
  *
  * Why there is no runtime memory cap: ZSTD_sizeof_CCtx() does not shrink on
  * reset, so an unbounded cache would pin each worker's RSS at its
- * largest-ever footprint. Each slot is therefore keyed on the COMPLETE set
- * of parameters that drive that workspace: zstd_comp_level, zstd_long and
- * the window log.
+ * largest-ever footprint. Each slot is therefore keyed on the set of
+ * parameters that drive the workspace size: zstd_comp_level, zstd_long and
+ * the effective window log. zstd_target_cblock_size is omitted because
+ * init_cctx re-applies it per request; it governs block splitting within
+ * the workspace, not the workspace size itself.
  *
  * The first two are fixed at config load. The window log is the EFFECTIVE
  * one, which for an ordinary request is zstd_window_log but for a dcz
@@ -1408,19 +1411,12 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
      * Available-Dictionary token must not drop this one.
      */
     if (zlcf->dcz_dicts != NULL && zlcf->dcz_dicts->nelts > 0) {
-        ngx_table_elt_t  *v;
-
-        v = ngx_list_push(&r->headers_out.headers);
-        if (v == NULL) {
+        if (ngx_http_zstd_push_header(r, "Vary",
+                                       "Available-Dictionary, Sec-Fetch-Site")
+            != NGX_OK)
+        {
             return NGX_ERROR;
         }
-
-        v->hash = 1;
-#if (nginx_version >= 1023000)
-        v->next = NULL;
-#endif
-        ngx_str_set(&v->key, "Vary");
-        ngx_str_set(&v->value, "Available-Dictionary, Sec-Fetch-Site");
     }
 
     /*
@@ -1771,14 +1767,7 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
         return NULL;
     }
 
-    /*
-     * RFC 8941 byte sequence: colon-delimited standard base64. 32 bytes
-     * encode to 44 characters with padding (43 without); anything longer
-     * cannot be a SHA-256 and is rejected before decoding. The validation
-     * and ngx_decode_base64() call live in ngx_http_zstd_dcz_decode_digest()
-     * so that attacker-controlled-byte slice can be fuzzed independently
-     * of ngx_http_request_t.
-     */
+    /* RFC 8941 byte sequence validation — see dcz_decode_digest() */
     rc = ngx_http_zstd_dcz_decode_digest(avail_dict_h->value, buf);
 
     if (rc == NGX_DECLINED) {
@@ -4982,10 +4971,11 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
      * three-decimal fractional part from it, instead of dividing
      * bytes_in by bytes_out twice. uint64_t scaling is required anyway to
      * avoid overflow in the *1000 step, so the single division carries no
-     * extra precondition over the previous two.
+     * extra precondition over the previous two. bytes_in and bytes_out are
+     * uint64_t so no cast is needed for the multiplication.
      */
     {
-        uint64_t  scaled = (uint64_t) ctx->bytes_in * 1000 / ctx->bytes_out;
+        uint64_t  scaled = ctx->bytes_in * 1000 / ctx->bytes_out;
 
         ratio_int  = (ngx_uint_t) (scaled / 1000);
         ratio_frac = (ngx_uint_t) (scaled % 1000);
@@ -5014,7 +5004,7 @@ static ngx_int_t
 ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data)
 {
-    size_t                value;
+    uint64_t              value;
     ngx_http_zstd_ctx_t  *ctx;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_zstd_filter_module);
@@ -5024,14 +5014,14 @@ ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
         return NGX_OK;
     }
 
-    value = *(size_t *) ((char *) ctx + data);
+    value = *(uint64_t *) ((char *) ctx + data);
 
-    vv->data = ngx_pnalloc(r->pool, NGX_SIZE_T_LEN);
+    vv->data = ngx_pnalloc(r->pool, NGX_INT64_LEN);
     if (vv->data == NULL) {
         return NGX_ERROR;
     }
 
-    vv->len = ngx_sprintf(vv->data, "%uz", value) - vv->data;
+    vv->len = ngx_sprintf(vv->data, "%L", value) - vv->data;
     vv->valid = 1;
     vv->no_cacheable = 0;
 

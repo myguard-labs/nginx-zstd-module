@@ -1,5 +1,8 @@
 Changes with http-zstd
 
+    *) Bugfix: per-request byte counters for $zstd_bytes_in and
+       $zstd_bytes_out wrapped on 32-bit (ILP32) systems for responses
+       exceeding 4 GiB. Both counters are now uint64_t.
     *) Security: "zstd_dict_strict_path on" enforced its trust policy
        only on the final path component and ignored file ownership.
 

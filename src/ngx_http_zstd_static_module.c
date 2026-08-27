@@ -1,6 +1,7 @@
 
 /*
  * Copyright (C) Alex Zhang
+ * Copyright (C) 2026 Thijs Eilander
  */
 
 
@@ -106,17 +107,6 @@ typedef struct {
 
 
 typedef struct {
-    /*
-     * No fields today: the gzip_vary-off warning counter that lived
-     * here was removed with the warning itself (G5 — the handler now
-     * emits Vary: Accept-Encoding directly). The struct and its
-     * create_main_conf hook are kept because the module context slot
-     * is part of the module's shape and future main-scope state has an
-     * obvious home; an empty struct is not valid C, so a placeholder
-     * holds the space.
-     */
-    ngx_uint_t  unused;
-
     /*
      * Conservative "could this cycle possibly serve a precompressed
      * .zst file" latch for ngx_http_zstd_static_init() (TODO row: skip
