@@ -330,6 +330,21 @@ jobs:
           # directio mount. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_static_pread_unit.sh
 
+      - name: freeCCtxParams six-exit unit fixture (config-time leak-on-error)
+        run: |
+          # ngx_http_zstd_estimate_cctx_memory() runs during "nginx -t"
+          # config load, not on any per-request path, so the HTTP
+          # fault-injection probe cannot reach it. It has six early-return
+          # error exits plus one success exit, and every one of the seven
+          # must call ZSTD_freeCCtxParams(cp) before returning -- a leak on
+          # any single exit would pass CI silently, since the other six
+          # still free correctly. Extracts the function verbatim and drives
+          # it against scripted ZSTD_CCtx_params fakes that force each exit
+          # independently, asserting the free count is exactly 1 (not 0, a
+          # leak; not 2+, a double free) on every one of the seven paths.
+          # Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_freecctxparams_unit.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
