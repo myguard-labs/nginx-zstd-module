@@ -296,6 +296,27 @@ jobs:
           # compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_compressbound_skip_gate.sh
 
+      - name: soak.sh ASAN/UBSAN verdict unit fixture (A27-F9)
+        run: |
+          # A27-F9: ci/tools/soak.sh's ASan/UBSan check used to fail on
+          # whether "$WORK/logs/asan*" merely EXISTED, never reading its
+          # content -- so LeakSanitizer's own "ptrace appears to be
+          # blocked" startup diagnostic (this runner pool's LXC
+          # seccomp/yama profile blocks its exit-time tracer; see
+          # test_reload_leak.sh and the smoke-tests step above for the
+          # same signature) failed the soak exactly like a real finding.
+          # Observed in CI: PR #214 run 33117464973 job "A/UBSan" attempt
+          # 1 failed on pure ptrace noise with all four soak workers
+          # clean; attempt 2 (identical build) passed.
+          # ci/tools/soak_asan_verdict.sh now extracts the fixed triage
+          # (real finding -> fail, ptrace-blocked -> INDETERMINATE warn,
+          # no log/no finding -> pass) into one function soak.sh sources,
+          # and this fixture drives it directly against ptrace-only,
+          # real-ASan, real-UBSan and absent-log cases, plus a negative
+          # control proving the original ls-only gate fails on the
+          # ptrace-only fixture. No nginx, no libzstd -- pure Bash.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_soak_asan_verdict_unit.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
