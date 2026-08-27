@@ -77,7 +77,7 @@ FUNC_END=$((FUNC_START + REL_END - 1))
 # plus the one success-path free, i.e. seven ZSTD_freeCCtxParams call sites.
 # A mis-ranged .inc would compile to nothing (or a truncated function) and
 # silently "pass" every scenario since none of the fakes would ever fire.
-FREE_CALLS="$(grep -c 'ZSTD_freeCCtxParams(cp)' "$OUT/generated_estimate_cctx_memory.inc")"
+FREE_CALLS="$(grep -c 'ZSTD_freeCCtxParams(cp)' "$OUT/generated_estimate_cctx_memory.inc" || true)"
 if [ "$FREE_CALLS" -ne 7 ]; then
     echo "FAIL: extracted .inc contains $FREE_CALLS ZSTD_freeCCtxParams(cp) call(s), expected 7 (six error exits + one success exit) — extraction range is wrong" >&2
     exit 1
