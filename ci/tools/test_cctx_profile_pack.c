@@ -130,6 +130,7 @@ main(void)
             { 0,            -1,  "window_log negative" },
         };
         size_t i;
+        uint64_t key1, key2;
 
         for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
             key = ngx_http_zstd_profile_pack(bad[i].lvl, 0, bad[i].wlog);
@@ -145,6 +146,31 @@ main(void)
         if (!rc) {
             printf("  => all %zu out-of-domain inputs refused "
                    "(no silent masking)\n", sizeof(bad) / sizeof(bad[0]));
+        }
+
+        /*
+         * Assert that two distinct out-of-domain profiles collapse to the
+         * SAME sentinel: this is the aliasing the cache guard must detect.
+         * Both should pack to INVALID, proving they compare equal, which is
+         * why acquire_cctx must refuse to borrow or seed on INVALID.
+         */
+        key1 = ngx_http_zstd_profile_pack(LEVEL_MIN - 1, 0, 0);
+        key2 = ngx_http_zstd_profile_pack(0, 0, WLOG_MAX + 1);
+        if (key1 != NGX_HTTP_ZSTD_PROFILE_INVALID
+            || key2 != NGX_HTTP_ZSTD_PROFILE_INVALID
+            || key1 != key2)
+        {
+            fprintf(stderr,
+                    "SENTINEL-ALIASING: two distinct out-of-domain profiles "
+                    "did not both collapse to INVALID: "
+                    "key1=%llu key2=%llu INVALID=%llu\n",
+                    (unsigned long long) key1,
+                    (unsigned long long) key2,
+                    (unsigned long long) NGX_HTTP_ZSTD_PROFILE_INVALID);
+            rc = 1;
+        } else {
+            printf("  => distinct out-of-domain profiles alias to INVALID "
+                   "(cache guard must refuse)\n");
         }
     }
 

@@ -2905,7 +2905,23 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             return NGX_ERROR;
         }
 
-        if (free_slot != NULL) {
+        /*
+         * Defense-in-depth: INVALID is never cacheable. Every out-of-domain
+         * input collapses to the same INVALID sentinel, so two profiles that
+         * are in fact different would compare equal and a slot seeded under
+         * one could later be borrowed for the other -- a context built with
+         * the wrong parameters, which changes bytes on the wire.
+         *
+         * Guarding the seed is sufficient to close the borrow too: a slot is
+         * only ever seeded here, so an INVALID key is never written into
+         * slot->profile and can therefore never be matched by the walk above.
+         * Unreachable today (every field is bounded at config load); if a
+         * future directive widens a domain, the cost is one uncached context
+         * per request, and a fresh context is always safe.
+         */
+        if (free_slot != NULL
+            && zlcf_profile.key != NGX_HTTP_ZSTD_PROFILE_INVALID)
+        {
             free_slot->cctx = ctx->cctx;
             ngx_http_zstd_cctx_profile_from_conf_wlog(&free_slot->profile,
                 zlcf, eff_window_log);
