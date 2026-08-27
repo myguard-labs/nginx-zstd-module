@@ -481,7 +481,17 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
 /*
  * Push a response header with the given key and value. Handles the
  * nginx_version >= 1023000 guard that sets next=NULL to prevent linked-list
- * corruption on HTTP/1.1 responses. Both key and value are ngx_str_t.
+ * corruption on HTTP/1.1 responses. Both key and value are NUL-terminated
+ * C string literals supplied by the caller.
+ *
+ * key/value are `const char *` PARAMETERS, not literals in this scope, so
+ * ngx_str_set() must not be used here: that macro computes its length via
+ * `sizeof(text) - 1`, which is only the string length when `text` is a
+ * literal token at the macro's own call site. Applied to a `const char *`
+ * parameter it instead yields sizeof(pointer) - 1 (7 on a 64-bit build) --
+ * every pushed header key/value here was truncated/overrun to 7 bytes
+ * regardless of the real string length, which silently broke every caller
+ * of this helper. Use ngx_strlen() on the parameter instead.
  *
  * Returns NGX_OK on success, NGX_ERROR on allocation failure.
  */
@@ -500,8 +510,10 @@ ngx_http_zstd_push_header(ngx_http_request_t *r, const char *key,
 #if (nginx_version >= 1023000)
     h->next = NULL;
 #endif
-    ngx_str_set(&h->key, key);
-    ngx_str_set(&h->value, value);
+    h->key.len = ngx_strlen(key);
+    h->key.data = (u_char *) key;
+    h->value.len = ngx_strlen(value);
+    h->value.data = (u_char *) value;
 
     return NGX_OK;
 }
