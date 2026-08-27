@@ -93,12 +93,37 @@
  * FLOOR for the probe read size under directio: O_DIRECT requires
  * buffer, offset and length aligned to the device's logical block
  * size. Offset 0 is aligned by definition; 4 KB covers 512-byte and
- * 4K-native devices, and the effective size is raised to the
- * operator's directio_alignment when that is larger (the same
- * geometry the core copy filter honours). A short read at EOF is
- * permitted, so files smaller than the probe work too.
+ * 4K-native devices. A short read at EOF is permitted, so files
+ * smaller than the probe work too.
  */
 #define NGX_HTTP_ZSTD_STATIC_DIO_PROBE   4096
+
+/*
+ * CEILING for the probe alignment. The probe reads a frame HEADER (at
+ * most 18 bytes); it is not the body copy, and it does not need the
+ * operator's bulk-I/O buffer size.
+ *
+ * "directio_alignment" is an ngx_conf_set_off_slot with no upper bound
+ * in core (ngx_http_core_module.c), and core applies it to the copy
+ * filter's body buffer (ngx_http_copy_filter_module.c: ctx->alignment),
+ * where a large value is a throughput choice on filesystems such as XFS.
+ * O_DIRECT LEGALITY, by contrast, is a property of the device's logical
+ * block size (512 or 4096 in practice), not of that directive — so
+ * scaling an 18-byte header probe with it buys nothing and costs
+ * "directio_alignment" bytes of pmemalign plus that much O_DIRECT read
+ * on EVERY request that reaches the probe, including one from a client
+ * that does not accept zstd and will be declined moments later (the
+ * probe still has to run for it, to decide whether Vary is truthful).
+ *
+ * 64 KB is a multiple of every logical block size a Linux/BSD block
+ * device reports, so the capped value stays O_DIRECT-legal for the
+ * descriptor; it is also >= the 4 KB floor, which is what guarantees a
+ * whole frame header still fits behind any in-block start position.
+ * Everything downstream (frame_off, base, want, avail) is expressed in
+ * terms of the SAME "align", so capping it preserves the arithmetic
+ * exactly.
+ */
+#define NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX  (64 * 1024)
 
 
 typedef struct {
@@ -658,11 +683,17 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * ngx_open_cached_file when "directio <size>" is configured and the
      * file meets the threshold), BOTH the read offset and the length
      * must be block-aligned, so the probe rounds each frame offset down
-     * to max(NGX_HTTP_ZSTD_STATIC_DIO_PROBE, directio_alignment) and
-     * reads two such blocks into an equally-aligned pool buffer,
-     * parsing the frame at its offset inside them — honoring the
-     * operator's declared geometry the same way the core copy filter
-     * does. Rounding the OFFSET is what the skippable-frame walk needs:
+     * to directio_alignment CLAMPED to
+     * [NGX_HTTP_ZSTD_STATIC_DIO_PROBE, NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX]
+     * and reads two such blocks into an equally-aligned pool buffer,
+     * parsing the frame at its offset inside them. The clamp follows the
+     * operator's declared geometry only as far as a header probe can
+     * use it: the floor is what keeps the read legal on 512-byte and
+     * 4K-native devices, and the ceiling is why an unbounded
+     * "directio_alignment" cannot turn an 18-byte header check into a
+     * multi-megabyte allocation and O_DIRECT read on every request that
+     * reaches the probe. Rounding the OFFSET is what the skippable-frame
+     * walk needs:
      * the second and later probes are at whatever offset the previous
      * frame's declared length produced (40 for a canonical dcz prefix),
      * which an O_DIRECT descriptor rejects with EINVAL if passed raw.
@@ -707,9 +738,20 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         }
 
         if (of.is_directio) {
+            /*
+             * Clamped to [PROBE, PROBE_MAX]. The floor keeps the read
+             * O_DIRECT-legal on 512-byte and 4K-native devices and
+             * leaves room for a frame header behind any in-block start;
+             * the ceiling stops an unbounded "directio_alignment" from
+             * scaling a header probe that never needs more than 18
+             * bytes. See NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX.
+             */
             align = NGX_HTTP_ZSTD_STATIC_DIO_PROBE;
             if ((size_t) clcf->directio_alignment > align) {
                 align = (size_t) clcf->directio_alignment;
+            }
+            if (align > NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX) {
+                align = NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX;
             }
 
             /*

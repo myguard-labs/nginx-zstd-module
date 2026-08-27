@@ -886,13 +886,15 @@ aligned probe on directio file
 
 
 
-=== TEST 34: the directio probe honors directio_alignment above the 4 KB floor
-# Review: the probe geometry must follow the operator's declared
-# alignment (the core copy filter honours clcf->directio_alignment the
-# same way) — a hardcoded 4 KB read fails EINVAL on storage configured
-# above that, and a failed validation read now DECLINES rather than
-# serving unvalidated. With 16 KB declared, the witness line must show
-# a 16384-byte probe and the oversized window must still be declined.
+=== TEST 34: the directio probe follows directio_alignment up to the cap
+# Review: the probe geometry follows the operator's declared alignment
+# between the 4 KB floor and the NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX
+# (64 KB) ceiling, so storage declaring a larger block size than the
+# floor still gets an aligned read, and a failed validation read
+# DECLINES rather than serving unvalidated. 16 KB is inside that band
+# and so is honoured verbatim: the witness line must show a 16384-byte
+# probe and the oversized window must still be declined. TEST 34b pins
+# the other end of the band.
 --- config
     location /bw/ {
         zstd_static on;
@@ -917,6 +919,74 @@ big-window directio alignment body
 dioal.js.zst
 declares a 134217728-byte decompression window
 16384-byte aligned probe on directio file
+
+
+
+=== TEST 34b: the probe alignment is capped, and the cap applies to a client that does NOT accept zstd
+# s1 regression, two properties in one block.
+#
+# (1) CAP. "directio_alignment" is ngx_conf_set_off_slot on an off_t
+# with no upper bound in core (ngx_http_core_module.c), and core spends
+# it on the copy filter's BODY buffer, where a large value is a
+# throughput choice. O_DIRECT legality is a property of the device's
+# logical block size, not of that directive, so an 18-byte frame-HEADER
+# probe has nothing to gain from scaling with it. Uncapped, the probe
+# did ngx_pmemalign(align * 2) plus a 2*align O_DIRECT read per
+# request; at "directio_alignment 1m" that is a 2 MB allocation and a
+# 2 MB read to inspect 18 bytes. The probe alignment is now clamped to
+# NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX, so the witness must say
+# 65536-byte, NOT 1048576-byte.
+#
+# (2) NON-ACCEPTING CLIENT. TESTs 26/33/34/46 all send an accepting
+# client, so nothing covered the directio probe on the path a client
+# that does not accept zstd takes — which is precisely the path the
+# amplification was reachable on, because #202 moved the
+# "return NGX_DECLINED" for such a client to AFTER the probe (the probe
+# result is required to decide whether Vary is truthful). This block
+# sends "Accept-Encoding: gzip" and still asserts the probe ran, so the
+# cap is pinned on the request shape that motivated it.
+#
+# Falsifiability, both directions:
+#   - remove the clamp -> the witness line reads "1048576-byte aligned
+#     probe", the 65536 pattern does not match, and this block goes red.
+#   - restore the pre-#202 early return for a non-accepting client ->
+#     no probe runs at all, so neither the witness line NOR the Vary
+#     header appears, and this block goes red on both.
+# The 1048576 negative assertion makes the first direction fail loudly
+# rather than merely stop matching.
+#
+# Vary is asserted because it is the reason the probe is allowed to run
+# for this client at all: the .zst is a valid, usable variant here (a
+# small window, unlike TEST 34), so the identity response really is
+# Accept-Encoding-dependent and must say so. The .zst is padded past
+# the "directio 512" threshold so the open really is O_DIRECT.
+--- config
+    location /cap/ {
+        zstd_static on;
+        directio 512;
+        directio_alignment 1m;
+        root html;
+    }
+--- user_files eval
+">>> cap/noaccept.js\ncapped probe identity body\n>>> cap/noaccept.js.zst\n"
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x19, 0x00, 0x00)
+. "hi\n"
+. ("\0" x 2048)
+--- request
+GET /cap/noaccept.js
+--- more_headers
+Accept-Encoding: gzip
+--- response_headers
+! Content-Encoding
+Vary: Accept-Encoding
+--- response_body
+capped probe identity body
+--- error_code: 200
+--- error_log
+65536-byte aligned probe on directio file
+--- no_error_log
+1048576-byte aligned probe on directio file
+[error]
 
 
 
