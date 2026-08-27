@@ -1800,11 +1800,21 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
 
     /*
      * Accept-Encoding is in nginx's headers_in table, so duplicate lines
-     * are chained on ae->next rather than rejected. Only the first line's
-     * value is evaluated here -- byte-for-byte what nginx's own gzip
-     * filter does, so this is upstream parity rather than a gap: a client
-     * splitting its codings across two header lines has the second line
-     * ignored and falls back to plain zstd, which is the safe direction.
+     * are chained on ae->next rather than rejected. EVERY line is
+     * evaluated, not just the first: RFC 9110 section 5.3 makes a
+     * repeated list-valued field identical to the single comma-joined
+     * field, so a client that split "zstd, dcz" across two lines
+     * advertises dcz exactly as much as one that sent it on one.
+     *
+     * This deliberately shares ngx_http_zstd_chain_coding_weight() with
+     * the plain-zstd path in ngx_http_zstd_accepts(). The two used to
+     * carry independent copies of the first-line-only assumption, which
+     * is how one negotiation contract turned into two -- the shared
+     * helper is what stops them drifting again. allow_wildcard stays 0
+     * here for the reason the gate list above gives: only a client that
+     * actually holds the dictionary can decode dcz, so "*" must not turn
+     * it on. The duplicate-coding rule (an explicit q=0 anywhere is
+     * final) is documented on the helper.
      */
     ae = r->headers_in.accept_encoding;
     if (ae == NULL) {
@@ -1875,8 +1885,8 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
         return NULL;
     }
 
-    if (ngx_http_zstd_coding_weight(&ae->value, "dcz",
-                                    sizeof("dcz") - 1, 0) <= 0)
+    if (ngx_http_zstd_chain_coding_weight(ae, "dcz",
+                                          sizeof("dcz") - 1, 0) <= 0)
     {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd dcz: skip, no explicit dcz in Accept-Encoding");

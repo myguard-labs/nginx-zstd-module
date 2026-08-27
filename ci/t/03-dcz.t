@@ -888,3 +888,131 @@ GET /t
 Content-Encoding: dcz
 --- no_error_log
 [error]
+
+
+
+=== TEST 34: chained Accept-Encoding — "zstd" then "dcz" negotiates dcz
+# RFC 9110 section 5.3: repeated field lines are the single comma-joined
+# field, so these lines ARE "zstd, dcz" and advertise dcz. The dcz gate
+# used to read only the first line and fall back to plain zstd.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd\nAccept-Encoding: dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 35: chained Accept-Encoding — "dcz" then "zstd" negotiates dcz
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: dcz\nAccept-Encoding: zstd\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 36: chained Accept-Encoding — "dcz;q=0" on a later line falls back
+# The duplicate-coding rule reaches dcz too: an explicit refusal anywhere
+# in the field is final. Falling back to plain zstd is the safe direction.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd\nAccept-Encoding: dcz;q=0\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 37: chained Accept-Encoding — "dcz;q=0" first, "dcz;q=1" later, still falls back
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz;q=0\nAccept-Encoding: dcz;q=1\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 38: chained Accept-Encoding — a "*" on a later line still does not turn dcz on
+# The wildcard gate survives the chain walk: only a client that actually
+# holds the dictionary can decode dcz, so "*" must never enable it no
+# matter which field line carries it.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd\nAccept-Encoding: *\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 39: chained Accept-Encoding — three field lines, dcz on the third
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: gzip\nAccept-Encoding: zstd\nAccept-Encoding: dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]

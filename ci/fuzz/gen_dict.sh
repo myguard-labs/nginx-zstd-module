@@ -32,14 +32,23 @@ DICT="$DIR/fuzz.dict"
 START_MARK="# BEGIN generated coding tokens (ci/fuzz/gen_dict.sh)"
 END_MARK="# END generated coding tokens"
 
-# Extract every coding-name literal passed to ngx_http_zstd_coding_weight()
+# Extract every coding-name literal passed to a coding-weight entry point
 # across src/*.c AND src/*.h: ngx_http_zstd_accept_encoding()'s own call
 # ("zstd") lives in the ngx_http_zstd_common.h wrapper, not in a .c file, so
-# both must be scanned. The function's own DEFINITION line (`const char
-# *coding`, no string literal) never matches this pattern, so there is
+# both must be scanned. The functions' own DEFINITION lines (`const char
+# *coding`, no string literal) never match this pattern, so there is
 # nothing to exclude.
+#
+# BOTH entry points are matched: ngx_http_zstd_coding_weight() (one field
+# value) and ngx_http_zstd_chain_coding_weight() (the whole chained
+# header). The optional `chain_` is load-bearing, not defensive tidiness --
+# when the dcz call site moved to the chained walker, a pattern anchored on
+# the bare name stopped matching it and silently dropped "dcz" from the
+# dictionary, which is a fuzz-coverage loss that no test would have failed
+# on. Matching both keeps a call site's token in the dictionary wherever
+# the negotiation is evaluated from.
 mapfile -t TOKENS < <(
-    grep -hoE 'ngx_http_zstd_coding_weight\([^,]+,[[:space:]]*"[A-Za-z0-9_-]+"' \
+    grep -hoE 'ngx_http_zstd_(chain_)?coding_weight\([^,]+,[[:space:]]*"[A-Za-z0-9_-]+"' \
         "$ROOT"/src/*.c "$ROOT"/src/*.h \
     | grep -oE '"[A-Za-z0-9_-]+"$' \
     | sort -u

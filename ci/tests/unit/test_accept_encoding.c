@@ -595,6 +595,269 @@ case_fraction_exhaustive_three_digit(void)
 }
 
 
+/* ------------------------------------------------------------------ *
+ * Chained Accept-Encoding field lines (ngx_http_zstd_chain_coding_weight)
+ *
+ * nginx chains duplicate Accept-Encoding request header lines on
+ * ->next. RFC 9110 section 5.3 makes that identical to the single field
+ * whose value is the lines joined with commas, so
+ *
+ *     Accept-Encoding: gzip
+ *     Accept-Encoding: zstd
+ *
+ * IS "gzip, zstd" and accepts zstd. Every case below states one such
+ * request as its line list and asserts the decision the joined value
+ * would have produced.
+ *
+ * The duplicate-coding rule -- an explicit q=0 anywhere is final -- is
+ * asserted directly by the mixed-weight cases. See the helper's comment
+ * in src/ngx_http_zstd_common.h for why fail-safe rather than last-wins.
+ * ------------------------------------------------------------------ */
+
+/*
+ * Build a ->next chain over up to 4 literal field values and run the
+ * chain walker across it. Storage is static per call site depth, which is
+ * fine: each case builds, decides, and discards before the next runs.
+ */
+static ngx_int_t
+chain_weight(const char *coding, ngx_uint_t allow_wildcard,
+    const char *l0, const char *l1, const char *l2, const char *l3)
+{
+    static ngx_table_elt_t  e[4];
+    const char             *lines[4];
+    ngx_uint_t              n;
+
+    lines[0] = l0; lines[1] = l1; lines[2] = l2; lines[3] = l3;
+
+    for (n = 0; n < 4 && lines[n] != NULL; n++) {
+        e[n].value.data = (u_char *) lines[n];
+        e[n].value.len  = strlen(lines[n]);
+        e[n].next = NULL;
+        if (n > 0) {
+            e[n - 1].next = &e[n];
+        }
+    }
+
+    if (n == 0) {
+        return -1;
+    }
+
+    return ngx_http_zstd_chain_coding_weight(&e[0], coding, strlen(coding),
+                                             allow_wildcard);
+}
+
+/* zstd decision over a chain: same predicate as ngx_http_zstd_accepts(). */
+static ngx_int_t
+chain_zstd(const char *l0, const char *l1, const char *l2, const char *l3)
+{
+    return chain_weight("zstd", 1, l0, l1, l2, l3) > 0
+               ? NGX_OK : NGX_DECLINED;
+}
+
+/* dcz decision over a chain: explicit token only, no wildcard. */
+static ngx_int_t
+chain_dcz(const char *l0, const char *l1, const char *l2, const char *l3)
+{
+    return chain_weight("dcz", 0, l0, l1, l2, l3) > 0
+               ? NGX_OK : NGX_DECLINED;
+}
+
+/*
+ * THE WITNESS. Two lines, the acceptable coding on the SECOND. Before the
+ * chain walker only the first line was parsed, so this declined.
+ */
+static void
+case_chain_gzip_then_zstd(void)
+{
+    check(chain_zstd("gzip", "zstd", NULL, NULL) == NGX_OK,
+          "chain: 'gzip' then 'zstd' accepts (joined: \"gzip, zstd\")");
+}
+
+static void
+case_chain_zstd_then_gzip(void)
+{
+    check(chain_zstd("zstd", "gzip", NULL, NULL) == NGX_OK,
+          "chain: 'zstd' then 'gzip' accepts");
+}
+
+/* A single line is unchanged: the walker must not alter the common case. */
+static void
+case_chain_single_line_unchanged(void)
+{
+    check(chain_zstd("gzip", NULL, NULL, NULL) == NGX_DECLINED,
+          "chain: single 'gzip' line still declines");
+    check(chain_zstd("zstd", NULL, NULL, NULL) == NGX_OK,
+          "chain: single 'zstd' line still accepts");
+}
+
+/*
+ * q=0 STICKINESS. An explicit refusal on either line is final, and in
+ * particular a later q=1 must NOT upgrade an earlier q=0 back into an
+ * accept -- that is the direction that serves a body the client said it
+ * cannot decode.
+ */
+static void
+case_chain_q0_first_line(void)
+{
+    check(chain_zstd("zstd;q=0", "gzip", NULL, NULL) == NGX_DECLINED,
+          "chain: 'zstd;q=0' then 'gzip' declines");
+}
+
+static void
+case_chain_q0_second_line(void)
+{
+    check(chain_zstd("gzip", "zstd;q=0", NULL, NULL) == NGX_DECLINED,
+          "chain: 'gzip' then 'zstd;q=0' declines");
+}
+
+static void
+case_chain_q0_then_q1_stays_declined(void)
+{
+    check(chain_zstd("zstd;q=0", "zstd;q=1", NULL, NULL) == NGX_DECLINED,
+          "chain: 'zstd;q=0' then 'zstd;q=1' declines "
+          "(explicit q=0 anywhere is final)");
+}
+
+static void
+case_chain_q1_then_q0_stays_declined(void)
+{
+    check(chain_zstd("zstd;q=1", "zstd;q=0", NULL, NULL) == NGX_DECLINED,
+          "chain: 'zstd;q=1' then 'zstd;q=0' declines");
+}
+
+/* Two non-zero weights: the lowest wins, but both accept, so still OK. */
+static void
+case_chain_two_nonzero_weights(void)
+{
+    check(chain_weight("zstd", 1, "zstd;q=1", "zstd;q=0.5", NULL, NULL) == 500,
+          "chain: lowest non-zero explicit weight wins (1 vs 0.5 -> 500)");
+    check(chain_zstd("zstd;q=1", "zstd;q=0.5", NULL, NULL) == NGX_OK,
+          "chain: two non-zero weights still accept");
+}
+
+/* A wildcard on a LATER line must still be seen. */
+static void
+case_chain_wildcard_later_line(void)
+{
+    check(chain_zstd("gzip", "*", NULL, NULL) == NGX_OK,
+          "chain: '*' on the second line accepts");
+}
+
+/* An explicit q=0 anywhere overrides a permissive '*' on another line. */
+static void
+case_chain_wildcard_vs_explicit_q0(void)
+{
+    check(chain_zstd("*", "zstd;q=0", NULL, NULL) == NGX_DECLINED,
+          "chain: explicit 'zstd;q=0' overrides a '*' on an earlier line");
+    check(chain_zstd("zstd;q=0", "*", NULL, NULL) == NGX_DECLINED,
+          "chain: explicit 'zstd;q=0' overrides a '*' on a later line");
+}
+
+/* '*;q=0' on a later line is a refusal too, when nothing names zstd. */
+static void
+case_chain_wildcard_q0_later(void)
+{
+    check(chain_zstd("gzip", "*;q=0", NULL, NULL) == NGX_DECLINED,
+          "chain: '*;q=0' on the second line declines");
+}
+
+/* Three and four lines: the walk must not stop at two. */
+static void
+case_chain_three_lines(void)
+{
+    check(chain_zstd("gzip", "br", "zstd", NULL) == NGX_OK,
+          "chain: three lines, 'zstd' on the third, accepts");
+}
+
+static void
+case_chain_four_lines(void)
+{
+    check(chain_zstd("gzip", "br", "deflate", "zstd") == NGX_OK,
+          "chain: four lines, 'zstd' on the fourth, accepts");
+    check(chain_zstd("gzip", "br", "deflate", "identity") == NGX_DECLINED,
+          "chain: four lines with no zstd and no '*' declines");
+}
+
+/* An empty later line contributes nothing and must not break the walk. */
+static void
+case_chain_empty_line(void)
+{
+    check(chain_zstd("", "zstd", NULL, NULL) == NGX_OK,
+          "chain: empty first line then 'zstd' accepts");
+    check(chain_zstd("zstd", "", NULL, NULL) == NGX_OK,
+          "chain: 'zstd' then an empty line accepts");
+}
+
+/*
+ * Splitting a list mid-way across lines is the whole point of RFC 9110
+ * section 5.3: these lines joined are "gzip, zstd;q=0.5, br".
+ */
+static void
+case_chain_split_list(void)
+{
+    check(chain_zstd("gzip", "zstd;q=0.5, br", NULL, NULL) == NGX_OK,
+          "chain: a list split across lines negotiates as the joined value");
+}
+
+/* --- dcz variants: explicit token only, '*' must never turn dcz on --- */
+
+static void
+case_chain_dcz_second_line(void)
+{
+    check(chain_dcz("zstd", "dcz", NULL, NULL) == NGX_OK,
+          "chain/dcz: 'zstd' then 'dcz' accepts");
+}
+
+static void
+case_chain_dcz_first_line(void)
+{
+    check(chain_dcz("dcz", "zstd", NULL, NULL) == NGX_OK,
+          "chain/dcz: 'dcz' then 'zstd' accepts");
+}
+
+static void
+case_chain_dcz_q0_second_line(void)
+{
+    check(chain_dcz("zstd", "dcz;q=0", NULL, NULL) == NGX_DECLINED,
+          "chain/dcz: 'zstd' then 'dcz;q=0' declines");
+}
+
+static void
+case_chain_dcz_q0_first_line(void)
+{
+    check(chain_dcz("dcz;q=0", "zstd", NULL, NULL) == NGX_DECLINED,
+          "chain/dcz: 'dcz;q=0' then 'zstd' declines");
+}
+
+static void
+case_chain_dcz_q0_then_q1_stays_declined(void)
+{
+    check(chain_dcz("dcz;q=0", "dcz;q=1", NULL, NULL) == NGX_DECLINED,
+          "chain/dcz: 'dcz;q=0' then 'dcz;q=1' declines "
+          "(explicit q=0 anywhere is final)");
+}
+
+/*
+ * The wildcard gate survives the chain: a '*' on ANY line must not turn
+ * dcz on, because only a client holding the dictionary can decode it.
+ */
+static void
+case_chain_dcz_wildcard_never_matches(void)
+{
+    check(chain_dcz("zstd", "*", NULL, NULL) == NGX_DECLINED,
+          "chain/dcz: '*' on a later line must NOT turn dcz on");
+    check(chain_dcz("*", "zstd", NULL, NULL) == NGX_DECLINED,
+          "chain/dcz: '*' on an earlier line must NOT turn dcz on");
+}
+
+static void
+case_chain_dcz_three_lines(void)
+{
+    check(chain_dcz("gzip", "zstd", "dcz", NULL) == NGX_OK,
+          "chain/dcz: three lines, 'dcz' on the third, accepts");
+}
+
+
 int
 main(void)
 {
@@ -634,6 +897,30 @@ main(void)
     case_fraction_non_digit_terminator_not_consumed();
     case_fraction_non_digit_terminator_at_start();
     case_fraction_exhaustive_three_digit();
+
+    /* Chained Accept-Encoding field lines (RFC 9110 section 5.3). */
+    case_chain_gzip_then_zstd();
+    case_chain_zstd_then_gzip();
+    case_chain_single_line_unchanged();
+    case_chain_q0_first_line();
+    case_chain_q0_second_line();
+    case_chain_q0_then_q1_stays_declined();
+    case_chain_q1_then_q0_stays_declined();
+    case_chain_two_nonzero_weights();
+    case_chain_wildcard_later_line();
+    case_chain_wildcard_vs_explicit_q0();
+    case_chain_wildcard_q0_later();
+    case_chain_three_lines();
+    case_chain_four_lines();
+    case_chain_empty_line();
+    case_chain_split_list();
+    case_chain_dcz_second_line();
+    case_chain_dcz_first_line();
+    case_chain_dcz_q0_second_line();
+    case_chain_dcz_q0_first_line();
+    case_chain_dcz_q0_then_q1_stays_declined();
+    case_chain_dcz_wildcard_never_matches();
+    case_chain_dcz_three_lines();
 
     printf("\n%d/%d checks passed\n", checks - failures, checks);
     return failures ? 1 : 0;

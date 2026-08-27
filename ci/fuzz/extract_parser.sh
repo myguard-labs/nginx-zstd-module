@@ -27,7 +27,13 @@ fi
 # closing brace at column 0 (nginx style: definitions close with a bare
 # `}` in col 1). The functions have two distinct return-type lines
 # (`static u_char *` for the skip_quoted helper, `static ngx_int_t` for the
-# rest), so match on the following definition line. Capture them in
+# rest, either optionally carrying `ngx_inline`), so match on the following
+# definition line. ngx_inline is accepted because
+# ngx_http_zstd_accept_encoding() carries it: no module TU calls that
+# function any more (the request path walks the whole chained header via
+# ngx_http_zstd_chain_coding_weight()), so a plain `static` would trip
+# -Werror=unused-function in both TUs that include the header. ci/fuzz/
+# ngx_shim.h defines ngx_inline for the sliced build. Capture them in
 # source order (skip_quoted, then parse_q_fraction, then eval_qvalue --
 # which calls parse_q_fraction, so it must precede eval_qvalue in the
 # generated .inc -- then accept_encoding) so the generated .inc compiles
@@ -38,8 +44,8 @@ fi
 # the build fails with the "header layout changed?" error misleadingly.
 awk '
     { sub(/\r$/, "") }
-    /^static (ngx_int_t|u_char \*)$/ { pending = 1; buf = $0 ORS; next }
-    pending && /^ngx_http_zstd_(skip_quoted|parse_q_fraction|eval_qvalue|coding_weight|accept_encoding)\(/ {
+    /^static (ngx_inline )?(ngx_int_t|u_char \*)$/ { pending = 1; buf = $0 ORS; next }
+    pending && /^ngx_http_zstd_(skip_quoted|parse_q_fraction|eval_qvalue|coding_weight|chain_coding_weight|accept_encoding)\(/ {
         capture = 1; pending = 0; print buf; print; next
     }
     pending { pending = 0; buf = "" }
@@ -49,7 +55,8 @@ awk '
     }
 ' "$HEADER" >"$OUT"
 
-if ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" ||
+if ! grep -q 'ngx_http_zstd_chain_coding_weight' "$OUT" ||
+    ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" ||
     ! grep -q 'ngx_http_zstd_parse_q_fraction' "$OUT" ||
     ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" ||
     ! grep -q 'ngx_http_zstd_coding_weight' "$OUT" ||
@@ -64,4 +71,5 @@ fi
 LINES=$(wc -l <"$OUT")
 echo "✓ extracted ngx_http_zstd_skip_quoted() + ngx_http_zstd_parse_q_fraction()" \
     "+ ngx_http_zstd_eval_qvalue() + ngx_http_zstd_coding_weight()" \
+    "+ ngx_http_zstd_chain_coding_weight()" \
     "+ ngx_http_zstd_accept_encoding() — $LINES lines -> $OUT"

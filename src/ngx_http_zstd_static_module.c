@@ -428,7 +428,11 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
  * guard and no skippable-chain bound at all).
  *
  * Returns the byte count read, or -1 on error, matching pread(2)'s
- * convention so the caller's short-read handling is unchanged. `log`
+ * convention so the caller's short-read handling is unchanged. On POSIX
+ * it retries EINTR and accumulates across legal short reads rather than
+ * handing either straight back -- see the loop's own comment, including
+ * why `align` (the O_DIRECT block size, or 0 for a buffered read) has to
+ * be a parameter. `log`
  * and `name` are only used by the Win32 branch, which routes through
  * ngx_read_file() and therefore needs an ngx_file_t to describe the
  * descriptor (`name` only ever reaches ngx_read_file()'s own error log
@@ -436,12 +440,21 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
  */
 static ssize_t
 ngx_http_zstd_static_pread(ngx_fd_t fd, u_char *buf, size_t size,
-    off_t offset, ngx_log_t *log, ngx_str_t *name)
+    off_t offset, size_t align, ngx_log_t *log, ngx_str_t *name)
 {
 #if (NGX_WIN32)
 
     ssize_t      n;
     ngx_file_t   file;
+
+    /*
+     * `align` is POSIX-only. ngx_directio_on() is an upstream no-op stub
+     * on Win32, so no descriptor here is ever really O_DIRECT and
+     * ngx_read_file() has no alignment constraint to satisfy; it also
+     * loops internally, so the EINTR/short-read accumulation the POSIX
+     * branch adds below is already handled by the call itself.
+     */
+    (void) align;
 
     /*
      * A stack ngx_file_t borrowing the cached fd. The Win32
@@ -483,10 +496,148 @@ ngx_http_zstd_static_pread(ngx_fd_t fd, u_char *buf, size_t size,
 
 #else
 
+    size_t   done;
+    size_t   prev;   /* last aligned resume point; see the loop's guard */
+    ssize_t  n;
+
     (void) log;
     (void) name;
 
-    return pread(fd, buf, size, offset);
+    /*
+     * Retry/accumulate loop. ONE pread(2) is not enough: the syscall may
+     * be interrupted by a signal before transferring anything (EINTR),
+     * and a positioned read on a regular file is permitted to return
+     * fewer bytes than requested. Neither is an error, and neither means
+     * the file is bad -- but returning them verbatim made the caller
+     * DECLINE an otherwise perfectly valid .zst, so a signal or a
+     * short-reading filesystem (9p/drvfs/FUSE, a WSL /mnt/c document
+     * root) turned into a 404 plus an error-log line.
+     *
+     * This is the same shape as ngx_http_zstd_read_dict_file() in the
+     * filter module, which already loops for exactly these two reasons;
+     * see its comment for the EINTR/short-read argument in full. This
+     * one is deliberately written to match it rather than invent a
+     * second pattern, with one addition the dictionary loader does not
+     * need: O_DIRECT alignment.
+     *
+     * DIRECT I/O ALIGNMENT -- why `align` exists.
+     *
+     * This probe runs on an O_DIRECT descriptor whenever the file was
+     * opened with directio. O_DIRECT constrains the buffer address, the
+     * file offset AND the length, all to the device's block size. The
+     * caller satisfies that on the FIRST read: `buf` comes from
+     * ngx_http_zstd_static_dio_buf() aligned to `align`, `offset` is
+     * rounded down to `align`, and `size` is 2 * align.
+     *
+     * A naive continuation at buf + n / offset + n after a short read
+     * would break all three at once, and the kernel would answer EINVAL
+     * -- turning a recoverable short read into the very decline this
+     * change exists to remove. So resumption is rounded DOWN to an
+     * `align` boundary: `done` only ever advances in whole multiples of
+     * `align`, which keeps buf + done aligned (buf is align-aligned),
+     * offset + done aligned (offset is align-aligned), and size - done a
+     * multiple of align (size is 2 * align). Every continuation read is
+     * therefore exactly as O_DIRECT-legal as the first one was.
+     *
+     * The cost is re-reading the sub-block tail of a short read. That is
+     * bounded by align (<= NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX, 64 KB),
+     * idempotent -- the probe is read-only and parses only after the
+     * loop -- and only paid on a path that would previously have failed
+     * outright. Correctness over a byte count nobody serves.
+     *
+     * align == 0 selects the buffered path: the round-down is a no-op
+     * (see the guard below) and this is a plain accumulate, which is
+     * what the 18-byte hdrbuf read wants.
+     *
+     * Returns the total bytes accumulated (0 at immediate EOF), or -1 on
+     * a hard error, matching pread(2)'s convention so the caller's
+     * short-read handling is unchanged. A read that reaches true EOF
+     * with fewer than `size` bytes returns the partial count and lets the
+     * caller decide -- it must, because a file legitimately shorter than
+     * the 2-block directio probe is the common case, not a failure.
+     */
+
+    prev = 0;
+
+    for (done = 0; done < size; /* void */) {
+
+        n = pread(fd, (void *) (buf + done), size - done,
+                  offset + (off_t) done);
+
+        if (n < 0) {
+            /*
+             * Interrupted before transferring anything: not an error,
+             * reissue. ngx_errno is read immediately so nothing between
+             * here and the test can clobber it. POSIX-only by
+             * construction -- this whole branch is the #else of
+             * NGX_WIN32, and win32's ngx_errno.h defines no NGX_EINTR
+             * because ReadFile() on a synchronous handle is not
+             * interruptible.
+             */
+            if (ngx_errno == NGX_EINTR) {
+                continue;
+            }
+
+            /*
+             * A hard error after a partial transfer still reports -1.
+             * The caller declines on -1, which is the fail-CLOSED
+             * direction and the one this function must keep: bytes we
+             * could not finish reading must never be parsed as if they
+             * were a complete header.
+             */
+            return -1;
+        }
+
+        if (n == 0) {
+            /* True EOF. Return what we have; the caller bounds-checks. */
+            break;
+        }
+
+        done += (size_t) n;
+
+        /*
+         * Round the resume point down to an `align` boundary so the next
+         * pread() stays O_DIRECT-legal in buffer, offset and length. See
+         * the alignment argument above. `align` is 0 on the buffered
+         * path, where no rounding is wanted or valid.
+         */
+        if (align > 1) {
+            size_t  aligned = done - (done % align);
+
+            /*
+             * TERMINATION, and it is not optional. `prev` is always a
+             * multiple of `align` (it is either 0 or the result of a
+             * previous round-down), so `aligned == prev` exactly when
+             * this read delivered fewer than `align` bytes -- i.e. it
+             * did not complete another whole block. Resuming there
+             * re-issues the IDENTICAL pread(), and a filesystem that
+             * keeps answering the same sub-block count would spin this
+             * loop forever, hanging the worker on this request.
+             *
+             * A hung worker is far worse than the decline this function
+             * exists to avoid, so no-forward-progress gives up and
+             * reports the partial count. The caller then declines --
+             * exactly where this path went BEFORE the retry loop
+             * existed, so the fail-closed behaviour is preserved
+             * unchanged for the one case the loop cannot advance past.
+             *
+             * Testing `aligned == prev` rather than `aligned == 0` is
+             * the whole guard: `aligned == 0` only catches a stall on
+             * the FIRST iteration and lets a stall at any later block
+             * boundary loop unbounded.
+             */
+            if (aligned == prev) {
+                done = prev + (size_t) n;   /* report what really landed */
+                break;
+            }
+
+            done = aligned;
+        }
+
+        prev = done;
+    }
+
+    return (ssize_t) done;
 
 #endif
 }
@@ -988,8 +1139,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                 base = pos;
             }
 
-            n = ngx_http_zstd_static_pread(of.fd, hdr, want, base, log,
-                                           &path);
+            n = ngx_http_zstd_static_pread(of.fd, hdr, want, base, align,
+                                           log, &path);
 
             /*
              * Bytes of the block that lie at or after `pos`. A short

@@ -2935,3 +2935,170 @@ sub {
 "C" x 4000
 --- no_error_log
 [error]
+
+
+
+=== TEST 104: chained Accept-Encoding — "gzip" then "zstd" negotiates zstd
+# RFC 9110 section 5.3: repeated field lines are the single comma-joined
+# field, so these two lines ARE "gzip, zstd" and accept zstd. Parsing only
+# the first line saw "gzip" and served the body uncompressed.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: gzip
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 105: chained Accept-Encoding — "zstd" then "gzip" negotiates zstd
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+Accept-Encoding: gzip
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 106: chained Accept-Encoding — "zstd;q=0" on the FIRST line declines
+# The duplicate-coding rule: an explicit q=0 anywhere in the field is
+# final and cannot be upgraded by a later line. Serving zstd here would
+# hand a body to a client that explicitly refused it.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=0
+Accept-Encoding: gzip
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 107: chained Accept-Encoding — "zstd;q=0" on a LATER line declines
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: gzip
+Accept-Encoding: zstd;q=0
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 108: chained Accept-Encoding — q=0 then q=1 stays declined
+# The self-contradictory case RFC 9110 does not resolve. Fail-safe: the
+# explicit refusal wins, so the worst case is a missed compression, never
+# an undecodable body.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=0
+Accept-Encoding: zstd;q=1
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 109: chained Accept-Encoding — wildcard "*" on a later line accepts
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: gzip
+Accept-Encoding: *
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 110: chained Accept-Encoding — three field lines, zstd on the third
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: gzip
+Accept-Encoding: br
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]

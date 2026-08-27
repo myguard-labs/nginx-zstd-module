@@ -417,14 +417,176 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
 
 
 /*
+ * Step to the next duplicate Accept-Encoding field line.
+ *
+ * nginx grew ngx_table_elt_t.next in 1.23.0 (the linked-list header
+ * rework); that is the same version floor every other ->next use in this
+ * module guards on -- see the `#if (nginx_version >= 1023000)` sites in
+ * the filter and in ngx_http_zstd_push_header() below.
+ *
+ * On an older nginx the field does not exist and duplicate Accept-Encoding
+ * lines are not chained at all: r->headers_in.accept_encoding points at
+ * the first occurrence and the rest are reachable only by walking
+ * r->headers_in.headers. Rather than fork the walker, the macro degrades
+ * to "there is no next line", which is exactly the pre-1.23 behaviour this
+ * module has always had there -- the fix lands on every nginx that can
+ * express the chain, and nothing regresses on the ones that cannot.
+ */
+#if (nginx_version >= 1023000)
+#define NGX_HTTP_ZSTD_AE_NEXT(ae)  ((const ngx_table_elt_t *) (ae)->next)
+#else
+#define NGX_HTTP_ZSTD_AE_NEXT(ae)  ((const ngx_table_elt_t *) NULL)
+#endif
+
+
+/*
+ * ngx_http_zstd_chain_coding_weight()
+ *
+ * Effective weight for `coding` across the WHOLE Accept-Encoding header
+ * field, i.e. every duplicate field line nginx chained on ->next, not
+ * just the first. Returns milli-units (0..1000), or -1 when the field
+ * expresses no preference for `coding` at all. `ae` may be NULL (no
+ * Accept-Encoding at all), which is -1.
+ *
+ * WHY THIS EXISTS. nginx does not reject a repeated Accept-Encoding
+ * request header; it chains the extra field lines on ae->next. RFC 9110
+ * section 5.3 makes a repeated list-valued field semantically identical to
+ * the single field whose value is the lines joined in order with commas,
+ * so
+ *
+ *     Accept-Encoding: gzip
+ *     Accept-Encoding: zstd
+ *
+ * IS "gzip, zstd" and accepts zstd. Evaluating only ae->value read that
+ * request as "gzip" and declined. The in-code justification used to be
+ * parity with nginx's own gzip filter, but parity with a sibling module is
+ * not the contract this module advertises: the README documents an
+ * Accept-Encoding negotiation, and a client that split its codings across
+ * two lines is entitled to the same answer it would have got from one.
+ *
+ * DUPLICATE-CODING RULE — an explicit q=0 anywhere is final ("sticky").
+ *
+ * When the same coding appears in more than one field line with different
+ * weights (`zstd;q=0` on one line, `zstd;q=1` on another), the joined list
+ * is self-contradictory and RFC 9110 blesses no winner, because a
+ * conforming sender should never have produced it. We resolve it in the
+ * fail-safe direction: the LOWEST explicit weight wins, so an explicit
+ * "do not send me this" is honoured wherever it appears and can never be
+ * upgraded back into an accept by a later line.
+ *
+ * That is not a new policy invented here — it is the policy this module
+ * already documents. README's "Selection policy" says the module "honours
+ * each coding's own q=0 as an absolute 'not acceptable'", and the dcz
+ * section lists "dcz;q=0" as a hard gate miss. "Absolute" has to mean
+ * absolute across the whole field, otherwise a client can refuse a coding
+ * on one line and have the refusal quietly discarded by the next.
+ *
+ * The asymmetry is the whole argument: honouring a q=0 that appeared
+ * anywhere can only ever make us send LESS zstd than a permissive reading
+ * would. The opposite rule (last-wins) can turn an explicit refusal into an
+ * accept, and the failure that produces — a body the client told us it
+ * cannot decode — is the one that actually hurts a user. Between two
+ * defensible readings of input that should not exist, we take the one whose
+ * worst case is a missed compression opportunity.
+ *
+ * The wildcard is accumulated the same way and stays subordinate to an
+ * explicit token exactly as in the single-value parser: any explicit token
+ * anywhere in the field decides, and "*" applies only when no line named
+ * the coding explicitly. `allow_wildcard` has the same meaning as in
+ * ngx_http_zstd_coding_weight() and is passed straight through.
+ *
+ * NOTE the two-level accumulation is deliberate and NOT a contradiction.
+ * Within ONE field-line value, ngx_http_zstd_coding_weight() keeps its
+ * existing last-wins behaviour for a repeated token, byte for byte — the
+ * fuzz differential's independent reference oracle asserts exactly that
+ * single-value decision, and changing it would be a behavioural drift the
+ * fuzzer is entitled to fail on. This function composes those per-line
+ * answers; it never reaches inside one.
+ */
+static ngx_int_t
+ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
+    const char *coding, size_t coding_len, ngx_uint_t allow_wildcard)
+{
+    ngx_int_t  coding_q = -1;   /* explicit token, lowest seen, -1 = absent */
+    ngx_int_t  star_q = -1;     /* "*" wildcard,   lowest seen, -1 = absent */
+
+    for (/* void */; ae != NULL; ae = NGX_HTTP_ZSTD_AE_NEXT(ae)) {
+
+        ngx_int_t  q;
+
+        /*
+         * Ask the single-value parser twice per line: once with the
+         * wildcard suppressed, to learn this line's EXPLICIT weight only,
+         * and once as the caller asked for, to learn the effective weight.
+         * When the two differ the effective answer came from "*", so the
+         * line contributed a wildcard weight and no explicit token.
+         *
+         * Doing it this way keeps ngx_http_zstd_coding_weight() untouched
+         * — it is the fuzzed, extracted-into-the-unit-suite function, and
+         * a second out-parameter would change the slice every one of those
+         * layers links. The header field is at most a handful of short
+         * lines, and this runs once per request on a path that is about to
+         * compress a response body.
+         */
+        q = ngx_http_zstd_coding_weight(&ae->value, coding, coding_len, 0);
+
+        if (q >= 0) {
+            /* Explicit token on this line: lowest explicit weight wins. */
+            if (coding_q < 0 || q < coding_q) {
+                coding_q = q;
+            }
+            continue;
+        }
+
+        if (!allow_wildcard) {
+            continue;
+        }
+
+        q = ngx_http_zstd_coding_weight(&ae->value, coding, coding_len, 1);
+
+        if (q >= 0) {
+            /* Only "*" could have produced an answer here. */
+            if (star_q < 0 || q < star_q) {
+                star_q = q;
+            }
+        }
+    }
+
+    /*
+     * Same precedence as the single-value parser: an explicit token
+     * anywhere in the field decides (even q=0, which then overrides a
+     * permissive "*"); with no explicit token the wildcard applies if
+     * present and permitted by the caller.
+     */
+    if (coding_q >= 0) {
+        return coding_q;
+    }
+    if (allow_wildcard && star_q >= 0) {
+        return star_q;
+    }
+    return -1;
+}
+
+
+/*
  * zstd acceptance predicate over one Accept-Encoding value — the
  * original entry point, now a thin wrapper. Semantics are unchanged:
  * NGX_OK iff the effective weight for "zstd" (explicit token, else "*"
  * wildcard) is > 0. The fuzz harness's independent reference oracle
  * asserts exactly this decision, so any behavioural drift here is a
  * fuzz failure, not just a review nit.
+ *
+ * SINGLE VALUE ONLY. This evaluates one Accept-Encoding field line. The
+ * request path does NOT call it -- ngx_http_zstd_accepts() walks the whole
+ * chained field via ngx_http_zstd_chain_coding_weight() -- but the fuzz
+ * target (ci/fuzz/fuzz_accept_encoding.c) and the unit suite
+ * (ci/tests/unit/test_accept_encoding.c) both link this exact body as the
+ * single-value entry point, and its differential oracle is written against
+ * it. ngx_inline because no module TU references it any more and a plain
+ * `static` would trip -Werror=unused-function in both of them, the same
+ * reason ngx_http_zstd_ok() below is inline.
  */
-static ngx_int_t
+static ngx_inline ngx_int_t
 ngx_http_zstd_accept_encoding(const ngx_str_t *ae)
 {
     ngx_int_t  q;
@@ -462,9 +624,16 @@ ngx_http_zstd_accepts(ngx_http_request_t *r)
     /*
      * A "*" wildcard (one byte) can make zstd acceptable, so the old
      * "shorter than 'zstd'" fast-reject is no longer valid; an empty value
-     * is still a decline (the walk below returns NGX_DECLINED).
+     * is still a decline (the walk below returns -1).
+     *
+     * The whole chained field is evaluated, not just ae->value: duplicate
+     * Accept-Encoding lines are one comma-joined list (RFC 9110 section
+     * 5.3). See ngx_http_zstd_chain_coding_weight() for that and for the
+     * duplicate-coding rule it applies.
      */
-    return ngx_http_zstd_accept_encoding(&ae->value);
+    return ngx_http_zstd_chain_coding_weight(ae, "zstd", sizeof("zstd") - 1, 1)
+               > 0
+               ? NGX_OK : NGX_DECLINED;
 }
 
 

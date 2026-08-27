@@ -317,6 +317,19 @@ jobs:
           # ptrace-only fixture. No nginx, no libzstd -- pure Bash.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_soak_asan_verdict_unit.sh
 
+      - name: static pread retry/accumulate unit fixture (EINTR, short read, O_DIRECT alignment)
+        run: |
+          # ngx_http_zstd_static_pread(): the static probe's retry/accumulate
+          # loop. Extracts the helper verbatim and drives it against a
+          # scripted pread(2) stub, because EINTR, a legal short read, true
+          # EOF and a hard error are not reachable from ci/t/01-static.t on a
+          # local filesystem -- and neither is the O_DIRECT constraint the
+          # loop's alignment round-down exists to satisfy. The stub asserts
+          # buffer/offset/length alignment on every call, so a continuation
+          # that resumed mid-block fails here instead of on an operator's
+          # directio mount. Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_static_pread_unit.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
