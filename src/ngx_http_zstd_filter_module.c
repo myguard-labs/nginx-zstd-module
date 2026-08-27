@@ -2186,24 +2186,58 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     pos_in  = ctx->buffer_in.pos;
     pos_out = ctx->buffer_out.pos;
 
-    /*
-     * Determine the compression directive.
-     *
-     * END always wins (terminal frame). Otherwise a pending flush
-     * (ctx->flush) must map to ZSTD_e_flush even while the action state
-     * machine is still COMPRESS: that machine only transitions
-     * COMPRESS->FLUSH *after* a call that returned rc > 0 (zstd already
-     * had output to drain). Under `proxy_buffering off` the upstream
-     * forces a flush around a chunk that zstd consumes/buffers
-     * internally with rc == 0; if the directive stayed ZSTD_e_continue
-     * there, libzstd is never told to flush and holds those bytes
-     * indefinitely. Mapping ctx->flush -> ZSTD_e_flush forces libzstd
-     * to disgorge whatever it has buffered, exactly as the stock nginx
-     * gzip/brotli body filters issue a sync flush on a pending flush.
-     */
-    if (ctx->action == NGX_HTTP_ZSTD_FILTER_END) {
+    /* Determine the compression directive. */
+    if (ctx->action == NGX_HTTP_ZSTD_FILTER_END
+        || (ctx->last && ctx->in == NULL))
+    {
+        /*
+         * END wins, and it is selected as soon as this is provably the
+         * final call's input rather than one iteration later.
+         *
+         * `ctx->last && ctx->in == NULL` is the state machine's own
+         * COMPRESS->END transition predicate (below) minus its
+         * "buffer_in fully drained" clause. That clause is what forced a
+         * separate ZSTD_e_continue call first: the transition could only
+         * fire once libzstd had already eaten the buffer, so the frame
+         * was closed by a SECOND call carrying no new input. libzstd does
+         * not need that. ZSTD_e_end accepts pending input, consumes what
+         * it can and closes the frame in the same call, returning
+         * non-zero while the epilogue still has bytes to write -- which
+         * the existing `zrc > 0 -> ctx->redo = 1` arm below already
+         * re-drives, unchanged. Dropping the clause therefore removes one
+         * ZSTD_compressStream2() call from every completed response and
+         * lets libzstd take its documented first-call ZSTD_e_end fast
+         * path (ZSTD_compress2()) when the whole body and enough output
+         * space are present.
+         *
+         * ctx->in == NULL is load-bearing and stays: it is what proves no
+         * further chain link is queued behind this buffer. Selecting END
+         * with input still queued would close the frame early and
+         * truncate the body -- the 131072-byte truncation PR #49's
+         * transition predicate was written to prevent.
+         *
+         * Compressed bytes are allowed to differ from the two-call
+         * sequence (a frame is a few bytes smaller when libzstd sees the
+         * whole input at once). Frame VALIDITY and byte-identical
+         * decoded plaintext are the contract; the exact compressed byte
+         * stream is deliberately not one.
+         */
         directive = ZSTD_e_end;
+
     } else if (ctx->action == NGX_HTTP_ZSTD_FILTER_FLUSH || ctx->flush) {
+        /*
+         * A pending flush (ctx->flush) must map to ZSTD_e_flush even while
+         * the action state machine is still COMPRESS: that machine only
+         * transitions COMPRESS->FLUSH *after* a call that returned rc > 0
+         * (zstd already had output to drain). Under `proxy_buffering off`
+         * the upstream forces a flush around a chunk that zstd
+         * consumes/buffers internally with rc == 0; if the directive stayed
+         * ZSTD_e_continue there, libzstd is never told to flush and holds
+         * those bytes indefinitely. Mapping ctx->flush -> ZSTD_e_flush
+         * forces libzstd to disgorge whatever it has buffered, exactly as
+         * the stock nginx gzip/brotli body filters issue a sync flush on a
+         * pending flush.
+         */
         directive = ZSTD_e_flush;
     } else {
         directive = ZSTD_e_continue;
@@ -2331,17 +2365,46 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         /*
          * rc > 0: zstd has buffered data. For COMPRESS, transition to FLUSH
          * to drain libzstd's internal buffers. For FLUSH/END, keep the action.
+         *
+         * A call that ran ZSTD_e_end is already in the terminal phase even
+         * when ctx->action has not caught up (the directive selection above
+         * picks END directly from `ctx->last && ctx->in == NULL`, one
+         * iteration before this machine would have transitioned). Record
+         * that here rather than parking the action in FLUSH: a FLUSH action
+         * with ctx->last set would still re-select END on the next
+         * iteration -- the directive is correct either way -- but leaving
+         * the state saying "flushing" while the frame epilogue is being
+         * written misdescribes the stream to every later reader of
+         * ctx->action, including the emit trace and the flush accounting
+         * below.
          */
-        if (ctx->action == NGX_HTTP_ZSTD_FILTER_COMPRESS) {
+        if (directive == ZSTD_e_end) {
+            ctx->action = NGX_HTTP_ZSTD_FILTER_END;
+
+        } else if (ctx->action == NGX_HTTP_ZSTD_FILTER_COMPRESS) {
             ctx->action = NGX_HTTP_ZSTD_FILTER_FLUSH;
         }
         ctx->redo = 1;
 
     } else if (ctx->last && ctx->action != NGX_HTTP_ZSTD_FILTER_END
+               && directive != ZSTD_e_end
                && ctx->buffer_in.pos >= ctx->buffer_in.size
                && ctx->in == NULL)
     {
         /*
+         * `directive != ZSTD_e_end` is what keeps this arm meaning what
+         * its body says. It exists for the case where the call that just
+         * ran did NOT close the frame, so a further ZSTD_e_end iteration
+         * still has to happen -- which is why it can return NGX_AGAIN and
+         * suppress the buffer. Since the directive selection above may now
+         * pick END on this very call, the arm would otherwise be reachable
+         * with the frame already terminal (zrc == 0, directive
+         * ZSTD_e_end): it would then swallow the zero-output terminal
+         * buffer and return NGX_AGAIN forever instead of emitting the
+         * zero-length last_buf -- the request hang PR #196 fixed on this
+         * same path. With the guard, a terminal END call falls through to
+         * the `last` computation below, exactly as before.
+         *
          * PR #49: All input consumed; transition to END only when:
          * - last flag is set (we know this is the final chunk)
          * - input buffer fully drained (no more bytes to feed libzstd)
