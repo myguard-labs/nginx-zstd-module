@@ -70,6 +70,7 @@ TOOLS_DIR = pathlib.Path(__file__).resolve().parent
 @dataclasses.dataclass
 class PerfCounters:
     """CPU cache and execution counters from perf stat."""
+
     cache_misses: int
     cache_references: int
     instructions: int
@@ -223,8 +224,7 @@ def parse_perf_output(
     if not required.issubset(counters.keys()):
         missing = required - counters.keys()
         raise RuntimeError(
-            f"perf stat output missing counters: {missing}.\n"
-            f"Output:\n{perf_output}"
+            f"perf stat output missing counters: {missing}.\nOutput:\n{perf_output}"
         )
 
     return counters
@@ -384,6 +384,7 @@ def print_counters(
 @dataclasses.dataclass
 class CounterDelta:
     """Delta between two measurements."""
+
     cache_misses: int
     cache_references: int
     instructions: int
@@ -447,13 +448,17 @@ def compare_results(baseline_json: str, optimized_json: str) -> None:
     print("\n" + "=" * 70)
     if delta.cache_misses < 0:
         claim_pct = delta.cache_misses / baseline.cache_misses
-        print(f"✓ SUPPORTS CLAIM: {abs(delta.cache_misses):,} fewer "
-              f"cache misses ({claim_pct:.1%})")
+        print(
+            f"✓ SUPPORTS CLAIM: {abs(delta.cache_misses):,} fewer "
+            f"cache misses ({claim_pct:.1%})"
+        )
         print("  Repack row retained.")
     else:
         support_pct = delta.cache_misses / baseline.cache_misses
-        print(f"✗ DOES NOT SUPPORT: {delta.cache_misses:+,} cache misses "
-              f"({support_pct:+.1%})")
+        print(
+            f"✗ DOES NOT SUPPORT: {delta.cache_misses:+,} cache misses "
+            f"({support_pct:+.1%})"
+        )
         print("  Repack row should be REFUTED.")
     print("=" * 70 + "\n")
 
