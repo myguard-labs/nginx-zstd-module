@@ -2840,13 +2840,12 @@ skip_bound:
          * steals space ZSTD_compressBound()/the floor above sized for the
          * compressed payload -- the compressor still gets the full
          * buf_size to fill; the prefix rides in bytes appended past it.
-         * Never let this push buf_size past zlcf->bufs.size: on the
-         * pledged-size path buf_size is already clamped below it above,
-         * and on the full-size path adding 40 bytes here would otherwise
-         * make the allocation slightly larger than every other buffer in
-         * the pool for no benefit, so clamp back down and only ever
-         * dip into the compressor's own share when the pool buffer is
-         * already at the configured size.
+         * On the dcz first buffer, the allocation is deliberately
+         * zlcf->bufs.size + NGX_HTTP_ZSTD_DCZ_HEADER_LEN (40 bytes), a
+         * bounded exception to the configured per-buffer size. This small
+         * overhead avoids a separate pool allocation for the RFC 9842
+         * skippable-frame prefix and keeps the compressor's own share
+         * intact for a single carefully-sized response.
          */
         if (want_prefix) {
             buf_size += NGX_HTTP_ZSTD_DCZ_HEADER_LEN;
