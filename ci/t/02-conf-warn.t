@@ -597,3 +597,60 @@ Content-Encoding: zstd
 Vary: Accept-Encoding
 --- no_error_log eval
 [qr/gzip_vary/, qr/\[error\]/]
+
+
+
+=== TEST 21: zstd_dict_strict_path refuses a ".." path component
+# The component walk explicitly rejects "." and ".." rather than
+# resolving them, because ".." would climb back above a component
+# already verified and make the walk's guarantee unstatable.
+--- http_config eval
+"    zstd_dict_file_unsafe on;
+    zstd_dict_strict_path on;
+    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/../html/zstd.dict;"
+--- user_files
+>>> zstd.dict
+the quick brown fox jumps over the lazy dog
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+contains a "." or ".." component; refused by "zstd_dict_strict_path on"
+--- no_error_log
+[alert]
+
+
+
+=== TEST 22: zstd_dict_strict_path refuses a symlinked intermediate component
+# The reason M3 exists: O_NOFOLLOW on the leaf alone guards only the last
+# component, so /srv/current/dict.bin with "current" a symlink is
+# followed silently by a plain open(). Walking one component at a time
+# with openat(O_NOFOLLOW) makes the symlinked "current" fail the walk.
+--- http_config eval
+"    zstd_dict_file_unsafe on;
+    zstd_dict_strict_path on;
+    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/current/zstd.dict;"
+--- post_setup_server_root eval
+'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+my $real = "$root/html/real-release";
+mkdir $real or die "mkdir $real: $!";
+open my $fh, ">", "$real/zstd.dict" or die "open zstd.dict: $!";
+print $fh "the quick brown fox jumps over the lazy dog";
+close $fh;
+symlink $real, "$root/html/current"
+    or die "symlink current: $!";'
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+a symlink at any component is refused, not followed
+--- no_error_log
+[alert]
