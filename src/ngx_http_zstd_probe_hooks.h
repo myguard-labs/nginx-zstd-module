@@ -210,6 +210,25 @@ ngx_http_zstd_probe_refprefix_outcome_e
 ngx_uint_t ngx_http_zstd_probe_palloc_should_fail(void);
 ngx_uint_t ngx_http_zstd_probe_palloc_count(void);
 
+
+/*
+ * ZSTD_CCtx_setParameter() call counter -- observation only, no fault.
+ *
+ * Bumped once per call from ngx_http_zstd_set_param() in init_cctx,
+ * counting from process start (not from an arm: there is nothing to arm
+ * here, only a count to read). Exists to pin the per-mode setParameter
+ * call count this module makes when configuring a request's CCtx --
+ * skipping a superseded-by-CDict parameter must show up as a lower count
+ * for that mode, and a mutation that re-adds the redundant set must show
+ * up as a higher one. ngx_http_zstd_probe_setparam_count() reads it;
+ * ngx_http_zstd_probe_setparam_reset() zeroes it so a driver can bracket
+ * exactly one request's calls the same way the codec sites are bracketed
+ * by their arm-relative reset.
+ */
+void       ngx_http_zstd_probe_note_setparam(void);
+ngx_uint_t ngx_http_zstd_probe_setparam_count(void);
+void       ngx_http_zstd_probe_setparam_reset(void);
+
 #endif /* NGX_TEST_HARNESS */
 
 #endif /* NGX_HTTP_ZSTD_PROBE_HOOKS_H_INCLUDED_ */

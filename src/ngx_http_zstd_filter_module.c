@@ -3045,6 +3045,10 @@ ngx_http_zstd_set_param(ngx_http_request_t *r, ZSTD_CCtx *cctx,
 {
     size_t  rc;
 
+#ifdef NGX_TEST_HARNESS
+    ngx_http_zstd_probe_note_setparam();
+#endif
+
     rc = ZSTD_CCtx_setParameter(cctx, param, value);
     if (ZSTD_isError(rc)) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
@@ -3262,11 +3266,32 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_compressionLevel,
-                                (int) zlcf->level, "level")
-        != NGX_OK)
-    {
-        return NGX_ERROR;
+    /*
+     * ZSTD_c_compressionLevel is one of the "compression parameters"
+     * ZSTD_CCtx_refCDict() unconditionally overrides from the CDict's own
+     * baked-in ZSTD_compressionParameters (see the enum block comment in
+     * zstd.h: "When compressing with a ZSTD_CDict these parameters are
+     * superseded by the parameters used to construct the ZSTD_CDict" --
+     * ZSTD_c_compressionLevel is the first parameter in that block). Skip
+     * setting it only when refCDict is actually going to run below --
+     * i.e. zlcf->dict is set AND this request did NOT negotiate dcz,
+     * exactly the "else if (zlcf->dict)" condition the refCDict call site
+     * itself uses. zstd_dict_file is an http{}-context directive, so a
+     * dcz-negotiated request can have BOTH ctx->dcz_dict and zlcf->dict
+     * non-NULL at once; the dcz branch below always wins that mutual
+     * exclusion (ZSTD_CCtx_refPrefix() only, never refCDict), so gating on
+     * zlcf->dict alone would wrongly skip the level on such a request even
+     * though refCDict is never called for it. The dcz path uses
+     * ZSTD_CCtx_refPrefix(), which does NOT override sticky parameters, so
+     * level must still be set there.
+     */
+    if (zlcf->dict == NULL || ctx->dcz_dict != NULL) {
+        if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_compressionLevel,
+                                    (int) zlcf->level, "level")
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
     }
 
     /*
@@ -3319,8 +3344,24 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
      * windowLog gives operators a hard, predictable per-request memory
      * ceiling at a small ratio cost on inputs larger than the window.
      * Unset (0) keeps zstd's level-derived default.
+     *
+     * Skipped for both dictionary modes -- each sets its own windowLog
+     * with more specific knowledge than this generic block has:
+     *
+     *   - zlcf->dict (trained CDict): ZSTD_c_windowLog is in the same
+     *     refCDict-superseded "compression parameters" block as the level
+     *     above (zstd.h), and conf->dict was already built via
+     *     ZSTD_createCDict_advanced() seeded from this exact
+     *     zlcf->window_log (see the CDict construction site), so setting
+     *     it again here would only be immediately discarded.
+     *   - ctx->dcz_dict (RFC 9842 raw prefix): refPrefix does not override
+     *     sticky parameters, so windowLog here is NOT superseded, but the
+     *     dcz branch below computes a dictionary- and pledged-size-aware
+     *     value via ngx_http_zstd_dcz_window_log() and sets THAT instead --
+     *     setting the plain zlcf->window_log here first would just be
+     *     overwritten one call later by the correct value.
      */
-    if (zlcf->window_log > 0) {
+    if (zlcf->window_log > 0 && zlcf->dict == NULL && ctx->dcz_dict == NULL) {
         if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_windowLog,
                                     (int) zlcf->window_log, "windowLog")
             != NGX_OK)

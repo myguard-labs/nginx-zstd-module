@@ -113,6 +113,15 @@ static ngx_uint_t  ngx_http_zstd_probe_refprefix_calls;
 static ngx_int_t   ngx_http_zstd_probe_fault_palloc_nth = -1;
 static ngx_uint_t  ngx_http_zstd_probe_palloc_calls;
 
+/*
+ * ZSTD_CCtx_setParameter() call counter. No fault, no arm -- see the header.
+ * Reset via GET /__probe?setparam_reset=1, mirroring the codec sites'
+ * "disarm zeroes the counter" convention closely enough that a driver
+ * bracketing one request looks the same shape as the codec-call-count
+ * scenario's reset_counters().
+ */
+static ngx_uint_t  ngx_http_zstd_probe_setparam_calls;
+
 static ngx_int_t ngx_http_zstd_probe_handler(ngx_http_request_t *r);
 
 
@@ -268,6 +277,32 @@ ngx_http_zstd_probe_palloc_count(void)
 
 
 /*
+ * Bump the setParameter call counter. Called once per
+ * ngx_http_zstd_set_param() invocation in init_cctx -- see the header for
+ * why this is a plain counter and not a fault site.
+ */
+void
+ngx_http_zstd_probe_note_setparam(void)
+{
+    ngx_http_zstd_probe_setparam_calls++;
+}
+
+
+ngx_uint_t
+ngx_http_zstd_probe_setparam_count(void)
+{
+    return ngx_http_zstd_probe_setparam_calls;
+}
+
+
+void
+ngx_http_zstd_probe_setparam_reset(void)
+{
+    ngx_http_zstd_probe_setparam_calls = 0;
+}
+
+
+/*
  * module_render hook: append this module's zone-independent counters to
  * the top-level "module" object. ngx_test_probe_render_module() has
  * already written the opening `,"module":{` before calling this hook, so
@@ -284,7 +319,8 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
                         ",\"codec_calls\":%ui"
                         ",\"codec_end_calls\":%ui"
                         ",\"refprefix_calls\":%ui"
-                        ",\"refprefix_armed\":%ui",
+                        ",\"refprefix_armed\":%ui"
+                        ",\"setparam_calls\":%ui",
                         ngx_http_zstd_probe_chain_links,
                         ngx_http_zstd_probe_bufs_allocated,
                         ngx_http_zstd_probe_palloc_calls,
@@ -294,7 +330,8 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
                         ngx_http_zstd_probe_fault_refprefix_nth < 0
                             ? 0
                             : (ngx_uint_t)
-                                ngx_http_zstd_probe_fault_refprefix_nth);
+                                ngx_http_zstd_probe_fault_refprefix_nth,
+                        ngx_http_zstd_probe_setparam_calls);
 
     if (ngx_http_zstd_probe_have_ctx) {
         buf = ngx_slprintf(buf, last,
@@ -391,6 +428,31 @@ ngx_http_zstd_probe_arm_refprefix(ngx_http_request_t *r)
 
     ngx_http_zstd_probe_fault_refprefix_nth = nth;
     ngx_http_zstd_probe_refprefix_calls = 0;
+}
+
+
+/*
+ * Reset the setParameter counter from the request query string
+ * (?setparam_reset=1). No fault to arm here, so this is a bare reset
+ * rather than routed through fault_set_global -- same reasoning as
+ * arm_refprefix() above being module-local because the generic testkit
+ * predates this counter.
+ */
+static void
+ngx_http_zstd_probe_arm_setparam_reset(ngx_http_request_t *r)
+{
+    ngx_str_t  value;
+
+    if (ngx_http_arg(r, (u_char *) "setparam_reset",
+                     sizeof("setparam_reset") - 1, &value)
+        != NGX_OK)
+    {
+        return;
+    }
+
+    if (value.len == 1 && value.data[0] == '1') {
+        ngx_http_zstd_probe_setparam_reset();
+    }
 }
 
 
@@ -533,6 +595,7 @@ ngx_http_zstd_probe_handler(ngx_http_request_t *r)
      * comment.
      */
     ngx_http_zstd_probe_arm_refprefix(r);
+    ngx_http_zstd_probe_arm_setparam_reset(r);
     (void) ngx_test_probe_arm(NULL, &r->args);
 
     /*

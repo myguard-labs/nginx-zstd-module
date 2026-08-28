@@ -11,6 +11,21 @@ name: Harness Fault Arms
 #                                          (cycle-pool + fd deltas)
 #   ci/t/harness-scenarios/fault-palloc    pool-allocation failure handling
 #                                          (PALLOC fault site, issues.md m8)
+#   ci/t/harness-scenarios/codec-call-count
+#                                          per-response ZSTD_compressStream2
+#                                          call count, plain/tiny/empty/dcz/
+#                                          flush-last
+#   ci/t/harness-scenarios/setparam-call-count,
+#   ci/t/harness-scenarios/setparam-call-count-nodict
+#                                          per-mode ZSTD_CCtx_setParameter
+#                                          call count -- pins that a CDict
+#                                          compression skips the parameters
+#                                          refCDict supersedes (level,
+#                                          windowLog) while a dcz-negotiated
+#                                          one, which uses refPrefix instead,
+#                                          still sets them (TODO-archive.md
+#                                          2026-08 "skip superseded libzstd
+#                                          parameters per dictionary mode")
 #
 # See plan-testkit-integration.md Phase 4: this is the "real" gate for the
 # codec fault-injection surface Phase 3 wired up -- the testkit-side
@@ -361,6 +376,76 @@ jobs:
             fi
           done
 
+      - name: Run setparam-call-count scenario
+        env:
+          PROBER_ROOT: ${{ github.workspace }}
+          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
+          PROBER_MODULE: ngx_http_zstd_filter_module.so
+          PROBER_DIRECTIVE: zstd_probe
+          PROBER_PROBE: "zstd_probe;"
+          # No PROBER_ALLOW_LOG, deliberately: this scenario injects no
+          # faults either, same reasoning as codec-call-count above.
+        run: |
+          set -euo pipefail
+          cd ci/t/harness/ci/prober
+          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/setparam-call-count" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/setparam-call-count-tap.log"
+
+          if grep -q '^not ok' "$GITHUB_WORKSPACE/setparam-call-count-tap.log"; then
+            echo "::error::setparam-call-count scenario reported at least one 'not ok' line"
+            exit 1
+          fi
+
+          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/setparam-call-count-tap.log" || true)
+          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/setparam-call-count-tap.log" || true)
+          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
+            echo "::error::every oracle in setparam-call-count SKIPped -- the" \
+              "scenario asserted nothing about the per-mode" \
+              "ZSTD_CCtx_setParameter call count; failing rather than" \
+              "banking a vacuous green"
+            exit 1
+          fi
+
+          # The count oracles specifically -- oracle 3 (cdict) and oracle 6
+          # (dcz). Same "[^#]*$" reasoning as codec-call-count's tail above:
+          # without it a SKIP line would still match and bank a green that
+          # asserted nothing.
+          for n in 3 6; do
+            if ! grep -qE "^ok $n - [^#]*setParameter call count is [^#]*$" \
+                 "$GITHUB_WORKSPACE/setparam-call-count-tap.log"; then
+              echo "::error::oracle $n (a setParameter-call-count assertion)" \
+                "did not pass -- without it this scenario cannot show a" \
+                "superseded-by-cdict parameter was actually skipped"
+              exit 1
+            fi
+          done
+
+      - name: Run setparam-call-count-nodict scenario
+        env:
+          PROBER_ROOT: ${{ github.workspace }}
+          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
+          PROBER_MODULE: ngx_http_zstd_filter_module.so
+          PROBER_DIRECTIVE: zstd_probe
+          PROBER_PROBE: "zstd_probe;"
+        run: |
+          set -euo pipefail
+          cd ci/t/harness/ci/prober
+          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/setparam-call-count-nodict" nginx 1.31.4 \
+            | tee "$GITHUB_WORKSPACE/setparam-call-count-nodict-tap.log"
+
+          if grep -q '^not ok' "$GITHUB_WORKSPACE/setparam-call-count-nodict-tap.log"; then
+            echo "::error::setparam-call-count-nodict scenario reported at least one 'not ok' line"
+            exit 1
+          fi
+
+          if ! grep -qE '^ok 3 - [^#]*setParameter call count is [^#]*$' \
+               "$GITHUB_WORKSPACE/setparam-call-count-nodict-tap.log"; then
+            echo "::error::oracle 3 (the no-dict setParameter-call-count" \
+              "assertion) did not pass -- without it there is no reference" \
+              "count the dictionary-mode oracles above are measured against"
+            exit 1
+          fi
+
       - name: Upload TAP log
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -371,5 +456,7 @@ jobs:
             alloc-neutral-tap.log
             fault-palloc-tap.log
             codec-call-count-tap.log
+            setparam-call-count-tap.log
+            setparam-call-count-nodict-tap.log
           retention-days: 14
           if-no-files-found: ignore
