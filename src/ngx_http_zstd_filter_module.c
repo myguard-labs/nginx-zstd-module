@@ -3512,6 +3512,10 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
                                         ctx->pledged_size,
                                         zlcf->window_log,
                                         zlcf->dcz_window_cap);
+
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "zstd: dcz window log computed once: %i",
+                           ctx->dcz_window_log_cache);
         }
 
         wlog = ctx->dcz_window_log_cache;

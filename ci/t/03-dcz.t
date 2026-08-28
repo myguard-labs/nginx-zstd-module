@@ -1271,11 +1271,15 @@ Vary: Available-Dictionary, Accept-Encoding, Sec-Fetch-Site
 # request regardless of how many times the cached value is subsequently
 # read.
 #
-# Falsifiability: reverting the memoisation (each site calling
-# ngx_http_zstd_dcz_window_log() directly again) makes this line -- moved
-# back inside both call sites -- appear twice; grep_error_log_out pins the
-# count at exactly one line, so that regression goes red here while every
-# byte-level assertion in this suite (TEST 46 included) stays green.
+# Falsifiability: the witness is emitted at BOTH memoisation sites
+# (acquire_cctx() and init_cctx()), each inside its own cache-miss guard,
+# so it is logged once per ACTUAL computation rather than once per
+# request. Defeating the memoisation (forcing both guards true) makes the
+# line appear twice and this test goes red on grep_error_log_out, while
+# every byte-level assertion in this suite (TEST 46 included) stays green
+# -- verified by mutation, not assumed. Emitting the witness at only one
+# of the two sites would make this test pass whether the value is computed
+# once or twice; do not "simplify" it that way.
 --- config
     error_log logs/error.log debug;
     location /test {
