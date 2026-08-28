@@ -58,10 +58,11 @@ our $bad_b64  = encode_base64("\x01" x 32, "");
 
 # For the optional supplied-hash directive argument: the fixture's true
 # hash as hex, and a deliberately different well-formed hash. The
-# supplied literal is VERIFIED against the loaded bytes, so the wrong
-# one must abort config load (TESTs 17-18) rather than become the
-# negotiation key. $zstd_dcz_dicts_hashed now counts every loaded
-# dictionary, literal or not (TESTs 21-23).
+# supplied literal is VERIFIED against the loaded bytes by default, so
+# the wrong one must abort config load (TESTs 17-18) rather than become
+# the negotiation key. Under trust_hashes it is used verbatim (TEST 40).
+# $zstd_dcz_dicts_hashed counts every loaded dictionary by default
+# (TESTs 21-23), but excludes trusted literals (TESTs 41-42).
 our $dict_hex = unpack("H*", sha256($dict_raw));
 our $odd_hex  = "01" x 32;
 our $odd_b64  = encode_base64("\x01" x 32, "");

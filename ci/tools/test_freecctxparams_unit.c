@@ -80,8 +80,9 @@ static void ngx_conf_log_error(int level, ngx_conf_t *cf, int err,
  * libzstd headers older than 1.5.6.  This fixture links no real libzstd,
  * however: every call is faked below, and it must still compile and drive
  * that sixth error exit on CI hosts whose system zstd.h predates 1.5.6.
- * Supply the public 1.5.6 enum value only to this fake translation unit and
- * raise the extracted function's version gate accordingly.
+ * Retain an older header's experimental alias when present, otherwise supply
+ * the public 1.5.6 value only to this fake translation unit, then raise the
+ * extracted function's version gate accordingly.
  */
 #if ZSTD_VERSION_NUMBER < 10506
 #ifndef ZSTD_c_targetCBlockSize

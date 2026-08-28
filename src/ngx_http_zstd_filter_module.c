@@ -718,12 +718,12 @@ static ngx_str_t  ngx_http_zstd_ratio = ngx_string("zstd_ratio");
 
 /*
  * $zstd_dcz_dicts_hashed serves two audiences: operators checking that
- * supplied hashes actually took effect (the value is 0 when every
- * dictionary carried one), and the regression suite, which asserts
- * exactly that — the supplied-hash fast path is otherwise unobservable
- * from outside, since the branch fills dict->hash either way. The count
- * itself lives in ngx_http_zstd_main_conf_t (see there for why), fed by
- * ngx_http_zstd_dcz_dict_hash() (see there for why).
+ * trusted supplied hashes skipped the hashing pass (the value is 0 when
+ * trust_hashes is on and every dictionary carried a literal), and the
+ * regression suite, which asserts exactly that — the trusted-literal
+ * skip is otherwise unobservable when the literal matches the file. The
+ * count itself lives in ngx_http_zstd_main_conf_t (see there for why),
+ * fed by ngx_http_zstd_dcz_dict_hash() (see there for why).
  */
 static ngx_str_t  ngx_http_zstd_dcz_dicts_hashed_name =
     ngx_string("zstd_dcz_dicts_hashed");
@@ -5227,11 +5227,12 @@ ngx_http_zstd_add_variables(ngx_conf_t *cf)
 
 /*
  * $zstd_dcz_dicts_hashed — how many dcz dictionaries were SHA-256'd at
- * config load in the request's ACTIVE configuration. 0 means every
- * registered dictionary carried a supplied hash (the fast path); the
- * dictionary count itself when none did. Constant for the lifetime of
- * the configuration; reads the cycle-owned main conf, so a rejected
- * reload cannot leak a refused config's count into this value.
+ * config load in the request's ACTIVE configuration. By default that is
+ * the dictionary count, including verified literals. With trust_hashes
+ * on, supplied literals are skipped and only literal-free entries count;
+ * 0 proves that every entry used a trusted literal. Constant for the
+ * lifetime of the configuration; reads the cycle-owned main conf, so a
+ * rejected reload cannot leak a refused config's count into this value.
  */
 static ngx_int_t
 ngx_http_zstd_dcz_dicts_hashed_variable(ngx_http_request_t *r,
