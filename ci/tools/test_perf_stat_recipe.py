@@ -28,6 +28,19 @@ perf_recipe = load_tool("perf_stat_recipe")
 
 
 class DczWorkloadTests(unittest.TestCase):
+    def test_nginx_starts_in_its_own_process_group(self) -> None:
+        arm = ab_bench.Arm("baseline", pathlib.Path("/nginx"))
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            mock.patch.object(ab_bench, "open", mock.mock_open()),
+            mock.patch.object(ab_bench.subprocess, "Popen") as popen,
+        ):
+            ab_bench.start_nginx(
+                arm, pathlib.Path("nginx.conf"), pathlib.Path(temp_dir)
+            )
+
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
     def test_hit_configures_requested_dictionaries_and_canonical_headers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -102,6 +115,7 @@ class DczWorkloadTests(unittest.TestCase):
 
     def test_readiness_failure_reaps_the_spawned_nginx_process(self) -> None:
         process = mock.Mock()
+        process.pid = 4321
         process.wait.side_effect = [
             ab_bench.subprocess.TimeoutExpired(["nginx"], 10),
             0,
@@ -126,6 +140,7 @@ class DczWorkloadTests(unittest.TestCase):
                 "require_own_nginx_ready",
                 side_effect=RuntimeError("readiness failed"),
             ),
+            mock.patch.object(ab_bench.os, "killpg") as kill_group,
             self.assertRaisesRegex(RuntimeError, "readiness failed"),
         ):
             ab_bench.run_release_pass(
@@ -137,8 +152,19 @@ class DczWorkloadTests(unittest.TestCase):
             process.wait.call_args_list,
             [mock.call(timeout=10), mock.call(timeout=5)],
         )
-        process.kill.assert_called_once_with()
+        kill_group.assert_called_once_with(4321, ab_bench.signal.SIGKILL)
         backend.stop.assert_called_once_with()
+
+    def test_nginx_group_cleanup_reaps_when_group_is_already_gone(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.wait.side_effect = [
+            ab_bench.subprocess.TimeoutExpired(["nginx"], 10),
+            0,
+        ]
+        with mock.patch.object(ab_bench.os, "killpg", side_effect=ProcessLookupError):
+            ab_bench.stop_nginx(process)
+
+        self.assertEqual(process.wait.call_args_list[-1], mock.call(timeout=5))
 
     def test_perf_attaches_only_to_resolved_nginx_workers(self) -> None:
         process = mock.Mock()

@@ -637,7 +637,21 @@ def start_nginx(arm: Arm, conf: pathlib.Path, root: pathlib.Path) -> subprocess.
         [str(arm.binary), "-p", str(root), "-c", str(conf)],
         stdout=log,
         stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
+
+
+def stop_nginx(proc: subprocess.Popen) -> None:
+    """Gracefully stop nginx, then kill and reap its private process group."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=5)
 
 
 def nginx_worker_pids(master_pid: int, expected: int) -> list[int]:
@@ -1026,12 +1040,7 @@ def run_release_pass(
             perf_proc.kill()
             perf_proc.wait(timeout=5)
         for proc, _root, _port in procs.values():
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+            stop_nginx(proc)
         for backend in backends:
             backend.stop()
         for root in workdirs:
@@ -1191,11 +1200,7 @@ def run_debug_pass(
                 prev_created, prev_reused = total_created, total_reused
                 results[conc] = WitnessSample(created=created, reused=reused)
         finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            stop_nginx(proc)
     finally:
         backend.stop()
         shutil.rmtree(root, ignore_errors=True)
