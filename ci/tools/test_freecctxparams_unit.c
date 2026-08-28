@@ -75,6 +75,20 @@ static void ngx_conf_log_error(int level, ngx_conf_t *cf, int err,
 #endif
 #include <zstd.h>
 
+/*
+ * The production module correctly omits targetCBlockSize when built with
+ * libzstd headers older than 1.5.6.  This fixture links no real libzstd,
+ * however: every call is faked below, and it must still compile and drive
+ * that sixth error exit on CI hosts whose system zstd.h predates 1.5.6.
+ * Supply the public 1.5.6 enum value only to this fake translation unit and
+ * raise the extracted function's version gate accordingly.
+ */
+#if ZSTD_VERSION_NUMBER < 10506
+#define ZSTD_c_targetCBlockSize  ((ZSTD_cParameter) 130)
+#undef ZSTD_VERSION_NUMBER
+#define ZSTD_VERSION_NUMBER  10506
+#endif
+
 /* --- scripted fake ZSTD_* layer -----------------------------------------
  *
  * One sentinel ZSTD_CCtx_params object stands in for the real (opaque)
