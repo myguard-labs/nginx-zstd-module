@@ -5299,6 +5299,7 @@ ngx_http_zstd_cleanup_cctx(void *data)
 static void
 ngx_http_zstd_release_cctx(void *data)
 {
+    size_t                      rc;
     ngx_http_zstd_cctx_slot_t  *slot = data;
 
     if (slot == NULL || slot->cctx == NULL) {
@@ -5320,7 +5321,28 @@ ngx_http_zstd_release_cctx(void *data)
      * would free a context a live request is still writing into, which no
      * amount of searching here could make safe.
      */
-    (void) ZSTD_CCtx_reset(slot->cctx, ZSTD_reset_session_only);
+    rc = ZSTD_CCtx_reset(slot->cctx, ZSTD_reset_session_only);
+    if (ZSTD_isError(rc)) {
+
+        /*
+         * A failed reset does not corrupt the next borrower's output --
+         * ngx_http_zstd_filter_init_cctx() always runs a full
+         * ZSTD_reset_session_and_parameters before use and checks it -- but
+         * handing this slot out again would just fail that second reset too,
+         * poisoning it for every future borrower in this worker's life. Retire
+         * the slot instead: free the context and clear it to the exact
+         * "empty AND not busy" state acquire_cctx() treats as re-seedable,
+         * so the next acquire allocates a fresh ZSTD_createCCtx() into it
+         * rather than looping on a wedged one.
+         */
+        ngx_log_error(NGX_LOG_ALERT, ngx_cycle->log, 0,
+                      "zstd: ZSTD_CCtx_reset() failed on release, "
+                      "retiring cctx slot: %s", ZSTD_getErrorName(rc));
+
+        ZSTD_freeCCtx(slot->cctx);
+        slot->cctx = NULL;
+    }
+
     slot->busy = 0;
 }
 

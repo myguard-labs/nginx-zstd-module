@@ -372,6 +372,15 @@ jobs:
           # Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_freecctxparams_unit.sh
 
+      - name: release-time CCtx reset failure retires poisoned ring slot
+        run: |
+          # ngx_http_zstd_release_cctx() returns a borrowed worker context to
+          # the four-slot cache. A failed session reset must retire that
+          # context instead of clearing busy and making the wedged context
+          # reusable forever. This fixture extracts the shipped function and
+          # drives both reset outcomes against scripted libzstd calls.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_release_cctx_unit.sh
+
       - name: Configure a real nginx source tree (for scan-build headers)
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
