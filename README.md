@@ -77,7 +77,8 @@ http {
     # Defaults: level 3, web-content MIME types, and a 1024-byte minimum.
     zstd             on;
 
-    # Required: emit Vary: Accept-Encoding so proxies/CDNs cache correctly.
+    # Optional for zstd (it emits Vary: Accept-Encoding itself); set this
+    # if gzip or brotli are also enabled so their variants are cached too.
     gzip_vary        on;
 
     server {
@@ -119,8 +120,8 @@ http {
     # --- zstd: set and forget ---
     zstd              on;    # level 3, 1 KiB minimum, common web types
 
-    # Required so proxies/CDNs cache compressed and identity variants
-    # separately. The module warns at startup if this is missing.
+    # Optional for zstd: the module emits Vary: Accept-Encoding itself, so
+    # this is only needed if gzip/brotli are also enabled on the location.
     gzip_vary         on;
 
     # Pre-compressed static assets (optional but free if you ship .zst)
@@ -198,7 +199,7 @@ load_module modules/ngx_http_zstd_static_module.so;
 |---|---|---|---|
 | **nginx** | 1.9.11 (first `--add-dynamic-module` release) | latest mainline / stable | **latest mainline** (resolved dynamically every CI run, not pinned) + **stable** and **Angie**, both pinned in CI Deep's monthly matrix |
 | **Angie** | 1.x | latest | **1.11.5** |
-| **libzstd** | **1.4.0** | **≥ 1.5.6** | 1.5.x (full suite) + **1.4.x** fallback-paths build |
+| **libzstd** | **1.4.0** | **≥ 1.5.7** | 1.5.x (full suite) + **1.4.x** fallback-paths build |
 | **OS** | Linux/BSD/RHEL-family | — | Ubuntu (GitHub runners) |
 
 Notes on the libzstd floor — these are enforced in code, not assumed:
@@ -213,8 +214,17 @@ Notes on the libzstd floor — these are enforced in code, not assumed:
   Everything else works. This fallback path is exercised in CI by a
   dedicated "Build (libzstd 1.4.x — fallback paths)" job that links the
   module against a privately built libzstd 1.4.x and runs the
-  decode-and-compare smoke test.
+  decode-and-compare smoke test. That lane proves API fallback
+  compatibility only — it is not a production-safety signal, and 1.4.5
+  is not the recommended version for production traffic.
 * **≥ 1.5.6**: every directive is fully functional.
+* **≥ 1.5.7 (recommended for production)**: fixes a rare upstream
+  dictionary-compression corruption on 32-bit ARM after a long-lived
+  `CCtx` is reused across a very large number of operations. This
+  module reuses a worker-lifetime `CCtx`, supports dictionaries, and
+  allows levels up to 22, so deployments combining dictionaries,
+  32-bit builds, and sustained traffic should run 1.5.7 or later; the
+  1.4.0 floor above is unaffected and unchanged.
 * **`zstd_max_cctx_memory`** additionally requires the module to be
   built with `-DZSTD_STATIC_LINKING_ONLY` so libzstd's experimental
   memory-estimator API is available. The project's production and CI
@@ -1349,9 +1359,14 @@ setup and the `git ls-files` trap: [CONTRIBUTING.md](CONTRIBUTING.md).
 # Benchmarks
 
 Reproduce with `python3 ci/tools/benchmark.py` (drives the `zstd`/`gzip`
-CLIs linked against the same libzstd/zlib, so ratio is machine-stable;
-throughput scales with CPU). Figures below: **libzstd 1.5.5**, single
-core, `--repeat 3`, best wall-time.
+CLIs linked against the same libzstd/zlib on the machine that runs it).
+Compression **ratio** for a given library/input/settings combination is
+stable across runs and machines; **throughput** is not — it scales with
+CPU and varies run to run, so treat any MB/s figure as a rough range,
+not a point value. These numbers come from the CLI codecs directly:
+they exclude nginx's own filter, context, buffering, and flush
+overhead, so they are not a measurement of module throughput. Figures
+below: **libzstd 1.5.5**, single core, `--repeat 3`, best wall-time.
 
 For nginx request-path measurements, `ci/tools/ab_bench.py` keeps its existing
 plain-zstd workload by default and accepts `--workload dcz` for a focused RFC
@@ -1383,9 +1398,15 @@ Honest reading of these numbers:
   roughly on par with `gzip -6` and a touch slower — gzip is well tuned
   for small text. zstd's advantage grows with payload size.
 * On **larger, structured** payloads zstd at a *low* level beats gzip
-  decisively on both ratio and speed (e.g. ~44× vs ~12× on JSON,
-  faster too). For typical web traffic, `zstd_comp_level 1`–`3` is the
-  sweet spot.
+  decisively on **ratio** (e.g. ~44× vs ~12× on JSON, ~64× vs ~13× on
+  JS). **Throughput is the opposite** in this table: gzip-6 CLI
+  throughput is higher than zstd-1/zstd-3 on both JSON (72 MB/s vs 52
+  and 43) and JS (108 MB/s vs 87 and 78). Choose zstd here for the
+  ratio and CPU-per-byte-stored win, not for raw CLI speed. For typical
+  web traffic, `zstd_comp_level 1`–`3` is the sweet spot.
+* On the **incompressible** payload, zstd-3 is faster than gzip-6 (36
+  vs 31 MB/s) with both codecs at a 1.00 ratio — zstd detects
+  incompressible input and gives up cheaply.
 * The synthetic JSON/JS generators are deliberately repetitive, so
   ratios there are inflated and *higher zstd levels show a lower ratio*
   — an artefact of trivially-redundant input, **not** representative of
