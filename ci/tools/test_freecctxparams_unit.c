@@ -84,7 +84,9 @@ static void ngx_conf_log_error(int level, ngx_conf_t *cf, int err,
  * raise the extracted function's version gate accordingly.
  */
 #if ZSTD_VERSION_NUMBER < 10506
+#ifndef ZSTD_c_targetCBlockSize
 #define ZSTD_c_targetCBlockSize  ((ZSTD_cParameter) 130)
+#endif
 #undef ZSTD_VERSION_NUMBER
 #define ZSTD_VERSION_NUMBER  10506
 #endif
@@ -159,7 +161,7 @@ ZSTD_CCtxParams_setParameter(ZSTD_CCtx_params *params, ZSTD_cParameter param,
 {
     (void) params; (void) value;
 
-    switch (param) {
+    switch ((int) param) {
     case ZSTD_c_windowLog:
         /*
          * Two different call sites push windowLog: the plain
