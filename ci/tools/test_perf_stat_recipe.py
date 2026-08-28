@@ -32,7 +32,7 @@ class DczWorkloadTests(unittest.TestCase):
         arm = ab_bench.Arm("baseline", pathlib.Path("/nginx"))
         with (
             tempfile.TemporaryDirectory() as temp_dir,
-            mock.patch.object(ab_bench, "open", mock.mock_open()),
+            mock.patch("builtins.open", mock.mock_open()),
             mock.patch.object(ab_bench.subprocess, "Popen") as popen,
         ):
             ab_bench.start_nginx(
