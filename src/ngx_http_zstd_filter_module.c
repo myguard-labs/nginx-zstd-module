@@ -671,6 +671,21 @@ typedef struct {
      */
     off_t                        pledged_size;
 
+    /*
+     * Memoised ngx_http_zstd_dcz_window_log() result for this request.
+     * acquire_cctx() and init_cctx() must derive the IDENTICAL window log --
+     * a request that borrows a CCtx ring slot keyed on one window and then
+     * compresses at another contaminates that slot's retained workspace for
+     * every later borrower. Computing it twice risked exactly that drift if
+     * either call site's inputs ever diverged; this field makes the two
+     * reads provably the same value by construction instead of relying on
+     * both call sites staying in lockstep. 0 means "not yet computed" -- the
+     * helper's documented range is [10, 23]
+     * (ZSTD_WINDOWLOG_MIN..NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG), so 0 can never
+     * be a real result. Meaningless when ctx->dcz_dict == NULL.
+     */
+    ngx_int_t                    dcz_window_log_cache;
+
     unsigned                     last:1;
     unsigned                     redo:1;
     unsigned                     flush:1;
@@ -3191,9 +3206,17 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
      * while a CCtx is only acquired on the first body buffer.
      */
     if (ctx->dcz_dict != NULL) {
-        eff_window_log = ngx_http_zstd_dcz_window_log(
-                             ctx->dcz_dict->bytes.len, ctx->pledged_size,
-                             zlcf->window_log, zlcf->dcz_window_cap);
+        if (ctx->dcz_window_log_cache == 0) {
+            ctx->dcz_window_log_cache = ngx_http_zstd_dcz_window_log(
+                                 ctx->dcz_dict->bytes.len, ctx->pledged_size,
+                                 zlcf->window_log, zlcf->dcz_window_cap);
+
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "zstd: dcz window log computed once: %i",
+                           ctx->dcz_window_log_cache);
+        }
+
+        eff_window_log = ctx->dcz_window_log_cache;
     } else {
         eff_window_log = zlcf->window_log;
     }
@@ -3467,19 +3490,31 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
         ngx_int_t  wlog;
 
         /*
-         * RFC 9842 window bound, plus both operator memory ceilings. The
-         * whole computation lives in ngx_http_zstd_dcz_window_log() because
-         * ngx_http_zstd_acquire_cctx() must derive the IDENTICAL value
-         * before it packs the CCtx ring key -- a request that borrows a slot
+         * RFC 9842 window bound, plus both operator memory ceilings. Read
+         * ngx_http_zstd_dcz_window_log()'s comment for the sizing rationale
+         * and for why both clamps are opt-in.
+         *
+         * This must be the SAME value ngx_http_zstd_acquire_cctx() packed
+         * into the CCtx ring key above -- a request that borrows a slot
          * keyed on one window and then compresses at another contaminates
-         * that slot's retained workspace for every later borrower. Read that
-         * function's comment for the sizing rationale and for why both
-         * clamps are opt-in.
+         * that slot's retained workspace for every later borrower. Rather
+         * than calling the helper again and relying on both call sites
+         * staying in lockstep, read the single memoised result computed at
+         * most once per request in ctx->dcz_window_log_cache: acquire_cctx()
+         * fills it when it runs (ctx->cctx == NULL above), and when it is
+         * skipped (a borrowed cctx already set on this ctx) the cache was
+         * necessarily already filled the first time this request acquired
+         * one, since ctx->dcz_dict does not change mid-request.
          */
-        wlog = ngx_http_zstd_dcz_window_log(ctx->dcz_dict->bytes.len,
-                                            ctx->pledged_size,
-                                            zlcf->window_log,
-                                            zlcf->dcz_window_cap);
+        if (ctx->dcz_window_log_cache == 0) {
+            ctx->dcz_window_log_cache = ngx_http_zstd_dcz_window_log(
+                                        ctx->dcz_dict->bytes.len,
+                                        ctx->pledged_size,
+                                        zlcf->window_log,
+                                        zlcf->dcz_window_cap);
+        }
+
+        wlog = ctx->dcz_window_log_cache;
 
         if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_windowLog, (int) wlog,
                                     "windowLog(dcz)")

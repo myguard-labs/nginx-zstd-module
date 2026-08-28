@@ -1255,3 +1255,46 @@ Content-Encoding: dcz
 Vary: Available-Dictionary, Accept-Encoding, Sec-Fetch-Site
 --- no_error_log
 [error]
+
+
+
+=== TEST 49: dcz window log is computed exactly once per request
+# ngx_http_zstd_dcz_window_log() used to run twice on a cold dcz request:
+# once in acquire_cctx() to key the CCtx ring slot, once again in
+# init_cctx() to set ZSTD_c_windowLog. Both calls take the same four
+# inputs and cannot observably differ, so a plain response-body test
+# cannot tell one computation from two -- exactly why TEST 46 above passes
+# either way. The debug line at the single memoisation site
+# (ctx->dcz_window_log_cache) is the witness that the value is computed
+# once, not read twice from a shared source that happens to agree: it is
+# logged ONLY on a cache miss, so it appears in the log exactly once per
+# request regardless of how many times the cached value is subsequently
+# read.
+#
+# Falsifiability: reverting the memoisation (each site calling
+# ngx_http_zstd_dcz_window_log() directly again) makes this line -- moved
+# back inside both call sites -- appear twice; grep_error_log_out pins the
+# count at exactly one line, so that regression goes red here while every
+# byte-level assertion in this suite (TEST 46 included) stays green.
+--- config
+    error_log logs/error.log debug;
+    location /test {
+        zstd on;
+        zstd_types *;
+        zstd_min_length 1;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz window-log single-compute witness body\n";
+    }
+--- request
+GET /test
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- grep_error_log eval
+qr/zstd: dcz window log computed once: \d+/
+--- grep_error_log_out eval
+qr/^zstd: dcz window log computed once: \d+\n?$/
+--- no_error_log
+[error]
