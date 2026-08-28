@@ -132,15 +132,29 @@ ngx_http_zstd_parse_q_fraction(const u_char *end, u_char **p)
  * Returns the weight in milli-units (0..1000) — 1000 when no "q" parameter
  * is present — or -1 if any parameter is malformed (including a repeated
  * "q", which RFC 9110 §12.4.2 permits at most once). Strictly length-bounded
- * by ae->len. Takes `p` by value: it does not advance the caller's cursor
- * (the caller re-scans to the next ',').
+ * by ae->len.
+ *
+ * Single-pass cursor contract: `*pp` points at the ';' on entry and is
+ * advanced to the resume position on return, so the caller never rescans
+ * the parameter bytes. On success that is the next top-level ',' or end
+ * (the trailing-junk check below guarantees it); on -1 it is the byte the
+ * walk stopped on, from which the caller's quote-aware skip to the next
+ * ',' yields exactly what a rescan from the ';' would. The one input that
+ * breaks that equivalence is a DQUOTE inside a parameter NAME: the name
+ * scan steps over it, whereas a quote-aware rescan from the ';' would open
+ * a quoted-string there. For that (malformed, token grammar forbids it)
+ * case `*pp` is left at the ';' so the caller's skip reproduces the
+ * historical result byte for byte -- a rescan only on that input, not on
+ * every parameterized element.
  */
 static ngx_int_t
-ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
+ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char **pp)
 {
+    u_char        *p = *pp;
     const u_char  *end = ae->data + ae->len;
     ngx_int_t      q = 1000;   /* no q parameter → q=1 */
     ngx_int_t      q_seen = 0; /* reject a second "q" parameter (RFC 9110) */
+    ngx_int_t      quoted_name = 0; /* DQUOTE seen inside a parameter name */
 
     while (p < end && *p == ';') {
 
@@ -159,6 +173,9 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
                && *p != '=' && *p != ';' && *p != ','
                && *p != ' ' && *p != '\t')
         {
+            if (*p == '"') {
+                quoted_name = 1;
+            }
             p++;
         }
         nend = p;
@@ -169,7 +186,7 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
          * Reject it instead of silently resolving the element to q=1.
          */
         if (nend == nstart) {
-            return -1;
+            goto malformed;
         }
 
         is_q = (nend - nstart == 1
@@ -191,12 +208,12 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
                  * Strict qvalue grammar. Leading digit must be 0 or 1.
                  */
                 if (q_seen) {
-                    return -1;          /* repeated "q" parameter */
+                    goto malformed;          /* repeated "q" parameter */
                 }
                 q_seen = 1;
 
                 if (p >= end) {
-                    return -1;          /* "q=" with no value */
+                    goto malformed;          /* "q=" with no value */
                 }
 
                 if (*p == '0') {
@@ -223,7 +240,7 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
                     }
 
                 } else {
-                    return -1;          /* leading digit not 0 or 1 */
+                    goto malformed;          /* leading digit not 0 or 1 */
                 }
 
                 /*
@@ -235,7 +252,7 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
                 if (p < end
                     && *p != ' ' && *p != '\t' && *p != ';' && *p != ',')
                 {
-                    return -1;
+                    goto malformed;
                 }
 
             } else {
@@ -257,7 +274,7 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
         } else {
             /* parameter present without a value */
             if (is_q) {
-                return -1;              /* "q" with no "=value" is malformed */
+                goto malformed;     /* "q" with no "=value" is malformed */
             }
         }
 
@@ -275,8 +292,20 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char *p)
          * "zstd;q=1 garbage" previously parsed as zstd;q=1).
          */
         if (p < end && *p != ';' && *p != ',') {
-            return -1;
+            goto malformed;
         }
+    }
+
+    goto done;
+
+malformed:
+
+    q = -1;
+
+done:
+
+    if (!quoted_name) {
+        *pp = p;
     }
 
     return q;
@@ -373,7 +402,7 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
 
         q = 1000;       /* no parameters → q=1 */
         if (p < end && *p == ';') {
-            q = ngx_http_zstd_eval_qvalue(ae, p);
+            q = ngx_http_zstd_eval_qvalue(ae, &p);
         }
 
         if (q >= 0) {
@@ -390,7 +419,11 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
          * stepping over any quoted-string so a ',' inside quotes is not
          * mistaken for an element boundary (which would otherwise let a
          * quoted comma fabricate a phantom coding token from the bytes that
-         * follow it, e.g. `gzip;x="a, zstd";q=1`).
+         * follow it, e.g. `gzip;x="a, zstd";q=1`). After a well-formed
+         * parameter list this is a no-op: ngx_http_zstd_eval_qvalue() has
+         * already advanced `p` to that comma. It still does real work for
+         * a malformed element (p sits on the offending byte) and for a
+         * DQUOTE inside a parameter name (p is still on the ';').
          */
         while (p < end && *p != ',') {
             if (*p == '"') {

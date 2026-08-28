@@ -83,6 +83,28 @@
  *          "off by one" does not automatically imply "overread"). No
  *          sanitizer trap fired and no crash occurred; only the checked
  *          assertion moved.
+ *   * single-pass cursor: quoted-name fallback dropped -- in
+ *     ngx_http_zstd_eval_qvalue(), `*pp = p` unconditionally instead of
+ *     only when no DQUOTE was seen inside a parameter name
+ *       -> "differential: every hand-written boundary input agrees with
+ *          the pre-single-pass parser" FAILS on `gzip;x"y=1,zstd`
+ *          (zstd new=1000 old=-1), plus generated divergences, and
+ *          "single-pass: DQUOTE inside a parameter name rescans from ';'"
+ *          FAILS.
+ *   * single-pass cursor: caller's element skip made quote-blind -- in
+ *     ngx_http_zstd_coding_weight(), the post-eval skip to the next ','
+ *     reduced to a plain `p++` walk
+ *       -> the same differential check FAILS on `gzip;q=0.5"a,zstd`
+ *          (zstd new=1000 old=-1) and on generated inputs.
+ *   * single-pass cursor: caller's element skip removed outright
+ *     (`if (0)` around it)
+ *       -> the suite HANGS (run.sh's 60s timeout, exit 124): a malformed
+ *          element leaves p on its junk byte with nothing advancing it.
+ *   * (equivalent mutant, recorded so nobody re-runs it) forcing the
+ *     fallback on every -1 return (`quoted_name = 1` under `malformed:`)
+ *     survives: a rescan from the ';' and a resume at the junk byte
+ *     produce the same element boundary, so the -1 path's single pass is
+ *     a cost property, not an observable one.
  *
  * Extend: add a CASE() function and one line in main().
  */
@@ -93,7 +115,9 @@
 #include "../../fuzz/generated_parser.inc"
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 
@@ -858,6 +882,554 @@ case_chain_dcz_three_lines(void)
 }
 
 
+/*
+ * ---------------------------------------------------------------------------
+ * Differential test: single-pass parameter scan vs the pre-single-pass parser
+ *
+ * ngx_http_zstd_eval_qvalue() used to take its cursor by value, so
+ * ngx_http_zstd_coding_weight() rescanned every parameter byte (quoted
+ * strings included) to find the next top-level ','. It now advances the
+ * caller's cursor. The two functions below are the VERBATIM pre-change
+ * bodies (renamed; they share ngx_http_zstd_skip_quoted() and
+ * ngx_http_zstd_parse_q_fraction() with the shipped slice, which the change
+ * did not touch), kept here as the oracle: for every generated and
+ * hand-written input the shipped walker must return the same weight for
+ * "zstd" (wildcard allowed), for "dcz" (wildcard refused) and the same
+ * accept/decline verdict. Any divergence is a negotiation change, which the
+ * single-pass rework is not allowed to make.
+ *
+ * Every input is copied into a malloc'd buffer of EXACTLY ae.len bytes with
+ * no trailing NUL, so an ASan build of this suite traps a read past the
+ * field on either implementation.
+ */
+
+static ngx_int_t
+ref_eval_qvalue(const ngx_str_t *ae, u_char *p)
+{
+    const u_char  *end = ae->data + ae->len;
+    ngx_int_t      q = 1000;   /* no q parameter → q=1 */
+    ngx_int_t      q_seen = 0; /* reject a second "q" parameter (RFC 9110) */
+
+    while (p < end && *p == ';') {
+
+        const u_char  *nstart, *nend;
+        ngx_int_t      is_q;
+
+        p++;    /* skip ';' */
+
+        while (p < end && (*p == ' ' || *p == '\t')) {
+            p++;
+        }
+
+        /* parameter name */
+        nstart = p;
+        while (p < end
+               && *p != '=' && *p != ';' && *p != ','
+               && *p != ' ' && *p != '\t')
+        {
+            p++;
+        }
+        nend = p;
+
+        /*
+         * RFC 9110 has no empty-parameter production, so "zstd;;q=1" is
+         * malformed rather than "a skipped parameter followed by q=1".
+         * Reject it instead of silently resolving the element to q=1.
+         */
+        if (nend == nstart) {
+            return -1;
+        }
+
+        is_q = (nend - nstart == 1
+                && (nstart[0] == 'q' || nstart[0] == 'Q'));
+
+        while (p < end && (*p == ' ' || *p == '\t')) {
+            p++;
+        }
+
+        if (p < end && *p == '=') {
+            p++;
+
+            while (p < end && (*p == ' ' || *p == '\t')) {
+                p++;
+            }
+
+            if (is_q) {
+                /*
+                 * Strict qvalue grammar. Leading digit must be 0 or 1.
+                 */
+                if (q_seen) {
+                    return -1;          /* repeated "q" parameter */
+                }
+                q_seen = 1;
+
+                if (p >= end) {
+                    return -1;          /* "q=" with no value */
+                }
+
+                if (*p == '0') {
+                    p++;
+                    q = 0;
+
+                    if (p < end && *p == '.') {
+                        p++;
+                        q += ngx_http_zstd_parse_q_fraction(end, &p);
+                    }
+
+                } else if (*p == '1') {
+                    p++;
+                    q = 1000;
+
+                    if (p < end && *p == '.') {
+                        int  i = 0;
+
+                        p++;
+                        while (p < end && *p == '0' && i < 3) {
+                            p++;
+                            i++;
+                        }
+                    }
+
+                } else {
+                    return -1;          /* leading digit not 0 or 1 */
+                }
+
+                /*
+                 * After a valid qvalue only OWS / ';' / ',' / end may
+                 * follow. A fourth decimal digit or trailing junk
+                 * (q=1x, q=0.0001) lands here as a non-delimiter byte and
+                 * is rejected.
+                 */
+                if (p < end
+                    && *p != ' ' && *p != '\t' && *p != ';' && *p != ',')
+                {
+                    return -1;
+                }
+
+            } else {
+                /*
+                 * non-q parameter: skip its value to the next top-level ';'
+                 * (another parameter) or ',' (next element), stepping over a
+                 * quoted-string so an embedded delimiter is not mistaken for
+                 * the value's end.
+                 */
+                while (p < end && *p != ';' && *p != ',') {
+                    if (*p == '"') {
+                        p = ngx_http_zstd_skip_quoted(p, end);
+                    } else {
+                        p++;
+                    }
+                }
+            }
+
+        } else {
+            /* parameter present without a value */
+            if (is_q) {
+                return -1;              /* "q" with no "=value" is malformed */
+            }
+        }
+
+        while (p < end && (*p == ' ' || *p == '\t')) {
+            p++;
+        }
+
+        /*
+         * After the OWS that may trail any parameter (its q-specific
+         * check above only catches junk BEFORE this OWS skip, e.g.
+         * "q=1x"), only ';' (another parameter), ',' (next element), or
+         * end may follow -- anything else is trailing junk the loop's own
+         * "while (*p == ';')" condition would otherwise silently accept
+         * as "no more parameters" instead of rejecting (e.g.
+         * "zstd;q=1 garbage" previously parsed as zstd;q=1).
+         */
+        if (p < end && *p != ';' && *p != ',') {
+            return -1;
+        }
+    }
+
+    return q;
+}
+
+static ngx_int_t
+ref_coding_weight(const ngx_str_t *ae, const char *coding,
+    size_t coding_len, ngx_uint_t allow_wildcard)
+{
+    u_char        *p   = ae->data;
+    const u_char  *end = ae->data + ae->len;
+    ngx_int_t      coding_q = -1; /* explicit `coding` weight, -1 = absent */
+    ngx_int_t      star_q = -1;   /* "*" wildcard weight,      -1 = absent */
+
+    while (p < end) {
+
+        u_char        *tok;
+        const u_char  *name_end;
+        ngx_int_t      is_coding, is_star, q;
+
+        /* Skip OWS and empty list elements (RFC 9110 allows stray
+         * commas, e.g. ", ,zstd"). */
+        while (p < end && (*p == ' ' || *p == '\t' || *p == ',')) {
+            p++;
+        }
+        if (p >= end) {
+            break;
+        }
+
+        /* The coding name runs until OWS, ';' (params), ',' (next
+         * element), or a DQUOTE. A '"' can never be part of a valid coding
+         * token; stopping here keeps a quoted-string that opens in
+         * name position (e.g. `"a,zstd "`) from being split on a comma
+         * inside the quotes — the quote-aware element-skip below then
+         * swallows the whole quoted blob and the element declines. Without
+         * this stop, the bytes after an in-quote comma are mis-read as a
+         * fresh coding name and can fabricate a phantom "zstd" token. */
+        tok = p;
+        while (p < end
+               && *p != ' ' && *p != '\t' && *p != ';' && *p != ','
+               && *p != '"')
+        {
+            p++;
+        }
+        name_end = p;
+
+        is_coding = ((size_t) (name_end - tok) == coding_len
+                     && ngx_strncasecmp(tok, (u_char *) coding,
+                                        coding_len) == 0);
+        is_star = (name_end - tok == 1 && tok[0] == '*');
+
+        /* Step over any OWS between the name and its ';' or ','. */
+        while (p < end && (*p == ' ' || *p == '\t')) {
+            p++;
+        }
+
+        /*
+         * Only ';' (parameters), ',' (next element) or end of field may
+         * follow a coding name. RFC 9110 12.5.3 makes `codings` a token,
+         * so anything else means this element is not the coding it looked
+         * like: `zstd"x` and `zstd "x` advertise nothing, and neither does
+         * `zstd x`. nginx's own ngx_http_gzip_accept_encoding() applies
+         * the same rule, so accepting these diverged from the sibling
+         * filter and compressed for clients that never offered zstd.
+         *
+         * The check must sit AFTER the OWS skip: the name scan stops on
+         * OWS as well as on '"', so testing the stopping byte alone
+         * catches `zstd"x` and misses everything hiding behind a space.
+         * The quote-aware element-skip below still swallows the rest of
+         * the element, so the phantom-token guard is unchanged.
+         */
+        if (p < end && *p != ';' && *p != ',') {
+            is_coding = 0;
+            is_star = 0;
+        }
+
+        q = 1000;       /* no parameters → q=1 */
+        if (p < end && *p == ';') {
+            q = ref_eval_qvalue(ae, p);
+        }
+
+        if (q >= 0) {
+            if (is_coding) {
+                coding_q = q;   /* a later duplicate explicit token wins */
+            } else if (is_star) {
+                star_q = q;
+            }
+        }
+        /* q < 0 → malformed weight: leave this element non-matching. */
+
+        /*
+         * Skip the remainder of this element up to the next top-level comma,
+         * stepping over any quoted-string so a ',' inside quotes is not
+         * mistaken for an element boundary (which would otherwise let a
+         * quoted comma fabricate a phantom coding token from the bytes that
+         * follow it, e.g. `gzip;x="a, zstd";q=1`).
+         */
+        while (p < end && *p != ',') {
+            if (*p == '"') {
+                p = ngx_http_zstd_skip_quoted(p, end);
+            } else {
+                p++;
+            }
+        }
+    }
+
+    /*
+     * An explicit token decides the result (even q=0, which then
+     * overrides a permissive "*"). With no explicit token, the "*"
+     * wildcard applies if present and permitted by the caller.
+     */
+    if (coding_q >= 0) {
+        return coding_q;
+    }
+    if (allow_wildcard && star_q >= 0) {
+        return star_q;
+    }
+    return -1;
+}
+
+static ngx_int_t
+ref_accept_encoding(const ngx_str_t *ae)
+{
+    return ref_coding_weight(ae, "zstd", 4, 1) > 0 ? NGX_OK : NGX_DECLINED;
+}
+
+
+/* xorshift64*: fixed seed, so a divergence is reproducible by index. */
+static uint64_t  diff_rng_state = 0x9e3779b97f4a7c15ULL;
+
+static uint32_t
+diff_rng(void)
+{
+    uint64_t  x = diff_rng_state;
+
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    diff_rng_state = x;
+
+    return (uint32_t) ((x * 0x2545f4914f6cdd1dULL) >> 32);
+}
+
+
+/*
+ * Fragment alphabet. Weighted toward the delimiters and q spellings the
+ * parser branches on; bytes 0x80..0xff and NUL come from the "raw byte"
+ * fragment so non-ASCII and embedded-NUL headers are covered too.
+ */
+static const char *const  diff_frag[] = {
+    "zstd", "ZSTD", "Zstd", "gzip", "dcz", "DCZ", "br", "*", "identity",
+    ",", ",", ",", ", ", " ,", " , ", ",,", ";", ";", "; ", " ;", ";;",
+    " ", "\t", "  ", "=", "= ", " =",
+    "q=", "q=1", "q=1.", "q=1.0", "q=1.00", "q=1.000", "q=1.0000", "q=1.001",
+    "q=0", "q=0.", "q=0.5", "q=0.05", "q=0.005", "q=0.0001", "q=0.999",
+    "q=2", "q=-1", "q=.5", "q= 1", "q =1", "Q=0.3", "q=1x", "q=0.5x", "q",
+    "q=\"1\"", "q=1\"", "qq=1", "x=1", "x", "x=", "level=9", "a=b=c",
+    "\"", "\"", "\\", "\\\"", "\\,", "\\;",
+    "\"a,b\"", "\"a;b\"", "\"a\\\"b\"", "\"a\\,b\"", "\"unterminated",
+    "\"zstd\"", "\"a,zstd\"", "\", zstd;q=1\"", "x=\"a,zstd\"",
+    "\"\"", "\"\\\"", "\"\\",
+    "zstd;q=0", "zstd;q=1", "*;q=0", "*;q=0.5", "zstd;x=\"a,b\";q=0.5",
+    "\r", "\n", "\x7f", NULL /* raw byte marker */
+};
+
+#define DIFF_NFRAG  (sizeof(diff_frag) / sizeof(diff_frag[0]))
+#define DIFF_MAXLEN 8192
+
+static size_t
+diff_generate(uint8_t *buf, size_t cap)
+{
+    size_t  n = 0, i;
+    size_t  frags = 1 + diff_rng() % 12;
+
+    /* one case in 64 is a very long list */
+    if (diff_rng() % 64 == 0) {
+        frags = 200 + diff_rng() % 600;
+    }
+
+    for (i = 0; i < frags && n < cap; i++) {
+        const char  *f = diff_frag[diff_rng() % DIFF_NFRAG];
+        size_t       l;
+
+        if (f == NULL) {
+            uint32_t  r = diff_rng();
+
+            /* raw byte: NUL, controls, or high bytes 0x80..0xff */
+            buf[n++] = (uint8_t) (r & 1 ? 0x80 | (r >> 8) : (r >> 8) & 0x1f);
+            continue;
+        }
+
+        l = strlen(f);
+        if (l > cap - n) {
+            l = cap - n;
+        }
+        memcpy(buf + n, f, l);
+        n += l;
+    }
+
+    return n;
+}
+
+
+static void
+diff_hex(const uint8_t *d, size_t n, char *out, size_t cap)
+{
+    size_t  i, o = 0;
+
+    for (i = 0; i < n && o + 4 < cap; i++) {
+        if (d[i] >= 0x20 && d[i] < 0x7f && d[i] != '\\') {
+            out[o++] = (char) d[i];
+        } else {
+            o += (size_t) snprintf(out + o, cap - o, "\\x%02x", d[i]);
+        }
+    }
+    out[o] = '\0';
+}
+
+
+/*
+ * Returns 1 when old and new agree on every observable for this input,
+ * 0 (and prints the input) otherwise.
+ */
+static int
+diff_one(const uint8_t *src, size_t n, const char *label)
+{
+    ngx_str_t  ae;
+    uint8_t   *exact;
+    ngx_int_t  nz, oz, ndcz, odcz, na, oa;
+    int        ok;
+
+    exact = malloc(n ? n : 1);     /* exact-size: ASan bounds the field */
+    if (exact == NULL) {
+        printf("FAIL %s: malloc\n", label);
+        return 0;
+    }
+    memcpy(exact, src, n);
+
+    ae.data = exact;
+    ae.len  = n;
+
+    nz = ngx_http_zstd_coding_weight(&ae, "zstd", 4, 1);
+    oz = ref_coding_weight(&ae, "zstd", 4, 1);
+    ndcz = ngx_http_zstd_coding_weight(&ae, "dcz", 3, 0);
+    odcz = ref_coding_weight(&ae, "dcz", 3, 0);
+    na = ngx_http_zstd_accept_encoding(&ae);
+    oa = ref_accept_encoding(&ae);
+
+    ok = (nz == oz && ndcz == odcz && na == oa);
+
+    if (!ok) {
+        char  hex[512];
+
+        diff_hex(src, n < 120 ? n : 120, hex, sizeof(hex));
+        printf("FAIL %s: zstd new=%ld old=%ld dcz new=%ld old=%ld "
+               "accept new=%ld old=%ld len=%zu input=\"%s\"%s\n",
+               label, (long) nz, (long) oz, (long) ndcz, (long) odcz,
+               (long) na, (long) oa, n, hex, n > 120 ? "..." : "");
+    }
+
+    free(exact);
+    return ok;
+}
+
+
+/*
+ * Hand-written boundary inputs. Each is a case the generator might reach
+ * only by chance; naming them here keeps the mutation controls stable.
+ */
+static const char *const  diff_hand[] = {
+    "", ",", ",,,", " ", ";", "zstd;", "zstd; ", "zstd ;", "zstd;;q=1",
+    "zstd;q=", "zstd;q=1.000", "zstd;q=0.0001", "zstd;q=2", "zstd;q",
+    "zstd;x=1;q=0.5", "zstd;q=0.5;x=1", "zstd;q=0.5;q=1", "zstd;x;q=0.5",
+    "zstd;x=\"a;b\";q=0.5", "zstd;x=\"a,b\";q=0.5", "zstd;x=\"a\\\"b\";q=0",
+    "zstd;x=\"a\\,b\";q=0", "zstd;x=\"a\\;b\";q=0", "zstd;x=\"unterminated",
+    "zstd;x=\"a\\", "zstd;x=\"", "zstd;x=\"\\\"", "gzip;x=\"a,zstd\"",
+    "gzip;x=\"a, zstd;q=1\"", "gzip;\"a,zstd,b\"", "gzip;\"a,zstd\"=1",
+    "gzip;x\"y=1,zstd", "gzip;x\"y=1,zstd\"", "zstd;x\"y=1", "zstd;x\"=1",
+    "gzip;q=2 zstd", "gzip;q=1x,zstd", "gzip;q=1 x,zstd", "gzip;q=0.5\"a,zstd",
+    "gzip;q=1.0000\"a,zstd\",br", "gzip;q=\"1\",zstd", "gzip;q= ,zstd",
+    "gzip;q=1 \"a,zstd", "gzip;q ,zstd", "gzip;x ,zstd", "gzip;x=,zstd",
+    "gzip;x=a\"b,zstd\"c,zstd", "gzip;=1,zstd", "gzip; =1,zstd",
+    "zstd;Q=0.3", "zstd;q=1.", "zstd;q=0.", "zstd;q=.5", "zstd;q= 1",
+    "zstd;q =1", "zstd;q=-1", "zstd; q=1 ", "zstd;\tq=1\t", "zstd\t;q=1",
+    "*;q=0,zstd;x=\"a,b\"", "dcz;q=0.5,zstd", "*,dcz", "dcz;x=\"a\",*",
+    "zstd\"x", "zstd \"x", "zstd x", "\"a,zstd \"", "\"zstd\"",
+    "zstd;x=\xff\xfe;q=0.5", "zstd;q=0.5\xff", "zstd\xff;q=1",
+    "zstd;\xff=1;q=0.5", "zstd;x=\"\xff,\";q=0.5", "zstd;q=0.5;\x80",
+    "gzip;x=\"a\", zstd;q=0.5, br;q=1", "gzip;x=\"a\",zstd;q=0.5;y=\"b,c\"",
+};
+
+#define DIFF_NHAND  (sizeof(diff_hand) / sizeof(diff_hand[0]))
+#define DIFF_CASES  100000
+
+
+static void
+case_differential_hand_written(void)
+{
+    size_t  i;
+    int     bad = 0;
+
+    for (i = 0; i < DIFF_NHAND; i++) {
+        if (!diff_one((const uint8_t *) diff_hand[i], strlen(diff_hand[i]),
+                      "differential/hand"))
+        {
+            bad++;
+        }
+    }
+
+    /* embedded NUL: strlen() cannot express it, so build it by hand */
+    if (!diff_one((const uint8_t *) "gzip;x=\0,zstd", 13, "differential/nul")) {
+        bad++;
+    }
+
+    check(bad == 0, "differential: every hand-written boundary input agrees "
+          "with the pre-single-pass parser");
+}
+
+
+static void
+case_differential_generated(void)
+{
+    static uint8_t  buf[DIFF_MAXLEN];
+    size_t          i, n, bad = 0, total = 0;
+
+    for (i = 0; i < DIFF_CASES; i++) {
+        char  label[48];
+
+        n = diff_generate(buf, sizeof(buf));
+        total += n;
+        snprintf(label, sizeof(label), "differential/gen#%zu", i);
+
+        if (!diff_one(buf, n, label)) {
+            bad++;
+            if (bad > 10) {
+                printf("... more than 10 divergences, stopping\n");
+                break;
+            }
+        }
+    }
+
+    printf("info differential: %d generated inputs, %zu bytes total\n",
+           DIFF_CASES, total);
+    check(bad == 0, "differential: 100000 generated inputs agree with the "
+          "pre-single-pass parser (zstd weight, dcz weight, verdict)");
+}
+
+
+/*
+ * Two named pins on the cursor contract, so a mutation that survives the
+ * differential (it cannot -- but a pin is cheaper to read than a diff
+ * dump) has a value-stating check as well.
+ */
+static void
+case_single_pass_cursor_contract(void)
+{
+    /*
+     * A DQUOTE inside a parameter NAME is the one input where the
+     * single-pass cursor must fall back to a rescan from the ';': a
+     * quote-aware walk from there swallows `"y=1,zstd` as one quoted
+     * blob, so zstd is never advertised. A cursor left after the value
+     * would let ",zstd" surface as a second element.
+     */
+    check(decide("gzip;x\"y=1,zstd") == NGX_DECLINED,
+          "single-pass: DQUOTE inside a parameter name rescans from ';' "
+          "(no phantom zstd after the quote)");
+
+    /*
+     * A malformed weight leaves the cursor on the offending byte; the
+     * caller must still skip to the next top-level ',' rather than start
+     * a new element there (which would read "zstd" as a fresh token).
+     */
+    check(decide("gzip;q=2 zstd") == NGX_DECLINED,
+          "single-pass: malformed weight still skips the rest of the "
+          "element (no phantom zstd after junk)");
+
+    /* well-formed: the cursor lands on the ',' and the next element is
+     * read exactly once. */
+    check(weight_no_wildcard("gzip;x=\"a,b\";q=0.5, zstd;q=0.25", "zstd")
+          == 250,
+          "single-pass: cursor resumes at the top-level ',' after a quoted "
+          "parameter value");
+}
+
+
 int
 main(void)
 {
@@ -921,6 +1493,11 @@ main(void)
     case_chain_dcz_q0_then_q1_stays_declined();
     case_chain_dcz_wildcard_never_matches();
     case_chain_dcz_three_lines();
+
+    /* Single-pass parameter scan vs the pre-change parser. */
+    case_differential_hand_written();
+    case_differential_generated();
+    case_single_pass_cursor_contract();
 
     printf("\n%d/%d checks passed\n", checks - failures, checks);
     return failures ? 1 : 0;
