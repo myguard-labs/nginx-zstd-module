@@ -1102,11 +1102,11 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
          */
         u_char       hdrbuf[18];
         u_char      *hdr, *frame;
-        size_t       want, align, frame_off, avail;
+        size_t       want, align, frame_off, avail, got;
         ssize_t      n;
         uint64_t     window, skip;
-        ngx_uint_t   frames, scratch;
-        off_t        pos, base;
+        ngx_uint_t   frames, scratch, have_block;
+        off_t        pos, base, have_base;
         ngx_int_t    probe_rc;
 
         if (of.size < 4) {
@@ -1117,6 +1117,9 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         }
 
         scratch = 0;
+        have_block = 0;
+        have_base = 0;
+        n = 0;
 
         if (of.is_directio) {
             /*
@@ -1216,8 +1219,52 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                 base = pos;
             }
 
-            n = ngx_http_zstd_static_pread(of.fd, hdr, want, base, align,
-                                           log, &path);
+            /*
+             * Reuse the block already in `hdr` when this iteration
+             * reads the SAME aligned offset and the bytes it needs are
+             * inside what the previous read delivered. A skippable
+             * frame shorter than `align` leaves `pos` inside the block
+             * just read, so `base` is unchanged and the re-read would
+             * return byte-for-byte what `hdr` already holds -- the
+             * canonical dcz prefix (40-byte frame at offset 0, next
+             * frame at 40) with align >= 4096 hits this on every
+             * iteration, re-issuing up to 2 * PROBE_MAX of O_DIRECT per
+             * skipped frame.
+             *
+             * `have_block` is only ever set on the directio path, where
+             * `base` is a rounded-down offset that can repeat. Off that
+             * path `base == pos` and `pos` strictly increases, so the
+             * cache never fires and this is byte-for-byte the previous
+             * behaviour.
+             *
+             * The guard requires the previous read to have reached at
+             * least `frame_off + 4`, the minimum this iteration can
+             * parse; anything short of that still takes a fresh read
+             * and then the `avail < 4` branch below, exactly as before.
+             */
+            if (!(have_block && base == have_base
+                  && n > 0 && (size_t) n >= frame_off + 4))
+            {
+                n = ngx_http_zstd_static_pread(of.fd, hdr, want, base, align,
+                                               log, &path);
+
+                if (of.is_directio && n > 0) {
+                    have_block = 1;
+                    have_base = base;
+                }
+
+            } else {
+                /*
+                 * Positive witness that the re-read was elided. Debug
+                 * level, so it costs nothing in production, but it lets
+                 * a test assert the optimization actually engaged --
+                 * serving correctly proves only that the bytes were
+                 * right, not that they came from the buffer.
+                 */
+                ngx_log_debug2(NGX_LOG_DEBUG_HTTP, log, 0,
+                               "zstd static: reusing %uz-byte block at "
+                               "offset %O for next frame", want, base);
+            }
 
             /*
              * Bytes of the block that lie at or after `pos`. A short
@@ -1225,8 +1272,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
              * the frame, which is the same "too few bytes" condition as
              * a short read at offset 0 and takes the same branch.
              */
-            avail = ((size_t) (n > 0 ? n : 0) > frame_off)
-                        ? (size_t) n - frame_off : 0;
+            got = (size_t) (n > 0 ? n : 0);
+            avail = (got > frame_off) ? got - frame_off : 0;
 
             frame = hdr + frame_off;
 

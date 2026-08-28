@@ -1570,3 +1570,54 @@ Available-Dictionary: :AA==:
 main response
 --- no_error_log
 [error]
+
+
+
+=== TEST 56: the directio skip-frame walk reuses the block it already read
+# The canonical dcz shape (8-byte skippable header + 32-byte payload,
+# next frame at offset 40) with an alignment of 4096 or more puts BOTH
+# frames inside the very first aligned block. The walk still recomputed
+# base = 0 on iteration 2 and re-issued an identical 2*align O_DIRECT
+# pread for bytes already sitting in `hdr` — at "directio_alignment
+# 16k" that is a 32 KB re-read per skipped frame, to look at 18 bytes
+# it already had.
+#
+# TEST 46 pins that this shape is SERVED; it cannot see how many reads
+# it took, because both the cached and uncached paths serve identical
+# bytes. The "reusing ... block at offset 0" debug line is the witness
+# that the second read was actually elided, so this block asserts the
+# optimization engaged rather than merely that the response is right.
+#
+# Falsifiability: drop the cache guard (always pread) and the reuse
+# line never appears, so this block goes red while TEST 46 stays green
+# — which is precisely the regression TEST 46 cannot catch.
+#
+# The alignment witness is asserted too, so this cannot pass vacuously
+# on a filesystem where O_DIRECT does not engage: with no directio the
+# buffered path runs, neither line is logged, and both assertions fail.
+--- config
+    location /skip/ {
+        zstd_static on;
+        directio 512;
+        directio_alignment 16k;
+        root html;
+    }
+--- user_files eval
+">>> skip/dioreuse.js\ndirectio reuse origin\n>>> skip/dioreuse.js.zst\n"
+. pack("C*", 0x50, 0x2A, 0x4D, 0x18, 0x20, 0x00, 0x00, 0x00)
+. ("\0" x 32)
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x19, 0x00, 0x00)
+. "hi\n"
+. ("\0" x 1024)
+--- request
+GET /skip/dioreuse.js
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- error_code: 200
+--- error_log
+16384-byte aligned probe on directio file
+reusing 32768-byte block at offset 0 for next frame
+--- no_error_log
+[error]
