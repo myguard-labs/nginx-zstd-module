@@ -1180,20 +1180,21 @@ log_format zstd '$request in=$zstd_bytes_in out=$zstd_bytes_out '
 ## $zstd_dcz_dicts_hashed
 
 How many dcz dictionaries were SHA-256-hashed at config load in the
-current configuration cycle. `0` means every registered
-[`zstd_dcz_dict_file`](#zstd_dcz_dict_file) entry carried a supplied
-hash and the load-time hashing pass was skipped entirely; without
-supplied hashes it equals the dictionary count. Constant for the
-lifetime of the configuration (reset on reload), so one probe request
-answers "did my deploy tooling's hashes actually take effect?":
+current configuration cycle. By default every registered
+[`zstd_dcz_dict_file`](#zstd_dcz_dict_file) entry is counted, including
+entries whose supplied hash is verified. With
+`zstd_dcz_dict_trust_hashes on`, supplied literals skip the pass and only
+entries without literals are counted; `0` therefore proves that every
+entry used a trusted literal. Constant for the lifetime of the
+configuration (reset on reload), so one probe request answers "did my
+deploy tooling's hashes actually take effect?":
 
 ```nginx
 add_header X-Dcz-Dicts-Hashed $zstd_dcz_dicts_hashed;
 ```
 
-The regression suite asserts on this variable — the supplied-hash fast
-path is otherwise unobservable from outside, since negotiation behaves
-identically whether the hash was supplied or computed.
+The regression suite asserts on this variable because the trusted-literal
+skip is otherwise unobservable when a supplied hash matches the file.
 
 ---
 
