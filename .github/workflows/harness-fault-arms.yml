@@ -406,11 +406,11 @@ jobs:
             exit 1
           fi
 
-          # The count oracles specifically -- oracle 3 (cdict) and oracle 6
+          # The count oracles specifically -- oracle 3 (cdict) and oracle 7
           # (dcz). Same "[^#]*$" reasoning as codec-call-count's tail above:
           # without it a SKIP line would still match and bank a green that
           # asserted nothing.
-          for n in 3 6; do
+          for n in 3 7; do
             if ! grep -qE "^ok $n - [^#]*setParameter call count is [^#]*$" \
                  "$GITHUB_WORKSPACE/setparam-call-count-tap.log"; then
               echo "::error::oracle $n (a setParameter-call-count assertion)" \
@@ -419,6 +419,20 @@ jobs:
               exit 1
             fi
           done
+
+          # Oracle 4: the frame's own Window_Descriptor actually carries the
+          # operator's zstd_window_log cap under a CDict -- the direct check
+          # for the windowLog-not-superseded finding, independent of the
+          # call-count oracle above (a call count can coincidentally match
+          # while the frame itself still carries an uncapped, level-derived
+          # window).
+          if ! grep -qE '^ok 4 - [^#]*frame window size is [^#]*$' \
+               "$GITHUB_WORKSPACE/setparam-call-count-tap.log"; then
+            echo "::error::oracle 4 (the cdict frame window-cap assertion)" \
+              "did not pass -- without it a dropped windowLog set on the" \
+              "CDict path is invisible to this scenario"
+            exit 1
+          fi
 
       - name: Run setparam-call-count-nodict scenario
         env:
@@ -443,6 +457,14 @@ jobs:
             echo "::error::oracle 3 (the no-dict setParameter-call-count" \
               "assertion) did not pass -- without it there is no reference" \
               "count the dictionary-mode oracles above are measured against"
+            exit 1
+          fi
+
+          if ! grep -qE '^ok 4 - [^#]*frame window size is [^#]*$' \
+               "$GITHUB_WORKSPACE/setparam-call-count-nodict-tap.log"; then
+            echo "::error::oracle 4 (the no-dict frame window-cap" \
+              "assertion) did not pass -- without it there is no reference" \
+              "frame window the cdict oracle above is measured against"
             exit 1
           fi
 

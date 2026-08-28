@@ -8,10 +8,14 @@
 # this conf) -- the no-dict reference count (3) is measured separately in
 # the sibling setparam-call-count-nodict scenario.
 #
-#   /cdict/  trained CDict (zlcf->dict, refCDict): compressionLevel and
-#            windowLog are in zstd.h's refCDict-superseded "compression
-#            parameters" block, so init_cctx now skips setting them --
-#            only enableLongDistanceMatching remains -> 1 call.
+#   /cdict/  trained CDict (zlcf->dict, refCDict): only compressionLevel is
+#            in zstd.h's refCDict-superseded "compression parameters" block
+#            (ZSTD_CCtx_refCDict() takes it from the CDict's own baked
+#            ZSTD_compressionParameters). windowLog is NOT superseded --
+#            ZSTD_resetCCtx_byAttachingCDict()/ZSTD_resetCCtx_byCopyingCDict()
+#            (zstd_compress.c) both restore it from the CCtx's own applied
+#            params right after copying the CDict's other cParams, so
+#            init_cctx keeps setting it here -> 2 calls (windowLog, LDM).
 #   /dcz/    negotiated raw prefix (ctx->dcz_dict, refPrefix): refPrefix
 #            does NOT override sticky parameters, so level, windowLog
 #            (the dcz-aware value, set once, not twice), LDM and
@@ -39,8 +43,20 @@ diag()  { echo "# $1"; }
 
 WWW="$PROBER_PREFIX/www"
 mkdir -p "$WWW" "$PROBER_PREFIX/tmp"
-printf 'the quick brown fox jumps over the lazy dog, dictionary setparam count fixture\n' \
-    >"$WWW/index.html"
+
+# Larger than 2**20 (zstd_window_log 20 in nginx.conf, both arms): a body
+# smaller than the window cap lets zstd shrink the FRAME's encoded window to
+# fit the content regardless of what ZSTD_c_windowLog was set to, which would
+# make the cap assertion below pass whether or not the cap was actually
+# applied. Random bytes so the compressor cannot fold the whole body into a
+# handful of long matches and shrink the decode/measure cost.
+awk 'BEGIN {
+    srand(42)
+    n = 1200000
+    for (i = 0; i < n; i++) {
+        printf "%c", 97 + int(rand() * 26)
+    }
+}' >"$WWW/index.html"
 
 DICT_FILE="$(dirname "$PROBER_SERVER_BIN")/setparam-call-count.dict"
 DICT_SHA_B64="$(openssl dgst -sha256 -binary "$DICT_FILE" 2>/dev/null \
@@ -107,11 +123,48 @@ measure() {
     fi
 }
 
-echo "1..7"
+# assert_window_cap LABEL FRAME_FILE WINDOW_LOG: parse the compressed
+# frame's own Window_Descriptor via `zstd -l -v` and require it to be
+# EXACTLY 2**WINDOW_LOG. This is the direct regression check for the
+# windowLog-is-NOT-superseded-by-cdict finding: the setParameter call
+# count above proves windowLog was SET on the CCtx, but not that the
+# resulting FRAME actually carries the operator's cap -- a build that
+# silently dropped the CCtx-side set (the exact bug ZSTD_resetCCtx_
+# byAttachingCDict()/ZSTD_resetCCtx_byCopyingCDict() would produce, see
+# nginx.conf's comment) still passes the call-count oracle if something
+# else pushes the count back to 2 by coincidence, but the frame itself
+# would then carry libzstd's level-derived window instead of 1 MiB. The
+# fixture is 1200000 bytes, larger than 2**20, specifically so the window
+# cannot shrink to fit content and mask an uncapped default.
+assert_window_cap() {
+    local label="$1" frame="$2" wlog="$3"
+    local want=$((1 << wlog))
+    local got
+
+    got="$(zstd -l -v "$frame" 2>/dev/null \
+        | grep -oP 'Window Size:.*\(\K[0-9]+(?= B\))' | head -1)"
+
+    if [ -z "$got" ]; then
+        notok "$label: frame window size is $want B (zstd -l -v produced no Window Size line)"
+        return
+    fi
+
+    if [ "$got" -eq "$want" ]; then
+        ok "$label: frame window size is $want B"
+    else
+        diag "$label: frame Window Size=$got B expected=$want B"
+        notok "$label: frame window size is $want B (got $got B)"
+    fi
+}
+
+echo "1..8"
 
 # /cdict/: no dcz negotiation header, so init_cctx takes the zlcf->dict
-# branch. level and windowLog superseded-by-cdict -> only LDM is set.
-measure "cdict" "/cdict/index.html" "zstd" 1
+# branch. level is superseded-by-cdict and skipped; windowLog is NOT
+# superseded (restored from the CCtx's own params by
+# ZSTD_resetCCtx_by{Attaching,Copying}CDict()) and stays set alongside LDM.
+measure "cdict" "/cdict/index.html" "zstd" 2
+assert_window_cap "cdict" "$PROBER_PREFIX/tmp/cdict.bin" 20
 
 if [ -n "$DICT_SHA_B64" ]; then
     measure "dcz" "/dcz/index.html" "dcz" 4 \

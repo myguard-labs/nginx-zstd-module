@@ -3345,23 +3345,26 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
      * ceiling at a small ratio cost on inputs larger than the window.
      * Unset (0) keeps zstd's level-derived default.
      *
-     * Skipped for both dictionary modes -- each sets its own windowLog
-     * with more specific knowledge than this generic block has:
-     *
-     *   - zlcf->dict (trained CDict): ZSTD_c_windowLog is in the same
-     *     refCDict-superseded "compression parameters" block as the level
-     *     above (zstd.h), and conf->dict was already built via
-     *     ZSTD_createCDict_advanced() seeded from this exact
-     *     zlcf->window_log (see the CDict construction site), so setting
-     *     it again here would only be immediately discarded.
-     *   - ctx->dcz_dict (RFC 9842 raw prefix): refPrefix does not override
-     *     sticky parameters, so windowLog here is NOT superseded, but the
-     *     dcz branch below computes a dictionary- and pledged-size-aware
-     *     value via ngx_http_zstd_dcz_window_log() and sets THAT instead --
-     *     setting the plain zlcf->window_log here first would just be
-     *     overwritten one call later by the correct value.
+     * NOT superseded-by-cdict, unlike level above: ZSTD_resetCCtx_
+     * byAttachingCDict() and ZSTD_resetCCtx_byCopyingCDict() (zstd_compress.c,
+     * every version from the module's 1.4.0 floor through 1.5.7) both take
+     * windowLog = params.cParams.windowLog -- the CCtx's OWN value, restored
+     * immediately after copying the CDict's other cParams -- not from the
+     * CDict. Both also assert(windowLog != 0), i.e. they require the CCtx
+     * side to have set it. Leaving it unset here means
+     * ZSTD_CCtx_init_compressStream2() derives cParams (windowLog included)
+     * from cdict->compressionLevel's defaults instead (0 for a CDict built
+     * via ZSTD_createCDict_advanced()), silently dropping zstd_window_log's
+     * cap for every CDict-backed response -- exactly the C2/R1 regression
+     * the CDict construction comment below already fought off once. So this
+     * generic block must still fire for the zlcf->dict (CDict) mode; only
+     * the dcz branch (ctx->dcz_dict) replaces it with a more specific value,
+     * computed a few lines below via ngx_http_zstd_dcz_window_log() --
+     * setting the plain zlcf->window_log here first would just be
+     * overwritten one call later by that dcz-aware value, so dcz mode alone
+     * is skipped here.
      */
-    if (zlcf->window_log > 0 && zlcf->dict == NULL && ctx->dcz_dict == NULL) {
+    if (zlcf->window_log > 0 && ctx->dcz_dict == NULL) {
         if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_windowLog,
                                     (int) zlcf->window_log, "windowLog")
             != NGX_OK)
@@ -4889,18 +4892,30 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
             /*
              * Bake the location's effective compression parameters into the
-             * CDict. ZSTD_CCtx_refCDict() lets a CDict's compression
-             * parameters supersede the CCtx's, so a CDict built with the
-             * simple ZSTD_createCDict() (level only) would silently override
-             * the windowLog that init_cctx sets — making zstd_window_log a
-             * non-cap whenever a dictionary is loaded (former audit C2 / R1).
-             * Build the CDict with ZSTD_createCDict_advanced() seeding
-             * windowLog from zstd_window_log so the baked params and the CCtx
-             * params agree and the window cap (and the zstd_max_cctx_memory
-             * estimate, computed from the same windowLog below) hold even with
-             * a dictionary. The advanced builder lives in libzstd's static
-             * API; on a non-static build fall back to the level-only CDict
-             * (window cap not honored with a dict — documented in README).
+             * CDict. ZSTD_CCtx_refCDict() lets a CDict's own
+             * ZSTD_compressionParameters supersede compressionLevel (and the
+             * other superseded-by-cdict parameters in that zstd.h block) set
+             * on the CCtx -- but NOT windowLog: ZSTD_resetCCtx_
+             * byAttachingCDict()/ZSTD_resetCCtx_byCopyingCDict() both restore
+             * windowLog from the CCtx's OWN params.cParams.windowLog right
+             * after copying the CDict's other cParams (init_cctx's windowLog
+             * comment has the exact source citation), and assert it is
+             * nonzero -- i.e. the CCtx side must have set it, every time, CDict
+             * or not. A CDict built with the simple ZSTD_createCDict() (level
+             * only, windowLog left at the level's own default) would then
+             * disagree with init_cctx's zlcf->window_log-derived cap: the
+             * FRAME uses windowLog from the CCtx side (correct), but this
+             * repo's own zstd_max_cctx_memory estimate and the CCtx ring-slot
+             * key both need to reason about the SAME windowLog the CDict's
+             * match tables were sized for (former audit C2 / R1). Build the
+             * CDict with ZSTD_createCDict_advanced() seeding windowLog from
+             * zstd_window_log so the CDict's tables, the CCtx's applied
+             * windowLog, and this module's own memory accounting all agree.
+             * The advanced builder lives in libzstd's static API; on a
+             * non-static build fall back to the level-only CDict (window cap
+             * still applies via init_cctx's CCtx-side set either way, but the
+             * CDict's own tables are then sized off the level default instead
+             * of zstd_window_log — documented in README).
              *
              * Long-distance matching is a separate CCtx frame parameter, not
              * part of ZSTD_compressionParameters, so refCDict does not override

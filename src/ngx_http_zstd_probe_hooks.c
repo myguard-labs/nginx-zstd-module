@@ -119,6 +119,18 @@ static ngx_uint_t  ngx_http_zstd_probe_palloc_calls;
  * "disarm zeroes the counter" convention closely enough that a driver
  * bracketing one request looks the same shape as the codec-call-count
  * scenario's reset_counters().
+ *
+ * PROCESS GLOBAL, DELIBERATELY, same reasoning and same constraint as the
+ * fault-site counters above (see the "PROCESS GLOBALS, DELIBERATELY"
+ * comment on ngx_http_zstd_probe_fault_codec_nth): the request that resets
+ * this counter and the later request whose ZSTD_CCtx_setParameter() calls
+ * it counts must land in the SAME worker, so every scenario reading it
+ * (setparam-call-count, setparam-call-count-nodict) sets
+ * `worker_processes 1` in its nginx.conf. A multi-worker conf would read
+ * whichever worker happened to answer the GET, not necessarily the one
+ * that served the measured request, and the counter would silently mix
+ * traffic from other requests in that worker instead of counting the one
+ * response the driver is measuring.
  */
 static ngx_uint_t  ngx_http_zstd_probe_setparam_calls;
 
