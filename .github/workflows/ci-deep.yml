@@ -593,7 +593,7 @@ jobs:
           # the log scrape reds the run for the fault it was asked to inject.
           # It exempts ONE exact message and cannot exempt a sanitizer or
           # valgrind diagnostic (PROBER_SANITIZER_RE is never exemptable).
-          PROBER_ALLOW_LOG='zstd: ZSTD_compressStream2\(\) failed' \
+          PROBER_ALLOW_LOG='zstd: ZSTD_(compressStream2|CCtx_refPrefix)\(\) failed' \
             ./run-scenario.sh \
               "$GITHUB_WORKSPACE/ci/t/harness-scenarios/fault-arms" nginx 1.31.4 \
             | tee "$GITHUB_WORKSPACE/vg-fault-arms.log" || rc=1

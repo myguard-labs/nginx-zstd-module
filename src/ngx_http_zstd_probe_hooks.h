@@ -149,6 +149,28 @@ ngx_http_zstd_probe_codec_outcome_e
 
 
 /*
+ * Dedicated dcz raw-prefix fault site.
+ *
+ * Armed with GET /__probe?fault_refprefix=<nth>. The nth
+ * ZSTD_CCtx_refPrefix() call after the arm is replaced with a synthetic
+ * ZSTD_isError()-true result. Negative values disarm. This is deliberately
+ * separate from CODEC/CODEC_END: ordinary zstd requests never call
+ * ZSTD_CCtx_refPrefix(), and folding the site into either codec counter would
+ * let a plain request consume a fault intended for the dcz-only setup path.
+ *
+ * The counter is rendered as refprefix_calls so the harness can distinguish
+ * "the dcz branch handled the fault" from "the arm was never reached".
+ */
+typedef enum {
+    NGX_HTTP_ZSTD_PROBE_REFPREFIX_NONE = 0,
+    NGX_HTTP_ZSTD_PROBE_REFPREFIX_ERROR
+} ngx_http_zstd_probe_refprefix_outcome_e;
+
+ngx_http_zstd_probe_refprefix_outcome_e
+    ngx_http_zstd_probe_refprefix_fault(void);
+
+
+/*
  * Pool-allocation fault injection.
  *
  * Armed with GET /__probe?fault_palloc=<nth>: the nth pool allocation the

@@ -3368,8 +3368,22 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
          * CDict below: a dcz response's frame must reference ONLY the
          * negotiated dictionary or the client cannot decode it.
          */
+#ifdef NGX_TEST_HARNESS
+        if (ngx_http_zstd_probe_refprefix_fault()
+            == NGX_HTTP_ZSTD_PROBE_REFPREFIX_ERROR)
+        {
+            /* See the codec fault site for why (size_t) -1 is the stable,
+             * public-API-only synthetic error value. Substituting before the
+             * call leaves the CCtx untouched, exactly like a real failure. */
+            rc = (size_t) -1;
+        } else {
+            rc = ZSTD_CCtx_refPrefix(cctx, ctx->dcz_dict->bytes.data,
+                                     ctx->dcz_dict->bytes.len);
+        }
+#else
         rc = ZSTD_CCtx_refPrefix(cctx, ctx->dcz_dict->bytes.data,
                                  ctx->dcz_dict->bytes.len);
+#endif
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                           "zstd: ZSTD_CCtx_refPrefix() failed: %s",

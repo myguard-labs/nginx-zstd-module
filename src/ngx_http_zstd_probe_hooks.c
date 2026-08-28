@@ -69,6 +69,7 @@ static ngx_uint_t  ngx_http_zstd_probe_have_ctx;
  */
 static ngx_int_t  ngx_http_zstd_probe_fault_codec_nth     = -1;
 static ngx_int_t  ngx_http_zstd_probe_fault_codec_end_nth = -1;
+static ngx_int_t  ngx_http_zstd_probe_fault_refprefix_nth = -1;
 
 /*
  * Per-site event counters. These count calls SINCE THE SITE WAS ARMED,
@@ -101,6 +102,7 @@ static ngx_int_t  ngx_http_zstd_probe_fault_codec_end_nth = -1;
  */
 static ngx_uint_t  ngx_http_zstd_probe_codec_calls;
 static ngx_uint_t  ngx_http_zstd_probe_codec_end_calls;
+static ngx_uint_t  ngx_http_zstd_probe_refprefix_calls;
 
 /*
  * Pool-allocation fault site. Same shape and same arm-relative counting as
@@ -198,6 +200,30 @@ ngx_http_zstd_probe_codec_fault(ngx_uint_t is_end)
 
 
 /*
+ * Consume one event at the dcz-only ZSTD_CCtx_refPrefix() site.
+ *
+ * A prefix reference has no meaningful zero-output success state, so this
+ * dedicated outcome has only NONE and ERROR. The site, state, and counter are
+ * all independent from CODEC/CODEC_END.
+ */
+ngx_http_zstd_probe_refprefix_outcome_e
+ngx_http_zstd_probe_refprefix_fault(void)
+{
+    ngx_uint_t  seq;
+
+    seq = ++ngx_http_zstd_probe_refprefix_calls;
+
+    if (ngx_http_zstd_probe_fault_refprefix_nth < 0
+        || (ngx_uint_t) ngx_http_zstd_probe_fault_refprefix_nth != seq)
+    {
+        return NGX_HTTP_ZSTD_PROBE_REFPREFIX_NONE;
+    }
+
+    return NGX_HTTP_ZSTD_PROBE_REFPREFIX_ERROR;
+}
+
+
+/*
  * Pool-allocation fault decision, called once per WRAPPED allocation,
  * immediately before the real allocator runs. Advances this site's
  * arm-relative counter and reports whether THIS call is the armed nth.
@@ -256,12 +282,19 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
                         ",\"buffers_allocated\":%ui"
                         ",\"palloc_calls\":%ui"
                         ",\"codec_calls\":%ui"
-                        ",\"codec_end_calls\":%ui",
+                        ",\"codec_end_calls\":%ui"
+                        ",\"refprefix_calls\":%ui"
+                        ",\"refprefix_armed\":%ui",
                         ngx_http_zstd_probe_chain_links,
                         ngx_http_zstd_probe_bufs_allocated,
                         ngx_http_zstd_probe_palloc_calls,
                         ngx_http_zstd_probe_codec_calls,
-                        ngx_http_zstd_probe_codec_end_calls);
+                        ngx_http_zstd_probe_codec_end_calls,
+                        ngx_http_zstd_probe_refprefix_calls,
+                        ngx_http_zstd_probe_fault_refprefix_nth < 0
+                            ? 0
+                            : (ngx_uint_t)
+                                ngx_http_zstd_probe_fault_refprefix_nth);
 
     if (ngx_http_zstd_probe_have_ctx) {
         buf = ngx_slprintf(buf, last,
@@ -318,6 +351,46 @@ ngx_http_zstd_probe_nth_is_valid(ngx_int_t nth)
     }
 
     return 0;
+}
+
+
+/*
+ * Arm the module-local refPrefix site from the request query string.
+ *
+ * The generic testkit predates this dcz-only site, so it does not know the
+ * fault_refprefix key. Keep the same input contract as its bare-ordinal sites:
+ * 1..999 arms, any well-formed negative value disarms, and malformed or
+ * out-of-range values leave the current arm unchanged.
+ */
+static void
+ngx_http_zstd_probe_arm_refprefix(ngx_http_request_t *r)
+{
+    ngx_str_t  value;
+    ngx_int_t  nth;
+
+    if (ngx_http_arg(r, (u_char *) "fault_refprefix",
+                     sizeof("fault_refprefix") - 1, &value)
+        != NGX_OK)
+    {
+        return;
+    }
+
+    if (value.len >= 2 && value.data[0] == '-') {
+        nth = ngx_atoi(value.data + 1, value.len - 1);
+        if (nth > 0) {
+            ngx_http_zstd_probe_fault_refprefix_nth = -1;
+            ngx_http_zstd_probe_refprefix_calls = 0;
+        }
+        return;
+    }
+
+    nth = ngx_atoi(value.data, value.len);
+    if (nth < 1 || nth > 999) {
+        return;
+    }
+
+    ngx_http_zstd_probe_fault_refprefix_nth = nth;
+    ngx_http_zstd_probe_refprefix_calls = 0;
 }
 
 
@@ -459,12 +532,13 @@ ngx_http_zstd_probe_handler(ngx_http_request_t *r)
      * fault_set_global -- see ngx_test_probe_arm()'s dispatch-order
      * comment.
      */
+    ngx_http_zstd_probe_arm_refprefix(r);
     (void) ngx_test_probe_arm(NULL, &r->args);
 
     /*
      * NGX_TEST_PROBE_JSON_MAX covers the harness's generic document.
      * This module has no zone name to add, but module_render appends
-     * two counters plus a nested out_buf object plus the
+     * module counters plus a nested out_buf object plus the
      * `,"module":{}` wrapper -- comfortably under 256 bytes, and we
      * oversize per the header's "when in doubt, oversize" guidance
      * rather than count bytes exactly. An undersized buffer truncates

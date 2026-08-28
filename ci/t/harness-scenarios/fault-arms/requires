@@ -35,4 +35,25 @@ if ! command -v zstd >/dev/null 2>&1; then
     exit 1
 fi
 
+# The refPrefix fault arm negotiates a real dcz response. It derives the
+# Available-Dictionary value from the checked-in fixture, so the CLI used for
+# that derivation is part of the oracle rather than an optional convenience.
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "openssl(1) not found -- the refPrefix arm derives the dcz negotiation hash with openssl dgst/base64"
+    exit 1
+fi
+
+# zstd_dcz_dict_file opens the dictionary during nginx -t, before driver.sh
+# runs. Stage the canonical dcz fixture here, the same pre-config hook used by
+# codec-call-count, and reference it from nginx.conf through @BUILD_OBJS@.
+DICT_SRC="$(cd "$(dirname "$0")/../../suite" && pwd)/dcz-dict"
+if [ ! -f "$DICT_SRC" ]; then
+    echo "dictionary fixture not found at $DICT_SRC"
+    exit 1
+fi
+if ! cp -f "$DICT_SRC" "$BUILD/objs/fault-arms.dict"; then
+    echo "cannot stage the dictionary fixture into $BUILD/objs"
+    exit 1
+fi
+
 exit 0
