@@ -38,6 +38,10 @@ typedef unsigned char u_char;
  * exceed NGX_HTTP_ZSTD_SHA256_DIGEST_LEN. */
 #define NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN  48
 
+/* src/ngx_http_zstd_filter_module.c: padded base64 length of a 32-byte
+ * digest, the length ceiling dcz_decode_digest() rejects above. */
+#define NGX_HTTP_ZSTD_DCZ_DIGEST_B64_LEN  44
+
 typedef struct {
     size_t  len;
     u_char *data;

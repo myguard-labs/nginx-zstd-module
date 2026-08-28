@@ -64,6 +64,12 @@ if [ -z "$MIN_LINE" ]; then
     echo "FAIL: could not locate NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG in $SRC" >&2
     exit 1
 fi
+GUESS_LINE="$(grep -n '^#define NGX_HTTP_ZSTD_UNKNOWN_SIZE_GUESS' "$SRC" \
+              | head -1 | cut -d: -f1)"
+if [ -z "$GUESS_LINE" ]; then
+    echo "FAIL: could not locate NGX_HTTP_ZSTD_UNKNOWN_SIZE_GUESS in $SRC" >&2
+    exit 1
+fi
 
 # --- ngx_http_zstd_dcz_window_log() (the function under test) ------------
 DCZ_SIG="$(grep -n '^ngx_http_zstd_dcz_window_log(size_t dict_len' "$SRC" \
@@ -79,10 +85,12 @@ read -r DCZ_START DCZ_END < <(extract "$((DCZ_SIG - 1))" "dcz_window_log")
     echo " * from $SRC:"
     echo " *   ceil_log2      lines ${CEIL_START}-${CEIL_END}"
     echo " *   window cap     line  ${CAP_LINE}"
+    echo " *   size guess     line  ${GUESS_LINE}"
     echo " *   dcz_window_log lines ${DCZ_START}-${DCZ_END}"
     echo " * Do not edit; re-run the script to regenerate. */"
     sed -n "${CAP_LINE}p" "$SRC"
     sed -n "${MIN_LINE}p" "$SRC"
+    sed -n "${GUESS_LINE}p" "$SRC"
     echo
     sed -n "${CEIL_START},${CEIL_END}p" "$SRC"
     echo
@@ -94,6 +102,7 @@ read -r DCZ_START DCZ_END < <(extract "$((DCZ_SIG - 1))" "dcz_window_log")
 for marker in 'ngx_http_zstd_ceil_log2(size_t x)' \
               'NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG' \
               'NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG' \
+              'NGX_HTTP_ZSTD_UNKNOWN_SIZE_GUESS' \
               'ngx_http_zstd_dcz_window_log(size_t dict_len' \
               'budget_window_cap'; do
     if ! grep -q "$marker" "$OUT/generated_dcz_window_log.inc"; then

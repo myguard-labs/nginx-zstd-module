@@ -732,9 +732,9 @@ typedef struct {
  */
 #define NGX_HTTP_ZSTD_LDM_WINDOWLOG      27
 #define NGX_HTTP_ZSTD_LDM_MINMATCH       64
-#define NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG  3
 /* libzstd's own default: hash log trails the window log by 7. */
 #define NGX_HTTP_ZSTD_LDM_HASHLOG_OFFSET 7
+#define NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG  3
 
 
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
