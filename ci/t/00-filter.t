@@ -3102,3 +3102,73 @@ Accept-Encoding: zstd
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 111: streaming zstd_max_length cap — body exactly AT the cap still compresses
+# Regression for the ctx->bytes_in (uint64_t) vs zlcf->max_length
+# (ssize_t) cap comparison. bytes_in accumulates per received chunk and
+# the check only fires once bytes_in EXCEEDS the cap, so a body whose
+# size equals the cap exactly must still pass through and compress
+# normally — this is the boundary the fix must not disturb.
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_max_length 5000;
+        zstd_types text/plain;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/up;
+    }
+    location /up {
+        proxy_http_version 1.1;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_RAND_PORT_1/;
+    }
+--- tcp_listen: $TEST_NGINX_RAND_PORT_1
+--- tcp_no_close
+--- tcp_reply eval
+"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+. sprintf("%x\r\n", 5000) . ("A" x 5000) . "\r\n0\r\n\r\n"
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 112: streaming zstd_max_length cap — body one byte OVER the cap aborts
+# Companion to TEST 111: one byte past the cap must still trip the
+# abort path. Confirms the > (not >=) comparison and the unsigned
+# bytes_in accumulation both work at the boundary, not just for a body
+# that grossly exceeds the cap (TEST 42).
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_max_length 4999;
+        zstd_types text/plain;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/up;
+    }
+    location /up {
+        proxy_http_version 1.1;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_RAND_PORT_1/;
+    }
+--- tcp_listen: $TEST_NGINX_RAND_PORT_1
+--- tcp_no_close
+--- tcp_reply eval
+"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+. sprintf("%x\r\n", 5000) . ("A" x 5000) . "\r\n0\r\n\r\n"
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- ignore_response
+--- error_log
+input exceeded zstd_max_length (4999) on a response with no Content-Length

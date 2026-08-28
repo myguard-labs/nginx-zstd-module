@@ -2152,7 +2152,8 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
              * completing one runaway response.
              */
             if (zlcf->max_length != NGX_CONF_UNSET
-                && (off_t) ctx->bytes_in > (off_t) zlcf->max_length)
+                && zlcf->max_length >= 0
+                && ctx->bytes_in > (uint64_t) zlcf->max_length)
             {
                 ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                               "zstd: input exceeded zstd_max_length (%O) on a "
