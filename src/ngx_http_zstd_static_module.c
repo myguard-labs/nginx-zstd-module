@@ -86,6 +86,11 @@
  * fine with the zstd CLI yet fails in every browser. Matches the
  * filter module's dcz window cap, which exists for the same client
  * guarantee.
+ *
+ * Changing this value means editing operator-visible prose too: the
+ * NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG log message spells out both
+ * "8 MB" and the equivalent "window log <= 23" in words. Neither is
+ * derived from this constant, so both go stale silently.
  */
 #define NGX_HTTP_ZSTD_STATIC_MAX_WINDOW  (8 * 1024 * 1024)
 
@@ -1191,8 +1196,8 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 
             if (frames >= NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES) {
                 ngx_log_error(NGX_LOG_ERR, log, 0,
-                              "zstd static: \"%s\" has more than %ui "
-                              "leading skippable frames — declining "
+                              "zstd static: \"%s\" has at least %ui "
+                              "leading skippable frames -- declining "
                               "rather than searching further for the "
                               "first regular frame",
                               path.data,
@@ -1229,7 +1234,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                 if (of.is_directio) {
                     ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
                                   "zstd static: %uz-byte aligned probe on "
-                                  "directio file \"%s\" returned %z — "
+                                  "directio file \"%s\" returned %z -- "
                                   "declining; check directio_alignment "
                                   "against the device geometry",
                                   align, path.data, n);
@@ -1280,11 +1285,16 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
                 goto probe_done;
 
             case NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG:
+                /*
+                 * "8 MB" and "window log <= 23" below are prose, not
+                 * derived: they must be updated by hand whenever
+                 * NGX_HTTP_ZSTD_STATIC_MAX_WINDOW changes.
+                 */
                 ngx_log_error(NGX_LOG_ERR, log, 0,
                               "zstd static: \"%s\" declares a %uL-byte "
                               "decompression window, above the 8 MB limit "
                               "browsers enforce for Content-Encoding: zstd "
-                              "(RFC 8878) — declining so a fallback "
+                              "(RFC 8878) -- declining so a fallback "
                               "encoding is used; recompress with a window "
                               "log <= 23 (streaming encoders default to "
                               "the compression level's window when not "

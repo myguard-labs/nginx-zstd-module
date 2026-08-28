@@ -3052,14 +3052,14 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
     /* Validate buffer pointers to detect corruption before using in ZSTD */
     if (ctx->out_buf->end < ctx->out_buf->start) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                      "corrupted output buffer: end (%p) < start (%p)",
+                      "zstd: corrupted output buffer: end (%p) < start (%p)",
                       ctx->out_buf->end, ctx->out_buf->start);
         return NGX_ERROR;
     }
 
     if (ctx->out_buf->end < ctx->out_buf->last) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                      "corrupted output buffer: end (%p) < last (%p)",
+                      "zstd: corrupted output buffer: end (%p) < last (%p)",
                       ctx->out_buf->end, ctx->out_buf->last);
         return NGX_ERROR;
     }
@@ -6296,28 +6296,6 @@ ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
 
 
 /*
- * Wraps nginx's own ngx_conf_set_bufs_slot() rather than reimplementing
- * argument parsing: nginx's parse/zero rejection and its exact error text
- * for those cases are preserved verbatim, and this wrapper only adds the
- * overflow check on the ngx_bufs_t that parse produced -- fast, hard
- * feedback on an unrepresentable explicit value at the earliest possible
- * point. It deliberately does NOT run the advisory/hard-cap tiers
- * (advise=0): the post-merge check below (ngx_http_zstd_merge_loc_conf())
- * is the single owner of those, because it is the only point that also
- * covers a value this location never wrote itself but inherited from an
- * outer block, or the module's own computed default -- neither of which
- * runs through this slot handler at all. It is also the only point where
- * conf->bufs_unsafe is guaranteed to already hold its final, merged
- * value: "zstd_buffers_unsafe" can appear before OR after "zstd_buffers"
- * in the same block, or at an outer level entirely, and this slot fires
- * the moment "zstd_buffers" is parsed -- reading bufs_unsafe here could
- * see it still unset. Running the hard-cap tier here too would also
- * double-report it for the common case of an explicit large value that
- * survives to the merge unchanged.
- */
-
-
-/*
  * Validate value as a single RFC 9110 field-name token. Per RFC 9110 §5.1:
  *   tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-"
  *         / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
@@ -6475,6 +6453,26 @@ ngx_http_zstd_set_enable_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * Wraps nginx's own ngx_conf_set_bufs_slot() rather than reimplementing
+ * argument parsing: nginx's parse/zero rejection and its exact error text
+ * for those cases are preserved verbatim, and this wrapper only adds the
+ * overflow check on the ngx_bufs_t that parse produced -- fast, hard
+ * feedback on an unrepresentable explicit value at the earliest possible
+ * point. It deliberately does NOT run the advisory/hard-cap tiers
+ * (advise=0): the post-merge check in ngx_http_zstd_merge_loc_conf()
+ * is the single owner of those, because it is the only point that also
+ * covers a value this location never wrote itself but inherited from an
+ * outer block, or the module's own computed default -- neither of which
+ * runs through this slot handler at all. It is also the only point where
+ * conf->bufs_unsafe is guaranteed to already hold its final, merged
+ * value: "zstd_buffers_unsafe" can appear before OR after "zstd_buffers"
+ * in the same block, or at an outer level entirely, and this slot fires
+ * the moment "zstd_buffers" is parsed -- reading bufs_unsafe here could
+ * see it still unset. Running the hard-cap tier here too would also
+ * double-report it for the common case of an explicit large value that
+ * survives to the merge unchanged.
+ */
 static char *
 ngx_http_zstd_set_bufs_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
