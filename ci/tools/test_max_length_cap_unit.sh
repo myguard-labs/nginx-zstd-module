@@ -24,6 +24,11 @@
 # production.
 #
 # No nginx tree and no libzstd needed: pure C, self-contained.
+#
+# REQUIRE_M32: unset/"0"/""/false/no/off (case insensitive) keeps the
+# default local-dev behaviour -- SKIP with exit 0 when no -m32 toolchain is
+# present. Any other value (1/true/yes/on, case insensitive, or anything
+# else non-empty) makes a missing -m32 toolchain a hard FAILURE instead.
 set -euo pipefail
 
 # ci/tools/ -> ci/ -> repo root.
@@ -91,9 +96,16 @@ echo "OK: max_length cap unit fixture (extracted from current $SRC)"
 # off_t (glibc's legacy 32-bit off_t), which is what this cap's comment
 # describes and what reproduces the cast losing bits. Not optional
 # coverage; skipped (not failed) when the runner has no 32-bit toolchain
-# at all -- UNLESS REQUIRE_M32=1, in which case a missing toolchain is a
-# hard failure rather than a silent skip (set in CI so a runner image that
-# drops multilib loses this lens loudly, not quietly).
+# at all -- UNLESS REQUIRE_M32 is set to a truthy value (1/true/yes/on,
+# case insensitive; anything else non-empty and not "0" also counts as
+# set), in which case a missing toolchain is a hard failure rather than a
+# silent skip (set in CI so a runner image that drops multilib loses this
+# lens loudly, not quietly).
+require_m32="${REQUIRE_M32:-0}"
+case "${require_m32,,}" in
+    0 | "" | false | no | off) require_m32_set=0 ;;
+    *) require_m32_set=1 ;;
+esac
 if "$CC" -m32 -x c -o /dev/null - <<<'int main(void){return 0;}' \
     >/dev/null 2>&1
 then
@@ -101,8 +113,8 @@ then
         -o "$OUT/max_length_cap_unit_32off" "$OUT/test_max_length_cap_unit.c"
     "$OUT/max_length_cap_unit_32off"
     echo "OK: max_length cap unit fixture (32-bit off_t, bytes_in > INT32_MAX)"
-elif [ "${REQUIRE_M32:-0}" = "1" ]; then
-    echo "FAIL: no -m32 toolchain available and REQUIRE_M32=1; 32-bit off_t pass cannot run" >&2
+elif [ "$require_m32_set" = "1" ]; then
+    echo "FAIL: no -m32 toolchain available and REQUIRE_M32 is set; 32-bit off_t pass cannot run" >&2
     exit 1
 else
     echo "SKIP: no -m32 toolchain available; 32-bit off_t pass not run" >&2

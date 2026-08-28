@@ -144,7 +144,7 @@ jobs:
           # save" (a warning, so CI stays green while nothing is ever cached).
           # Only the .deb files are worth caching anyway.
           path: ${{ runner.temp }}/apt-archives/*.deb
-          key: apt-validation-${{ runner.os }}-shellcheck-cppcheck-clang-tools-nginx-dev
+          key: apt-validation-${{ runner.os }}-shellcheck-cppcheck-clang-tools-nginx-dev-gcc-multilib
           restore-keys: apt-validation-${{ runner.os }}-
 
       - name: Install dependencies
