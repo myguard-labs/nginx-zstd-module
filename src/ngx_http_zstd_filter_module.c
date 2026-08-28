@@ -1912,6 +1912,28 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     }
 
     /*
+     * Cheapest gate first: reject before paying for the header-list walk
+     * or the base64 decode below. No client sends "dcz" in Accept-Encoding
+     * unless it already holds a dictionary, so this rejects essentially
+     * all real traffic -- the two calls it now guards
+     * (ngx_http_zstd_collect_dcz_headers() and
+     * ngx_http_zstd_dcz_decode_digest()) are provably wasted work on that
+     * path. All gates below are pure predicates that only return NULL, so
+     * reordering is behaviour-preserving for the accept/reject decision --
+     * EXCEPT for which debug log line fires for a request that fails both
+     * this gate and one of the gates below: this one now wins and its
+     * message is emitted instead of theirs. See t/03-dcz.t for a test
+     * pinning that order.
+     */
+    if (ngx_http_zstd_chain_coding_weight(ae, "dcz",
+                                          sizeof("dcz") - 1, 0) <= 0)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: skip, no explicit dcz in Accept-Encoding");
+        return NULL;
+    }
+
+    /*
      * Collect both dcz-negotiation headers in a single header-list walk.
      * This eliminates a second traversal over what can be a long list.
      */
@@ -1972,14 +1994,6 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd dcz: skip, Sec-Fetch-Site (%uz bytes, "
                        "not same-origin or none)", sec_fetch_site_h->value.len);
-        return NULL;
-    }
-
-    if (ngx_http_zstd_chain_coding_weight(ae, "dcz",
-                                          sizeof("dcz") - 1, 0) <= 0)
-    {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "zstd dcz: skip, no explicit dcz in Accept-Encoding");
         return NULL;
     }
 

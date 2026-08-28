@@ -1182,3 +1182,76 @@ Content-Encoding: dcz
 Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
 --- no_error_log
 [error]
+
+
+
+=== TEST 47: no explicit dcz gate fires before the header-collect gate
+# Pins the negotiation gate ORDER, not just the accept/reject outcome.
+# This request fails BOTH the cheap "no explicit dcz in Accept-Encoding"
+# predicate (Accept-Encoding carries no dcz coding at all) AND the more
+# expensive duplicate-Available-Dictionary gate that used to run first
+# (behind ngx_http_zstd_collect_dcz_headers()'s header-list walk). The
+# gates are pure predicates that only return NULL, so the accept/reject
+# answer (fall back to zstd) is identical either way -- but WHICH debug
+# line is emitted depends on gate order, and that is what this test
+# pins. If a future change reorders the cheap dcz-coding gate back below
+# the collect call, this flips: the duplicate-Available-Dictionary line
+# would reappear and the "no explicit dcz" line would vanish.
+--- log_level: debug
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd\nAvailable-Dictionary: :$::dict_b64:\nAvailable-Dictionary: :$::dict_b64:\nSec-Fetch-Site: same-origin"
+--- response_headers
+Content-Encoding: zstd
+--- error_log eval
+qr/zstd dcz: skip, no explicit dcz in Accept-Encoding/
+--- no_error_log eval
+[
+    qr/zstd dcz: skip, \d+ Available-Dictionary headers/,
+    qr/\[error\]/,
+]
+
+
+
+=== TEST 48: vary_dcz folds an already-present token instead of duplicating it
+# ngx_http_zstd_vary_dcz() detects both tokens in a single pass
+# (ngx_http_zstd_vary_has_two_tokens()) rather than two independent
+# ngx_http_zstd_vary_has_token() calls. Coverage for the fold: the
+# upstream response already carries "Vary: Available-Dictionary" (only
+# ONE of the two tokens), so vary_dcz must detect has_available_dictionary
+# = 1 / has_sec_fetch_site = 0 from that single combined pass and push
+# exactly "Sec-Fetch-Site" -- not the "both absent" 2-token line every
+# other test in this file exercises, and not a duplicated
+# Available-Dictionary. A fold that mixed up which flag belongs to which
+# token, or that only checked one of the two in the single pass, flips
+# this response's Vary line.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/t-upstream;
+    }
+    location /t-upstream {
+        add_header Vary "Available-Dictionary";
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+Vary: Available-Dictionary, Accept-Encoding, Sec-Fetch-Site
+--- no_error_log
+[error]

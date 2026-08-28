@@ -811,21 +811,118 @@ ngx_http_zstd_vary_has_token(ngx_http_request_t *r, const char *token,
 
 
 /*
+ * Same walk as ngx_http_zstd_vary_has_token(), but checks for two tokens
+ * in one pass over r->headers_out.headers instead of two. Used only by
+ * ngx_http_zstd_vary_dcz(), whose two calls are adjacent and always want
+ * both answers -- folding them avoids a second full header-list walk plus
+ * a second per-Vary-line comma-token sub-scan.
+ */
+static ngx_inline void
+ngx_http_zstd_vary_has_two_tokens(ngx_http_request_t *r,
+    const char *token_a, size_t token_a_len,
+    const char *token_b, size_t token_b_len,
+    ngx_uint_t *has_a, ngx_uint_t *has_b)
+{
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h;
+
+    *has_a = 0;
+    *has_b = 0;
+
+    for (part = &r->headers_out.headers.part, h = part->elts, i = 0;
+         /* void */;
+         i++)
+    {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].hash == 0
+            || h[i].key.len != sizeof("Vary") - 1
+            || ngx_strncasecmp(h[i].key.data, (u_char *) "Vary",
+                               sizeof("Vary") - 1) != 0)
+        {
+            continue;
+        }
+
+        {
+            u_char  *end, *p, *start;
+
+            p = h[i].value.data;
+            end = p + h[i].value.len;
+
+            while (p < end) {
+                while (p < end && (*p == ' ' || *p == '\t' || *p == ',')) {
+                    p++;
+                }
+
+                start = p;
+                while (p < end && *p != ',') {
+                    p++;
+                }
+
+                while (p > start && (p[-1] == ' ' || p[-1] == '\t')) {
+                    p--;
+                }
+
+                if (!*has_a
+                    && (size_t) (p - start) == token_a_len
+                    && ngx_strncasecmp(start, (u_char *) token_a,
+                                       token_a_len) == 0)
+                {
+                    *has_a = 1;
+                }
+
+                if (!*has_b
+                    && (size_t) (p - start) == token_b_len
+                    && ngx_strncasecmp(start, (u_char *) token_b,
+                                       token_b_len) == 0)
+                {
+                    *has_b = 1;
+                }
+
+                if (*has_a && *has_b) {
+                    return;
+                }
+
+                while (p < end && *p != ',') {
+                    p++;
+                }
+            }
+        }
+    }
+}
+
+
+/*
  * Add the two request-header dimensions that can select a dcz response.
  * The static content handler and the response filter can both reach this
  * helper on one request. Detect tokens across every active Vary field, so
  * repeated calls and fields flattened or reordered by another filter remain
  * duplicate-free.
+ *
+ * The two tokens are looked up together in a single header-list walk
+ * (ngx_http_zstd_vary_has_two_tokens()) rather than as two independent
+ * calls to ngx_http_zstd_vary_has_token() -- the two lookups are always
+ * wanted together here, so paying for the walk and the per-line
+ * comma-token scan twice was redundant.
  */
 static ngx_inline ngx_int_t
 ngx_http_zstd_vary_dcz(ngx_http_request_t *r)
 {
     ngx_uint_t  has_available_dictionary, has_sec_fetch_site;
 
-    has_available_dictionary = ngx_http_zstd_vary_has_token(
-        r, "Available-Dictionary", sizeof("Available-Dictionary") - 1);
-    has_sec_fetch_site = ngx_http_zstd_vary_has_token(
-        r, "Sec-Fetch-Site", sizeof("Sec-Fetch-Site") - 1);
+    ngx_http_zstd_vary_has_two_tokens(
+        r, "Available-Dictionary", sizeof("Available-Dictionary") - 1,
+        "Sec-Fetch-Site", sizeof("Sec-Fetch-Site") - 1,
+        &has_available_dictionary, &has_sec_fetch_site);
 
     if (has_available_dictionary && has_sec_fetch_site) {
         return NGX_OK;
