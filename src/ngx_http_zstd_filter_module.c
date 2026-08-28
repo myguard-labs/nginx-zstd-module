@@ -2446,7 +2446,20 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->in_buf->pos += ctx->buffer_in.pos - pos_in;
     }
 
-    ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
+    /*
+     * Same zero-delta guard as the input side above. Here ctx->out_buf and
+     * ctx->out_buf->last are both provably non-NULL -- get_buf() returns
+     * NGX_OK only after the explicit NULL check, and compress() has the
+     * single caller in the body-filter loop -- so this is defensive
+     * symmetry, not a reachable fix. It keeps the `NULL + 0` UB out of the
+     * expression if ->last ever becomes NULL-able the way in_buf->pos is.
+     * Note it does NOT guard a NULL ctx->out_buf: that would fault on the
+     * dereference regardless of the delta.
+     */
+    if (ctx->buffer_out.pos != pos_out) {
+        ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
+    }
+
     ctx->redo = 0;
 
     /* PR #49: State machine logic for action transitions */
