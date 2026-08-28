@@ -1264,7 +1264,7 @@ Accept-Encoding: zstd
 too long origin
 --- error_code: 200
 --- error_log
-leading skippable frames
+has at least 4 leading skippable frames
 
 
 

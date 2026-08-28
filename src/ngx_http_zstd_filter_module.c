@@ -171,6 +171,27 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
 #define NGX_HTTP_ZSTD_MAX_DICT_SIZE  (10 * 1024 * 1024)  /* 10 MB limit */
 
 /*
+ * Stand-in body size when the response length is unknown, used only to size
+ * the CCtx window estimate -- see the ring-key discussion below.
+ */
+#define NGX_HTTP_ZSTD_UNKNOWN_SIZE_GUESS  (1024 * 1024)
+
+/*
+ * ZSTD_compressBound() covers the compressed payload only; pad it by
+ * _FRAME_SLACK for libzstd's frame and block headers, and never size an
+ * output buffer below _MIN so a tiny or empty body still gets a buffer the
+ * frame overhead fits inside.
+ */
+#define NGX_HTTP_ZSTD_BOUND_FRAME_SLACK  64
+#define NGX_HTTP_ZSTD_BOUND_MIN          256
+
+/*
+ * Highest response status the filter will encode. 3xx and above carry no
+ * body worth encoding, except the 403/404 error pages excluded separately.
+ */
+#define NGX_HTTP_ZSTD_MAX_ELIGIBLE_STATUS  299
+
+/*
  * RFC 9842 §2.2 dcz framing: an 8-byte zstd skippable-frame header
  * (magic 0x184D2A5E and frame-size 32, both little-endian on the wire)
  * followed by the 32-byte SHA-256 of the dictionary, prepended to an
@@ -187,6 +208,9 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
  * length check runs, so the destination buffer must have that headroom.
  */
 #define NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN  48
+
+/* Padded standard-base64 length of a 32-byte SHA-256 (43 unpadded). */
+#define NGX_HTTP_ZSTD_DCZ_DIGEST_B64_LEN  44
 
 /*
  * RFC 9842 §2.2.2: a dcz client guarantees a decode window of at least
@@ -273,7 +297,7 @@ ngx_http_zstd_dcz_window_log(size_t dict_len, off_t pledged_size,
      * everything above 2^23 the same way, so no finer clamp is needed.
      */
     if (pledged_size < 0) {
-        pledged_contribution = 1024 * 1024;
+        pledged_contribution = NGX_HTTP_ZSTD_UNKNOWN_SIZE_GUESS;
 
     } else if (sizeof(off_t) > sizeof(size_t)
                && (uintmax_t) pledged_size > (uintmax_t) SIZE_MAX)
@@ -687,7 +711,7 @@ typedef struct {
  * sentinel, "zstd_comp_level -1;" was indistinguishable from an absent
  * directive, so the merge below silently replaced it with the inherited
  * value or the default 3 -- and the duplicate-directive guard in
- * ngx_conf_zstd_set_num_slot_with_negatives() could never fire for it.
+ * ngx_http_zstd_set_num_slot_with_negatives() could never fire for it.
  * The value is out of band for every libzstd: ZSTD_minCLevel() is
  * -131072 at its most extreme, far above the type minimum. nginx defines
  * NGX_MAX_INT_T_VALUE but no signed minimum, so derive it.
@@ -709,6 +733,8 @@ typedef struct {
 #define NGX_HTTP_ZSTD_LDM_WINDOWLOG      27
 #define NGX_HTTP_ZSTD_LDM_MINMATCH       64
 #define NGX_HTTP_ZSTD_LDM_BUCKETSIZELOG  3
+/* libzstd's own default: hash log trails the window log by 7. */
+#define NGX_HTTP_ZSTD_LDM_HASHLOG_OFFSET 7
 
 
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
@@ -763,6 +789,16 @@ static ngx_str_t  ngx_http_zstd_default_types[] = {
 };
 
 
+/*
+ * Forward declarations below cover the module-table entry points and the
+ * handlers referenced across the file. They are not a full index of this
+ * TU: the remaining file-static helpers (dcz_decode_digest, profile_pack /
+ * profile_unpack, cctx_profiles_match, open_dict_strict,
+ * build_cctx_params_profile, estimate_cctx_memory, dcz_window_cap,
+ * predicate_is_direct_header_or_cookie, int_max_bound,
+ * validate_field_name_token) are each defined before their first use and
+ * need no declaration here.
+ */
 static ngx_int_t ngx_http_zstd_header_filter(ngx_http_request_t *r);
 static ngx_int_t ngx_http_zstd_body_filter(ngx_http_request_t *r,
     ngx_chain_t *in);
@@ -795,12 +831,13 @@ static char *ngx_http_zstd_check_size_int_max(ngx_conf_t *cf, void *post,
     void *data);
 static char *ngx_http_zstd_check_num_int_max(ngx_conf_t *cf, void *post,
     void *data);
-static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
+static char *ngx_http_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_http_zstd_set_bufs_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_zstd_check_bufs_product(ngx_conf_t *cf,
-    ngx_bufs_t *bufs, ngx_flag_t unsafe, const char *ctx, ngx_flag_t advise);
+    const ngx_bufs_t *bufs, ngx_flag_t unsafe, const char *ctx,
+    ngx_flag_t advise);
 static char *ngx_http_zstd_set_bypass_vary(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_http_zstd_set_enable_slot(ngx_conf_t *cf,
@@ -1139,7 +1176,7 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
 
     { ngx_string("zstd_comp_level"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_zstd_set_num_slot_with_negatives,
+      ngx_http_zstd_set_num_slot_with_negatives,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, level),
       &ngx_http_zstd_comp_level_bounds },
@@ -1371,7 +1408,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         || r->headers_out.status == NGX_HTTP_NO_CONTENT
         || r->headers_out.status == 205   /* 205 Reset Content: no core macro */
         || r->headers_out.status == NGX_HTTP_PARTIAL_CONTENT
-        || (r->headers_out.status > 299
+        || (r->headers_out.status > NGX_HTTP_ZSTD_MAX_ELIGIBLE_STATUS
             && r->headers_out.status != NGX_HTTP_FORBIDDEN
             && r->headers_out.status != NGX_HTTP_NOT_FOUND))
     {
@@ -1774,7 +1811,7 @@ ngx_http_zstd_dcz_decode_digest(ngx_str_t raw,
     if (raw.len < 2
         || raw.data[0] != ':'
         || raw.data[raw.len - 1] != ':'
-        || raw.len - 2 > 44)
+        || raw.len - 2 > NGX_HTTP_ZSTD_DCZ_DIGEST_B64_LEN)
     {
         return NGX_DECLINED;
     }
@@ -2956,10 +2993,10 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
                  * keep a small floor so tiny/empty bodies still get a
                  * buffer the frame overhead fits inside.
                  */
-                bound += 64;
+                bound += NGX_HTTP_ZSTD_BOUND_FRAME_SLACK;
 
-                if (bound < 256) {
-                    bound = 256;
+                if (bound < NGX_HTTP_ZSTD_BOUND_MIN) {
+                    bound = NGX_HTTP_ZSTD_BOUND_MIN;
                 }
 
                 if (bound < buf_size) {
@@ -4407,7 +4444,7 @@ ngx_http_zstd_estimate_cctx_memory(ngx_conf_t *cf,
         ldm_wlog = window_log > 0 ? window_log
                                         : NGX_HTTP_ZSTD_LDM_WINDOWLOG;
 
-        ldm_hlog = ldm_wlog - 7;
+        ldm_hlog = ldm_wlog - NGX_HTTP_ZSTD_LDM_HASHLOG_OFFSET;
         if (ldm_hlog < ZSTD_LDM_HASHLOG_MIN) {
             ldm_hlog = ZSTD_LDM_HASHLOG_MIN;
         }
@@ -4588,7 +4625,7 @@ ngx_http_zstd_dcz_window_cap(ngx_conf_t *cf, ngx_http_zstd_loc_conf_t *conf,
  * a false warning on a map is worse than missing the direct case.
  */
 static ngx_uint_t
-ngx_http_zstd_predicate_is_direct_header_or_cookie(ngx_str_t *v)
+ngx_http_zstd_predicate_is_direct_header_or_cookie(const ngx_str_t *v)
 {
     u_char  *p, *last;
 
@@ -6069,7 +6106,7 @@ ngx_http_zstd_check_num_int_max(ngx_conf_t *cf, void *post, void *data)
 
 
 static char *
-ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
+ngx_http_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf)
 {
     char  *p = conf;
@@ -6208,7 +6245,7 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf,
  * possible point.
  */
 static char *
-ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
+ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, const ngx_bufs_t *bufs,
     ngx_flag_t unsafe, const char *ctx, ngx_flag_t advise)
 {
     size_t  total;
@@ -6307,7 +6344,7 @@ ngx_http_zstd_check_bufs_product(ngx_conf_t *cf, ngx_bufs_t *bufs,
  * return from the directive handler otherwise.
  */
 static const char *
-ngx_http_zstd_validate_field_name_token(ngx_str_t *value)
+ngx_http_zstd_validate_field_name_token(const ngx_str_t *value)
 {
     u_char  *p, *end;
 

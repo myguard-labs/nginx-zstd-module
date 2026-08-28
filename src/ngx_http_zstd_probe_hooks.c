@@ -43,9 +43,9 @@ static ngx_uint_t  ngx_http_zstd_probe_chain_links;
 static ngx_uint_t  ngx_http_zstd_probe_bufs_allocated;
 
 /* Snapshot of the most recently observed request's ctx state, taken by
- * ngx_http_zstd_probe_note_ctx(). Observational only -- see the
- * single-worker caveat above the includes. -1 (via the "have" flag) until
- * the first request populates it. */
+ * ngx_http_zstd_probe_note_ctx_state(). Observational only -- see the
+ * single-worker caveat above the includes. Renders as null (via the "have"
+ * flag) until the first request populates it. */
 static ngx_uint_t  ngx_http_zstd_probe_free_links;
 static ngx_uint_t  ngx_http_zstd_probe_out_buf_present;
 static size_t      ngx_http_zstd_probe_out_buf_size;

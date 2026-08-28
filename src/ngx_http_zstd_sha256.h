@@ -20,9 +20,12 @@
  * runtime fallback: EVP_Digest() allocates internally and may fail
  * under memory pressure, and falling back keeps this a total function.
  *
- * static inline (matching ngx_http_zstd_common.h's pattern): only the
- * filter TU uses it today; inline definitions are exempt from
- * -Werror=unused-function if the static module ever includes this.
+ * Only the filter TU uses these today. The one-shot entry point
+ * ngx_http_zstd_sha256() is static ngx_inline; the four helpers it drives
+ * (_compress, _init, _update, _final) are plain static and are reached only
+ * through it, so they carry no -Werror=unused-function exemption of their
+ * own. A second TU including this header would need them marked
+ * ngx_inline too, or would have to use every one of them.
  */
 
 #ifndef NGX_HTTP_ZSTD_SHA256_H

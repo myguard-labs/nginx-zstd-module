@@ -57,12 +57,12 @@ char *ngx_http_zstd_probe_directive(ngx_conf_t *cf, ngx_command_t *cmd,
  * buffer created in ngx_http_zstd_filter_get_buf() (the ctx->bufs < ...
  * branch, i.e. NOT the free-list reuse branch).
  *
- * ngx_http_zstd_probe_note_ctx() -- called with the request's ctx so the
- * probe can snapshot free-list length and out_buf state. Safe to call
- * repeatedly (e.g. once per body filter invocation); last write wins. The
- * pointer is observational only and is never dereferenced outside the
- * request that owns it -- see the .c file for the single-worker caveat this
- * inherits from fault_set_global's per-worker-global contract.
+ * ngx_http_zstd_probe_note_ctx_state() -- called with values already
+ * derived from the request's ctx so the probe can snapshot free-list length
+ * and out_buf state. Safe to call repeatedly (e.g. once per body filter
+ * invocation); last write wins. The snapshot is observational only -- see
+ * the .c file for the single-worker caveat this inherits from
+ * fault_set_global's per-worker-global contract.
  */
 void ngx_http_zstd_probe_note_chain_link(void);
 void ngx_http_zstd_probe_note_buf_alloc(void);
