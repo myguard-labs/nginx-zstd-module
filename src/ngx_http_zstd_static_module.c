@@ -1237,6 +1237,137 @@ probe_done:
 
 
 static ngx_int_t
+ngx_http_zstd_static_send(ngx_http_request_t *r, ngx_open_file_info_t *of,
+    ngx_str_t *path, ngx_log_t *log)
+{
+    ngx_int_t          rc;
+    ngx_buf_t         *b;
+    ngx_chain_t        out;
+    ngx_table_elt_t   *h;
+
+    r->root_tested = !r->error_page;
+
+    rc = ngx_http_discard_request_body(r);
+    if (rc != NGX_OK) {
+        return rc;
+    }
+
+    log->action = (char *) "sending response to client";
+
+    r->headers_out.status = NGX_HTTP_OK;
+    r->headers_out.content_length_n = of->size;
+    r->headers_out.last_modified_time = of->mtime;
+
+    if (ngx_http_set_etag(r) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /*
+     * ngx_http_set_content_type() uses r->exten which is derived from the
+     * original URI, not from path. No path manipulation is needed here.
+     */
+    if (ngx_http_set_content_type(r) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    h = ngx_list_push(&r->headers_out.headers);
+    if (h == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    h->hash = 1;
+#if (nginx_version >= 1023000)
+    h->next = NULL;
+#endif
+    ngx_str_set(&h->key, "Content-Encoding");
+    ngx_str_set(&h->value, "zstd");
+    r->headers_out.content_encoding = h;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+                   "zstd static: serving precompressed \"%s\"", path->data);
+
+    /* gzip_static parity: byte ranges address the SELECTED
+     * REPRESENTATION (RFC 9110 §14.2) — here the .zst bytes on disk,
+     * which a client can fetch, resume and concatenate coherently
+     * because the validator is strong and the bytes are stable. That
+     * is why gzip_static has always set r->allow_ranges, and ranges
+     * only work by opting in: the range filter bails without the
+     * flag. The FILTER module's clear_accept_ranges remains correct
+     * for the opposite reason — a stream generated on the fly has
+     * nothing stable to seek into. */
+    r->allow_ranges = 1;
+
+    /* HEAD fast path: send headers only, skip body buffer allocation.
+     * r->header_only covers more than HEAD (304/204), so check method
+     * explicitly to avoid breaking other status codes. */
+    if (r->method == NGX_HTTP_HEAD) {
+        return ngx_http_send_header(r);
+    }
+
+    /*
+     * One ngx_pcalloc() for the ngx_buf_t and its ngx_file_t, instead of
+     * ngx_calloc_buf() (itself ngx_pcalloc(pool, sizeof(ngx_buf_t))) plus
+     * a second ngx_pcalloc() for b->file: the two objects share the same
+     * lifetime (this response) and the same ownership (freed together
+     * with the pool), so there is nothing the split allocation buys.
+     * Only reached for a non-HEAD GET — the HEAD fast path above returns
+     * before this point — so this removes one pool-allocation call per
+     * static GET response body, not per request.
+     *
+     * ngx_http_zstd_static_buf_t is declared solely to size and zero
+     * this combined allocation; nothing outside this function names it.
+     * Both members keep the same zero-initialized start ngx_calloc_buf()/
+     * ngx_pcalloc() gave them, so every field this handler does not set
+     * explicitly below (b->pos, b->last, b->temporary, file.offset, ...)
+     * is still guaranteed zero.
+     */
+    {
+        ngx_http_zstd_static_buf_t  *wrap;
+
+        wrap = ngx_pcalloc(r->pool, sizeof(ngx_http_zstd_static_buf_t));
+        if (wrap == NULL) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        b = &wrap->buf;
+        b->file = &wrap->file;
+    }
+
+    rc = ngx_http_send_header(r);
+
+    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) {
+        return rc;
+    }
+
+    b->file_pos = 0;
+    b->file_last = of->size;
+
+    b->in_file = b->file_last ? 1 : 0;
+    b->last_buf = (r == r->main) ? 1 : 0;
+    b->last_in_chain = 1;
+
+    /* gzip_static parity: a zero-length file served in a subrequest
+     * yields a buf with neither in_file nor last_buf — sync marks it
+     * so the output chain doesn't reject it as a zero-size buf. Only
+     * reachable when the frame-header probe is compiled out (a POSIX
+     * build whose configure found no pread(2) — see
+     * NGX_HTTP_ZSTD_STATIC_HAVE_PROBE); with the probe active, which
+     * now includes Win32, sub-4-byte files never get this far. */
+    b->sync = (b->last_buf || b->in_file) ? 0 : 1;
+
+    b->file->fd = of->fd;
+    b->file->name = *path;
+    b->file->log = log;
+    b->file->directio = of->is_directio;
+
+    out.buf = b;
+    out.next = NULL;
+
+    return ngx_http_output_filter(r, &out);
+}
+
+
+static ngx_int_t
 ngx_http_zstd_static_handler(ngx_http_request_t *r)
 {
     u_char                       *p;
@@ -1245,10 +1376,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     ngx_uint_t                    level;
     size_t                        root;
     ngx_str_t                     path;
-    ngx_buf_t                    *b;
     ngx_log_t                    *log;
-    ngx_table_elt_t              *h;
-    ngx_chain_t                   out;
     ngx_open_file_info_t          of;
     ngx_http_core_loc_conf_t           *clcf;
     const ngx_http_zstd_static_conf_t  *zscf;
@@ -1477,125 +1605,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         }
     }
 
-    r->root_tested = !r->error_page;
-
-    rc = ngx_http_discard_request_body(r);
-    if (rc != NGX_OK) {
-        return rc;
-    }
-
-    log->action = (char *) "sending response to client";
-
-    r->headers_out.status = NGX_HTTP_OK;
-    r->headers_out.content_length_n = of.size;
-    r->headers_out.last_modified_time = of.mtime;
-
-    if (ngx_http_set_etag(r) != NGX_OK) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    /*
-     * ngx_http_set_content_type() uses r->exten which is derived from the
-     * original URI, not from path. No path manipulation is needed here.
-     */
-    if (ngx_http_set_content_type(r) != NGX_OK) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    h = ngx_list_push(&r->headers_out.headers);
-    if (h == NULL) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    h->hash = 1;
-#if (nginx_version >= 1023000)
-    h->next = NULL;
-#endif
-    ngx_str_set(&h->key, "Content-Encoding");
-    ngx_str_set(&h->value, "zstd");
-    r->headers_out.content_encoding = h;
-
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
-                   "zstd static: serving precompressed \"%s\"", path.data);
-
-    /* gzip_static parity: byte ranges address the SELECTED
-     * REPRESENTATION (RFC 9110 §14.2) — here the .zst bytes on disk,
-     * which a client can fetch, resume and concatenate coherently
-     * because the validator is strong and the bytes are stable. That
-     * is why gzip_static has always set r->allow_ranges, and ranges
-     * only work by opting in: the range filter bails without the
-     * flag. The FILTER module's clear_accept_ranges remains correct
-     * for the opposite reason — a stream generated on the fly has
-     * nothing stable to seek into. */
-    r->allow_ranges = 1;
-
-    /* HEAD fast path: send headers only, skip body buffer allocation.
-     * r->header_only covers more than HEAD (304/204), so check method
-     * explicitly to avoid breaking other status codes. */
-    if (r->method == NGX_HTTP_HEAD) {
-        return ngx_http_send_header(r);
-    }
-
-    /*
-     * One ngx_pcalloc() for the ngx_buf_t and its ngx_file_t, instead of
-     * ngx_calloc_buf() (itself ngx_pcalloc(pool, sizeof(ngx_buf_t))) plus
-     * a second ngx_pcalloc() for b->file: the two objects share the same
-     * lifetime (this response) and the same ownership (freed together
-     * with the pool), so there is nothing the split allocation buys.
-     * Only reached for a non-HEAD GET — the HEAD fast path above returns
-     * before this point — so this removes one pool-allocation call per
-     * static GET response body, not per request.
-     *
-     * ngx_http_zstd_static_buf_t is declared solely to size and zero
-     * this combined allocation; nothing outside this function names it.
-     * Both members keep the same zero-initialized start ngx_calloc_buf()/
-     * ngx_pcalloc() gave them, so every field this handler does not set
-     * explicitly below (b->pos, b->last, b->temporary, file.offset, ...)
-     * is still guaranteed zero.
-     */
-    {
-        ngx_http_zstd_static_buf_t  *wrap;
-
-        wrap = ngx_pcalloc(r->pool, sizeof(ngx_http_zstd_static_buf_t));
-        if (wrap == NULL) {
-            return NGX_HTTP_INTERNAL_SERVER_ERROR;
-        }
-
-        b = &wrap->buf;
-        b->file = &wrap->file;
-    }
-
-    rc = ngx_http_send_header(r);
-
-    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) {
-        return rc;
-    }
-
-    b->file_pos = 0;
-    b->file_last = of.size;
-
-    b->in_file = b->file_last ? 1 : 0;
-    b->last_buf = (r == r->main) ? 1 : 0;
-    b->last_in_chain = 1;
-
-    /* gzip_static parity: a zero-length file served in a subrequest
-     * yields a buf with neither in_file nor last_buf — sync marks it
-     * so the output chain doesn't reject it as a zero-size buf. Only
-     * reachable when the frame-header probe is compiled out (a POSIX
-     * build whose configure found no pread(2) — see
-     * NGX_HTTP_ZSTD_STATIC_HAVE_PROBE); with the probe active, which
-     * now includes Win32, sub-4-byte files never get this far. */
-    b->sync = (b->last_buf || b->in_file) ? 0 : 1;
-
-    b->file->fd = of.fd;
-    b->file->name = path;
-    b->file->log = log;
-    b->file->directio = of.is_directio;
-
-    out.buf = b;
-    out.next = NULL;
-
-    return ngx_http_output_filter(r, &out);
+    return ngx_http_zstd_static_send(r, &of, &path, log);
 }
 
 
