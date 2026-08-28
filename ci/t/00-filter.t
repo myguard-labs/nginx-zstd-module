@@ -3106,11 +3106,15 @@ Content-Encoding: zstd
 
 
 === TEST 111: streaming zstd_max_length cap — body exactly AT the cap still compresses
-# Regression for the ctx->bytes_in (uint64_t) vs zlcf->max_length
-# (ssize_t) cap comparison. bytes_in accumulates per received chunk and
+# Boundary coverage for the ctx->bytes_in (uint64_t) vs zlcf->max_length
+# (ssize_t) cap comparison, using the same mock chunked/no-Content-Length
+# upstream fixture as TEST 42. bytes_in accumulates per received chunk and
 # the check only fires once bytes_in EXCEEDS the cap, so a body whose
 # size equals the cap exactly must still pass through and compress
-# normally — this is the boundary the fix must not disturb.
+# normally. The 32-bit-off_t cast defect this cap's comparison guards
+# against is not reachable on this (64-bit off_t) harness -- see
+# ci/tools/test_max_length_cap_unit.sh for the fixture that drives it
+# under a genuine 32-bit off_t build.
 --- config
     location /filter {
         zstd on;
@@ -3142,10 +3146,15 @@ Content-Encoding: zstd
 
 
 === TEST 112: streaming zstd_max_length cap — body one byte OVER the cap aborts
-# Companion to TEST 111: one byte past the cap must still trip the
-# abort path. Confirms the > (not >=) comparison and the unsigned
-# bytes_in accumulation both work at the boundary, not just for a body
-# that grossly exceeds the cap (TEST 42).
+# Companion to TEST 111, same mock upstream fixture as TEST 42 (which
+# covers a body grossly over the cap; this is the boundary case). One
+# byte past the cap must still trip the abort path -- confirms the >
+# (not >=) comparison at the boundary. As with TEST 42, the aborted
+# connection has no clean chunked terminator, so this only asserts the
+# error_log line under --- ignore_response; Test::Nginx::Socket's
+# response-body checks are skipped together with the parse they depend
+# on, so no additional "body never completed" assertion is available
+# through this harness for a deliberately truncated response.
 --- config
     location /filter {
         zstd on;

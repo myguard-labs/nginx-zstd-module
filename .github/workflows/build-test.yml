@@ -281,6 +281,18 @@ jobs:
           # Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_read_dict_file_unit.sh
 
+          # ngx_http_zstd_max_length_exceeded(): the length-independent
+          # zstd_max_length cap checked per iteration of the streaming body
+          # filter. Extracts the predicate verbatim and asserts an unset cap
+          # never fires, a body exactly at the cap does not, one byte over
+          # does, and a bytes_in far past INT32_MAX still compares correctly
+          # against a small cap. That last case only diverges from the
+          # historical signed-cast form on a genuine 32-bit off_t build
+          # (plain -m32, no _FILE_OFFSET_BITS override); a native 64-bit
+          # build cannot reach it, so the -m32 pass is not optional
+          # coverage. Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_max_length_cap_unit.sh
+
       - name: compressBound skip gate unit fixture (size_t-width correctness)
         run: |
           # A27-F4: get_buf()'s ZSTD_compressBound() skip is gated on a

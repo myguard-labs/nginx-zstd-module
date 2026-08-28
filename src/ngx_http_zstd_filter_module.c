@@ -1996,6 +1996,32 @@ ngx_http_zstd_probe_snapshot_ctx(ngx_http_zstd_ctx_t *ctx)
 #endif
 
 
+/*
+ * Length-independent input cap check, split out of ngx_http_zstd_body_filter
+ * so a unit fixture (ci/tools/test_max_length_cap_unit.sh) can extract it
+ * verbatim and drive it against ctx->bytes_in > INT32_MAX on a genuine
+ * 32-bit off_t build (plain -m32, no _FILE_OFFSET_BITS override) -- the one
+ * shape where the signed-cast form this replaced (comparing the uint64_t
+ * accumulator against zlcf->max_length via an (off_t) cast) could produce a
+ * wrong answer, by truncating bytes_in through a narrower off_t. nginx
+ * normally builds with largefile support, which widens off_t to 64 bits
+ * even on a 32-bit platform, so this is 32-bit-off_t hardening rather than
+ * a gap reachable from a stock build: bytes_in is unsigned and max_length
+ * is ssize_t, and the check fires once bytes_in exceeds max_length, treating
+ * NGX_CONF_UNSET (-1) as "no cap configured". max_length itself can never
+ * be negative at this point in practice (ngx_conf_set_size_slot rejects a
+ * negative literal upstream), but the >= 0 guard is kept as defence against
+ * sentinel drift in this field, not against user input.
+ */
+static ngx_flag_t
+ngx_http_zstd_max_length_exceeded(uint64_t bytes_in, ssize_t max_length)
+{
+    return max_length != NGX_CONF_UNSET
+           && max_length >= 0
+           && bytes_in > (uint64_t) max_length;
+}
+
+
 static ngx_int_t
 ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
@@ -2151,9 +2177,8 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
              * fail the request — protecting the worker is preferred over
              * completing one runaway response.
              */
-            if (zlcf->max_length != NGX_CONF_UNSET
-                && zlcf->max_length >= 0
-                && ctx->bytes_in > (uint64_t) zlcf->max_length)
+            if (ngx_http_zstd_max_length_exceeded(ctx->bytes_in,
+                                                   zlcf->max_length))
             {
                 ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                               "zstd: input exceeded zstd_max_length (%O) on a "
