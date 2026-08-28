@@ -4637,10 +4637,10 @@ ngx_http_zstd_estimate_cctx_memory(ngx_conf_t *cf,
  * floor is NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG -- returning less would push an
  * invalid windowLog into libzstd. The floor is itself estimated and checked
  * like every other candidate, rather than assumed to fit by falling out of
- * the loop unevaluated. If not even the minimum window fits, the cap is the
- * minimum anyway: the existing nginx -t gate is what refuses an impossible
- * budget, and this function must not invent a second, differently-worded
- * rejection for the same config.
+ * the loop unevaluated. The floor cannot actually fail to fit once the
+ * caller's gate has passed -- see the invariant argument at the pin below
+ * -- so the fallthrough pins to the floor rather than raising a second,
+ * differently-worded rejection for a config the gate already vetted.
  *
  * Writes 0 ("no cap") and succeeds when no budget is configured -- the
  * default, where dcz behaviour must be exactly what it was.
@@ -4682,16 +4682,21 @@ ngx_http_zstd_dcz_window_cap(ngx_conf_t *cf, ngx_http_zstd_loc_conf_t *conf,
      * the cap back to the floor: this function must not return a windowLog
      * below its documented floor.
      *
-     * NOTE: pinning to the floor here is NOT budget enforcement. The hard
-     * gate in the caller estimates against conf->window_log only, so a
-     * location whose conf->window_log fits the budget while even the DCZ
-     * minimum window does not will load successfully and then apply this
-     * floor, exceeding "zstd_max_cctx_memory" on the dcz path. That
-     * enforcement hole predates this loop change (the old wlog > MIN form
-     * returned the same floor, merely unevaluated) and is preserved here
-     * deliberately: rejecting the config instead would turn "nginx -t" from
-     * pass to fail on configurations that load today. Tracked as its own
-     * row; do not "fix" it inside an unrelated change.
+     * The pin is a defensive invariant, not budget enforcement, and needs
+     * no error path: whenever the caller's hard gate passed, this branch
+     * is unreachable. (The search above still does not assume
+     * monotonicity -- that keeps the chosen cap correct under any
+     * libzstd; the argument here is only about whether the fallthrough
+     * can be entered at all.) NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG equals
+     * ZSTD_WINDOWLOG_MIN, so the floor is the smallest window libzstd
+     * accepts, and ZSTD_estimateCStreamSize_usingCCtxParams() is monotone
+     * non-decreasing in windowLog. The gate estimates at a window that is
+     * never below the floor, hence est(floor) <= est(gate window): a
+     * budget the gate accepted always admits the floor too.
+     *
+     * Two changes would falsify that and require re-examining this branch:
+     * a libzstd whose workspace estimate is non-monotone in windowLog, or
+     * raising NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG above ZSTD_WINDOWLOG_MIN.
      */
     if (wlog < NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG) {
         wlog = NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG;

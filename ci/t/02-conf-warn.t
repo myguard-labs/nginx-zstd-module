@@ -654,3 +654,36 @@ symlink $real, "$root/html/current"
 a symlink at any component is refused, not followed
 --- no_error_log
 [alert]
+
+
+
+=== TEST 23: a tight zstd_max_cctx_memory without dcz dictionaries still loads
+# Regression pin for the dcz window-cap floor. ngx_http_zstd_dcz_window_cap()
+# walks down from NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG and, if nothing fit, pins
+# the cap to NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG and succeeds rather than
+# rejecting. That permissive fallthrough must stay permissive: a budget the
+# hard gate accepted has to keep loading, so the cap computation can never
+# turn a working "nginx -t" into a failure. Level 1 at the default window
+# estimates ~1.37 MB (libzstd 1.5.7), so 2m is tight but satisfiable — the
+# budget path is genuinely exercised rather than trivially slack, and the
+# location configures no zstd_dcz_dict_file, which is the scoping that makes
+# the dcz clamp irrelevant here. Asserts a served response, not merely a
+# start, so a config that loads but breaks compression still fails.
+--- config
+    location /budget {
+        zstd on;
+        zstd_min_length 1;
+        zstd_comp_level 1;
+        zstd_max_cctx_memory 2m;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "hello world padding padding padding padding padding\n";
+    }
+--- request
+GET /budget
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
