@@ -80,12 +80,15 @@ if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
         ngx_zstd_static_archive="libzstd.a"
     fi
 
-    # we try the static library first. The define rides CFLAGS (a flag
-    # context); the module compiles fine without it, but keeping it
-    # preserves the historical compile environment for these builds.
+    # we try the static library first. The define is only a candidate here:
+    # it rides ngx_zstd_opt_I for the probe, and is committed to CFLAGS (a
+    # flag context every source file sees) ONLY once the static archive is
+    # actually confirmed below. If it were added to CFLAGS unconditionally,
+    # a subsequent dynamic-library fallback would compile against
+    # ZSTDLIB_STATIC_API declarations while linking a shared object whose
+    # ABI does not guarantee them -- see the dynamic branch's comment.
     ngx_zstd_opt_I="-I$ZSTD_INC -DZSTD_STATIC_LINKING_ONLY"
     ngx_zstd_incs="$ZSTD_INC"
-    CFLAGS="$CFLAGS -DZSTD_STATIC_LINKING_ONLY"
     ngx_zstd_opt_L="$ZSTD_LIB/$ngx_zstd_static_archive"
     SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
     CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
@@ -98,9 +101,22 @@ if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
     CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
     NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
 
-    if [ $ngx_found = no ]; then
-        # then try the dynamic shared library
+    if [ $ngx_found = yes ]; then
+        # Static archive confirmed: commit the define to CFLAGS so every
+        # source file compiles with the experimental API visible, matching
+        # what was just probed and linked.
+        CFLAGS="$CFLAGS -DZSTD_STATIC_LINKING_ONLY"
+    else
+        # then try the dynamic shared library. Do NOT carry
+        # -DZSTD_STATIC_LINKING_ONLY into this probe or into CFLAGS: the
+        # experimental (ZSTDLIB_STATIC_API) section has no stable ABI
+        # guarantee, so a module built against it but linked dynamically
+        # would import symbols (ZSTD_createCCtxParams and friends) that a
+        # future libzstd.so is free to remove or reshape. ngx_zstd_opt_I is
+        # reset to plain -I so downstream consumers (ngx_module_incs, the
+        # version-probe below) see the dynamic build's real flags.
         ngx_feature="ZStandard dynamic library in $ZSTD_INC and $ZSTD_LIB"
+        ngx_zstd_opt_I="-I$ZSTD_INC"
         if [ "${NGX_PLATFORM:-}" = win32 ]; then
             # MinGW produces PE/COFF modules. Its linker has no ELF runtime
             # search path to encode, and --enable-new-dtags/-rpath are either

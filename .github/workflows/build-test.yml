@@ -835,9 +835,13 @@ jobs:
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
           cd "nginx-${NGINX_VERSION}"
           # ZSTD_INC/ZSTD_LIB tell the module's filter/config to pick up
-          # the private libzstd 1.4.x build, not the system one. No
-          # -DZSTD_STATIC_LINKING_ONLY here on purpose: the fallback
-          # paths must compile under the plain dynamic-link build too.
+          # the private libzstd 1.4.x build, not the system one. This
+          # prefix has no libzstd.a (install-shared only, above), so
+          # auto/zstd's static probe fails and it falls back to the
+          # dynamic -lzstd retry, which auto/zstd no longer builds with
+          # -DZSTD_STATIC_LINKING_ONLY (see the symbol-import assertion
+          # below): the fallback paths must compile clean under the plain
+          # dynamic-link build too, without ZSTDLIB_STATIC_API imports.
           ZSTD_INC="$ZSTD_INC" ZSTD_LIB="$ZSTD_LIB" \
             ./configure \
               --with-compat \
@@ -859,6 +863,30 @@ jobs:
           # through the dynamic auto-discovery path).
           echo "LD_LIBRARY_PATH=$ZSTD_LIB" >> "$GITHUB_ENV"
           echo "TEST_NGINX_BINARY=$PWD/objs/nginx" >> "$GITHUB_ENV"
+
+      - name: Assert no static-only libzstd symbols leaked into the dynamic build
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+          # This job's private libzstd was built with install-shared only
+          # (no libzstd.a), so auto/zstd's static probe must have failed
+          # and fallen back to the dynamic -lzstd retry. That retry must
+          # NOT carry -DZSTD_STATIC_LINKING_ONLY: those declarations
+          # (ZSTDLIB_STATIC_API) have no stable ABI, so importing them
+          # into a dynamically linked module is unsupported even when the
+          # symbols happen to resolve today. Confirm none of the four
+          # static-only entry points the module's estimator/params code
+          # can reference are undefined imports of this binary.
+          ls "$HOME"/zstd14/lib/libzstd.a 2>/dev/null && \
+            { echo "FAIL: static archive present, this leg no longer tests the dynamic-only fallback"; exit 1; }
+          for sym in ZSTD_createCCtxParams ZSTD_CCtxParams_setParameter \
+                     ZSTD_estimateCStreamSize_usingCCtxParams ZSTD_freeCCtxParams; do
+            if nm -D --undefined-only objs/nginx | awk '{print $NF}' | grep -qx "$sym"; then
+              echo "FAIL: dynamic-only build imports static-only symbol $sym"
+              exit 1
+            fi
+          done
+          echo "✓ dynamic-only libzstd build carries no ZSTDLIB_STATIC_API imports"
 
       - name: Assert the private 1.4.x HEADERS were really compiled against
         run: |
