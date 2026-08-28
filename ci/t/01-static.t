@@ -1345,3 +1345,228 @@ Content-Encoding: zstd
 --- error_code: 200
 --- no_error_log
 [error]
+
+
+
+=== TEST 47: dictionary bypass defaults off and the sidecar still wins
+# This is the default-value negative control. A dictionary-carrying client
+# explicitly accepts dcz, but without zstd_static_dict_bypass the static
+# handler keeps its historical first claim on the response.
+--- config
+    location /test {
+        zstd_static on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd, dcz
+Available-Dictionary: :AA==:
+--- response_headers
+Content-Length: 3717
+ETag: "5be17d33-e85"
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 48: dictionary bypass requires Available-Dictionary
+# Explicit dcz alone must not forfeit a usable sidecar.
+--- config
+    location /test {
+        zstd_static on;
+        zstd_static_dict_bypass on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd, dcz
+--- response_headers
+Content-Length: 3717
+ETag: "5be17d33-e85"
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 49: dictionary bypass does not treat wildcard as dcz
+# RFC 9842 requires an explicit dcz token; '*' cannot prove the client can
+# decode a dictionary response.
+--- config
+    location /test {
+        zstd_static on;
+        zstd_static_dict_bypass on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd, *
+Available-Dictionary: :AA==:
+--- response_headers
+Content-Length: 3717
+ETag: "5be17d33-e85"
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 50: dictionary bypass honors dcz q=0 across duplicate fields
+# Repeated Accept-Encoding lines are one list. An explicit refusal on either
+# line wins, so this stays on the sidecar path.
+--- config
+    location /test {
+        zstd_static on;
+        zstd_static_dict_bypass on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd, dcz
+Accept-Encoding: dcz;q=0
+Available-Dictionary: :AA==:
+--- response_headers
+Content-Length: 3717
+ETag: "5be17d33-e85"
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 51: dictionary bypass also applies to zstd_static always
+# The bypass is a preference for the filter path, so it must precede the
+# always-mode shortcut. With no filter configured here, core serves identity;
+# the complete Vary key keeps that fallback separate from the sidecar.
+--- config
+    location /test {
+        zstd_static always;
+        zstd_static_dict_bypass on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd, dcz
+Available-Dictionary: :AA==:
+--- response_headers
+Content-Length: 59738
+ETag: "5be17d33-e95a"
+! Content-Encoding
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
+--- no_error_log
+[error]
+
+
+
+=== TEST 52: dictionary bypass inherits into a location
+--- config
+    zstd_static on;
+    zstd_static_dict_bypass on;
+
+    location /test {
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd, dcz
+Available-Dictionary: :AA==:
+--- response_headers
+Content-Length: 59738
+ETag: "5be17d33-e95a"
+! Content-Encoding
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
+--- no_error_log
+[error]
+
+
+
+=== TEST 53: location off overrides inherited dictionary bypass
+--- config
+    zstd_static on;
+    zstd_static_dict_bypass on;
+
+    location /test {
+        zstd_static_dict_bypass off;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd, dcz
+Available-Dictionary: :AA==:
+--- response_headers
+Content-Length: 3717
+ETag: "5be17d33-e85"
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 54: HEAD dictionary bypass keeps the cache partition
+# The response filter deliberately does not encode header-only responses, so
+# the static handler must emit the complete Vary key before declining.
+--- config
+    location /test {
+        zstd_static on;
+        zstd_static_dict_bypass on;
+        root ../suite;
+    }
+--- request
+HEAD /test
+--- more_headers
+Accept-Encoding: zstd, dcz
+Available-Dictionary: :AA==:
+--- response_headers
+Content-Length: 59738
+ETag: "5be17d33-e95a"
+! Content-Encoding
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
+--- no_error_log
+[error]
+
+
+
+=== TEST 55: dictionary bypass preserves a subrequest sidecar
+# auth_request drives /only/test as a real subrequest. The response filter
+# refuses every subrequest, so the static handler must ignore dictionary
+# bypass there. Only the .zst sidecar exists: removing the r == r->main guard
+# makes the subrequest fall through to a 404 and the parent return 500.
+--- config
+    location = /main {
+        auth_request /only/test;
+        root html;
+    }
+
+    location = /only/test {
+        internal;
+        zstd_static always;
+        zstd_static_dict_bypass on;
+        root html;
+    }
+--- user_files eval
+open my $fixture, '<:raw', 'ci/t/suite/test.zst'
+    or die "open zstd fixture: $!";
+local $/;
+my $zst = <$fixture>;
+close $fixture or die "close zstd fixture: $!";
+[
+    [ 'main' => "main response\n" ],
+    [ 'only/test.zst' => $zst ],
+]
+--- request
+GET /main
+--- more_headers
+Accept-Encoding: zstd, dcz
+Available-Dictionary: :AA==:
+--- response_body
+main response
+--- no_error_log
+[error]

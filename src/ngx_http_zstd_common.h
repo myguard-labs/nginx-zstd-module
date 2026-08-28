@@ -709,6 +709,108 @@ ngx_http_zstd_push_header(ngx_http_request_t *r, const char *key,
 }
 
 
+static ngx_inline ngx_uint_t
+ngx_http_zstd_vary_has_token(ngx_http_request_t *r, const char *token,
+    size_t token_len)
+{
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h;
+
+    for (part = &r->headers_out.headers.part, h = part->elts, i = 0;
+         /* void */;
+         i++)
+    {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].hash == 0
+            || h[i].key.len != sizeof("Vary") - 1
+            || ngx_strncasecmp(h[i].key.data, (u_char *) "Vary",
+                               sizeof("Vary") - 1) != 0)
+        {
+            continue;
+        }
+
+        {
+            u_char  *end, *p, *start;
+
+            p = h[i].value.data;
+            end = p + h[i].value.len;
+
+            while (p < end) {
+                while (p < end && (*p == ' ' || *p == '\t' || *p == ',')) {
+                    p++;
+                }
+
+                start = p;
+                while (p < end && *p != ',') {
+                    p++;
+                }
+
+                while (p > start && (p[-1] == ' ' || p[-1] == '\t')) {
+                    p--;
+                }
+
+                if ((size_t) (p - start) == token_len
+                    && ngx_strncasecmp(start, (u_char *) token,
+                                       token_len) == 0)
+                {
+                    return 1;
+                }
+
+                while (p < end && *p != ',') {
+                    p++;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+
+/*
+ * Add the two request-header dimensions that can select a dcz response.
+ * The static content handler and the response filter can both reach this
+ * helper on one request. Detect tokens across every active Vary field, so
+ * repeated calls and fields flattened or reordered by another filter remain
+ * duplicate-free.
+ */
+static ngx_inline ngx_int_t
+ngx_http_zstd_vary_dcz(ngx_http_request_t *r)
+{
+    ngx_uint_t  has_available_dictionary, has_sec_fetch_site;
+
+    has_available_dictionary = ngx_http_zstd_vary_has_token(
+        r, "Available-Dictionary", sizeof("Available-Dictionary") - 1);
+    has_sec_fetch_site = ngx_http_zstd_vary_has_token(
+        r, "Sec-Fetch-Site", sizeof("Sec-Fetch-Site") - 1);
+
+    if (has_available_dictionary && has_sec_fetch_site) {
+        return NGX_OK;
+    }
+
+    if (has_available_dictionary) {
+        return ngx_http_zstd_push_header(r, "Vary", "Sec-Fetch-Site");
+    }
+
+    if (has_sec_fetch_site) {
+        return ngx_http_zstd_push_header(r, "Vary", "Available-Dictionary");
+    }
+
+    return ngx_http_zstd_push_header(
+        r, "Vary", "Available-Dictionary, Sec-Fetch-Site");
+}
+
+
 /*
  * ngx_http_zstd_vary_accept_encoding()
  *
@@ -749,11 +851,11 @@ ngx_http_zstd_push_header(ngx_http_request_t *r, const char *key,
  * compatible with that module where relying on its default-off
  * directive was not.
  *
- * Callers must invoke this at most once per response, and only on a
- * path that is genuinely Accept-Encoding-dependent. "zstd_static
- * always" deliberately does NOT call it: it ignores Accept-Encoding,
- * so its response is not a negotiated variant and must not claim to
- * vary on one.
+ * Repeated calls are safe because the response-header scan above makes
+ * this helper idempotent. Call it only on a path that is genuinely
+ * Accept-Encoding-dependent. "zstd_static always" normally does not call
+ * it because that mode ignores Accept-Encoding; the explicit dictionary
+ * bypass is the exception, since its routing predicate reads that field.
  *
  * Returns NGX_OK, or NGX_ERROR when the header-list allocation fails.
  *
@@ -764,9 +866,6 @@ ngx_http_zstd_push_header(ngx_http_request_t *r, const char *key,
 static ngx_inline ngx_int_t
 ngx_http_zstd_vary_accept_encoding(ngx_http_request_t *r)
 {
-    ngx_uint_t                 i;
-    ngx_table_elt_t           *h;
-    ngx_list_part_t           *part;
     ngx_http_core_loc_conf_t  *clcf;
 
     r->gzip_vary = 1;
@@ -778,102 +877,10 @@ ngx_http_zstd_vary_accept_encoding(ngx_http_request_t *r)
         return NGX_OK;
     }
 
-    /*
-     * Idempotence, and it is NOT theoretical: the filter and the static
-     * handler are separate modules that both reach this helper on one
-     * request. With "zstd_static on" + "zstd on" + "gzip_vary off", a
-     * non-accepting client makes the static handler emit the field and
-     * DECLINE, after which the filter emits it again on the identity
-     * response it then also declines to encode -- two identical Vary
-     * lines, breaking the exactly-one contract this function exists to
-     * keep. (Observed on PR #163 before this guard: `curl -H
-     * "Accept-Encoding: gzip"` returned two "Vary: Accept-Encoding"
-     * fields.)
-     *
-     * A request-local flag would need a ctx that the static handler
-     * does not own, so scan the response header list instead. It is
-     * short at this point (the modules run before most header-emitting
-     * filters) and this runs at most twice per response. Scanning also
-     * makes the helper safe against a Vary: Accept-Encoding pushed by
-     * any OTHER module, not just our own second call.
-     *
-     * The token compare is case-insensitive on both field name and
-     * value, per RFC 9110: field names are case-insensitive, and the
-     * field values here are header NAMES, which are too.
-     */
-    for (part = &r->headers_out.headers.part, h = part->elts, i = 0;
-         /* void */;
-         i++)
+    if (ngx_http_zstd_vary_has_token(
+            r, "Accept-Encoding", sizeof("Accept-Encoding") - 1))
     {
-        if (i >= part->nelts) {
-            if (part->next == NULL) {
-                break;
-            }
-            part = part->next;
-            h = part->elts;
-            i = 0;
-        }
-
-        if (h[i].hash == 0) {
-            continue;
-        }
-
-        if (h[i].key.len == sizeof("Vary") - 1
-            && ngx_strncasecmp(h[i].key.data, (u_char *) "Vary",
-                               sizeof("Vary") - 1) == 0)
-        {
-            /*
-             * Check if "Accept-Encoding" is among the comma-separated tokens
-             * in the Vary value. Parse as comma-separated tokens, trim
-             * whitespace, and compare case-insensitively.
-             */
-            u_char  *p = h[i].value.data;
-            u_char  *end = h[i].value.data + h[i].value.len;
-
-            while (p < end) {
-                u_char  *token_start, *token_end;
-
-                /* Skip leading whitespace */
-                while (p < end && (*p == ' ' || *p == '\t')) {
-                    p++;
-                }
-
-                if (p >= end) {
-                    break;
-                }
-
-                token_start = p;
-
-                /* Find end of token (comma or end of string) */
-                while (p < end && *p != ',') {
-                    p++;
-                }
-
-                token_end = p;
-
-                /* Trim trailing whitespace from token */
-                while (token_end > token_start
-                       && (*(token_end - 1) == ' '
-                           || *(token_end - 1) == '\t'))
-                {
-                    token_end--;
-                }
-
-                /* Check if this token is "Accept-Encoding" */
-                if (token_end - token_start == sizeof("Accept-Encoding") - 1
-                    && ngx_strncasecmp(token_start,
-                                       (u_char *) "Accept-Encoding",
-                                       sizeof("Accept-Encoding") - 1) == 0)
-                {
-                    return NGX_OK;
-                }
-
-                /* Skip past the comma */
-                if (p < end && *p == ',') {
-                    p++;
-                }
-            }
-        }
+        return NGX_OK;
     }
 
     return ngx_http_zstd_push_header(r, "Vary", "Accept-Encoding");

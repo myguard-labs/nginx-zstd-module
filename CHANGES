@@ -1,5 +1,17 @@
 Changes with http-zstd
 
+    *) Feature: "zstd_static_dict_bypass on" makes the precompressed
+       static handler stand aside when a main request carries
+       Available-Dictionary and explicitly accepts dcz, allowing the
+       filter module to negotiate the dictionary response first. The
+       opt-in applies to both "zstd_static on" and "always", inherits
+       across http/server/location configuration, and emits the complete
+       Accept-Encoding / Available-Dictionary / Sec-Fetch-Site Vary key
+       before declining. The default remains off; when a later dcz policy
+       or dictionary match fails, the skipped sidecar is not revisited and
+       the filter falls back to ordinary zstd or identity without allowing
+       a shared cache to cross that routing decision.
+
     *) Feature: "zstd_dcz_dict_trust_hashes on" opts out of verifying a
        supplied dictionary hash literal against the file's bytes: the
        literal is trusted verbatim as the negotiation key and the

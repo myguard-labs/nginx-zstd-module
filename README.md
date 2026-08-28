@@ -46,6 +46,7 @@ This is a hardened fork: every push/PR is exercised against **nginx mainline**, 
     * [zstd_dcz_assume_secure_transport](#zstd_dcz_assume_secure_transport)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
     * [zstd_static](#zstd_static)
+    * [zstd_static_dict_bypass](#zstd_static_dict_bypass)
 * [Variables](#variables)
   * [$zstd_ratio](#zstd_ratio)
   * [$zstd_bytes_in](#zstd_bytes_in)
@@ -236,7 +237,11 @@ This filter module compresses responses on the fly using zstd. It runs after the
 >
 > This used to be a deployment prerequisite backed only by a config-load warning: with the default `gzip_vary off`, nginx *suppresses* the header entirely, so a single overlooked location shipped zstd bodies that a shared cache would then hand to clients unable to decode them. Correctness now belongs to the module rather than to an operator directive, and the warning is gone with it. `gzip_vary on` remains perfectly fine to set (it also covers other encoders such as `gzip`); it is simply no longer load-bearing for zstd.
 >
-> `zstd_static always` is deliberately excluded: it ignores `Accept-Encoding` entirely, so its response is not a negotiated variant and correctly carries no `Vary: Accept-Encoding`.
+> `zstd_static always` is deliberately excluded when
+> [`zstd_static_dict_bypass`](#zstd_static_dict_bypass) is off: it then ignores
+> `Accept-Encoding` entirely, so its response is not a negotiated variant and
+> correctly carries no `Vary: Accept-Encoding`. The opt-in bypass is the stated
+> exception because it routes dictionary-aware requests by that field.
 >
 > Interoperating with [ngx_http_compression_vary_filter_module](https://github.com/HanadaLee/ngx_http_compression_vary_filter_module) is safe in every combination. That module emits and *flattens* `Vary` from `r->gzip_vary`, which this module still sets; because it folds the fields it finds rather than appending blindly, the header this module emits is merged rather than doubled. With `compression_vary off` (its default) this module's own emission still covers you — previously that exact combination produced no `Vary` at all, which is the residual risk the old summary warning existed to describe. CI asserts the single-`Vary` contract against the real module in both of its states.
 
@@ -1112,11 +1117,19 @@ Controls how pre-compressed `.zst` files are served.
 |---|---|
 | `off` | Disabled. Always serve the original file. |
 | `on` | Check whether the client supports zstd (`Accept-Encoding: zstd`). If yes and a `.zst` file exists, serve it. Otherwise fall back to the original. Emits `Vary: Accept-Encoding` automatically on both outcomes. |
-| `always` | Always serve the `.zst` file if it exists, regardless of `Accept-Encoding`. Use this when you know all clients support zstd (e.g. internal services). |
+| `always` | Serve the `.zst` file if it exists regardless of `Accept-Encoding`, except for dictionary-aware requests when [`zstd_static_dict_bypass`](#zstd_static_dict_bypass) is enabled. Use this when you know all other clients support zstd (e.g. internal services). |
 
-When set to `on`, the module emits a `Vary: Accept-Encoding` response header itself as soon as a `.zst` sibling makes the URI depend on `Accept-Encoding` — including on the fallback path where the client does not accept zstd and the original file is served. Correct caching by proxies and CDNs therefore does not require [`gzip_vary`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_vary); setting `gzip_vary on` is compatible and never produces a duplicate header. `zstd_static always` ignores `Accept-Encoding` and emits no `Vary`.
+When set to `on`, the module emits a `Vary: Accept-Encoding` response header itself as soon as a `.zst` sibling makes the URI depend on `Accept-Encoding` — including on the fallback path where the client does not accept zstd and the original file is served. Correct caching by proxies and CDNs therefore does not require [`gzip_vary`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_vary); setting `gzip_vary on` is compatible and never produces a duplicate header. With [`zstd_static_dict_bypass`](#zstd_static_dict_bypass) off, `zstd_static always` ignores `Accept-Encoding` and emits no `Vary`; the opt-in bypass is the exception described below.
 
-> **Warning (`always` mode):** When `zstd_static always` is set, `.zst` files are served to every client regardless of whether they advertise `Accept-Encoding: zstd`. No `Vary` header is emitted and no `Content-Encoding` negotiation occurs. Any client that does not support zstd will receive a compressed body it cannot decode. Only use `always` on locations where every client is guaranteed to support zstd — for example, internal service-to-service calls where you control both ends.
+> **Warning (`always` mode):** When `zstd_static always` is set and
+> `zstd_static_dict_bypass` is off, `.zst` files are served to every client
+> regardless of whether they advertise `Accept-Encoding: zstd`. No `Vary`
+> header is emitted and no `Content-Encoding` negotiation occurs. With the
+> bypass on, matching dictionary-aware requests stand aside with the complete
+> cache key instead. Any remaining client that does not support zstd will
+> receive a compressed body it cannot decode. Only use `always` on locations
+> where every non-bypassed client is guaranteed to support zstd — for example,
+> internal service-to-service calls where you control both ends.
 
 > **Magic-number validation.** Before serving a `.zst`, the module reads the first bytes of the file (one `pread(2)` at offset 0) and verifies they are the zstd frame magic (`ZSTD_MAGICNUMBER` `0xFD2FB528`) or a skippable-frame magic (`ZSTD_MAGIC_SKIPPABLE_*`). On mismatch — a truncated download, mistaken rename (`cp foo.txt foo.zst`), or any other non-zstd content — the handler logs `zstd static: "..." is not a zstd frame (leading bytes 0x...)` and **declines**; nginx then falls back to serving the uncompressed original, or returns 404 if no original is present. Without this, the client would receive a body labelled `Content-Encoding: zstd` that it cannot decode. The read is offset-explicit so it never disturbs the file position of the `open_file_cache` descriptor shared with other in-flight requests: `pread(2)` on POSIX, `ngx_read_file()` (a `ReadFile()` with an `OVERLAPPED` offset) on Win32. The verdict logic is a single shared function, so both platforms accept and reject exactly the same files. The probe is compiled out only on a POSIX build whose `configure` found no `pread(2)`, rather than degraded to a `read`+`lseek` pair that would corrupt those concurrent requests.
 >
@@ -1138,6 +1151,29 @@ Pre-compress files with a matching level to your workload:
 ```bash
 zstd -3 -k /var/www/static/app.js   # creates app.js.zst alongside app.js
 ```
+
+### zstd_static_dict_bypass
+
+**Syntax:** `zstd_static_dict_bypass on | off;`
+**Default:** `zstd_static_dict_bypass off;`
+**Context:** `http, server, location`
+
+When enabled, `zstd_static` stands aside for a main request that carries any
+`Available-Dictionary` header and explicitly accepts `dcz` with a non-zero
+weight. This lets [`zstd_dcz_dict_file`](#zstd_dcz_dict_file) negotiate a
+dictionary response instead of having the content-phase static handler serve
+the plain `.zst` sidecar first. The check applies in both `zstd_static on` and
+`zstd_static always` modes. Before declining it emits the complete
+`Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site` cache key; the
+filter reuses those idempotent fields when it runs, while an identity fallback
+remains partitioned correctly when the filter is disabled or ineligible.
+
+The directive is deliberately off by default. It is only a routing hint: the
+static module does not validate the advertised digest, dictionary store match,
+secure context, or origin policy. If any later dcz gate rejects the request,
+the filter produces an ordinary zstd or identity response instead of returning
+to the skipped sidecar. Enable it only on locations whose dictionary-aware
+clients should prefer runtime dcz negotiation over a precompressed sidecar.
 
 ---
 

@@ -138,6 +138,7 @@
 
 typedef struct {
     ngx_uint_t  enable;
+    ngx_flag_t  dict_bypass;
 } ngx_http_zstd_static_conf_t;
 
 
@@ -202,11 +203,19 @@ static ngx_command_t  ngx_http_zstd_static_commands[] = {
       offsetof(ngx_http_zstd_static_conf_t, enable),
       &ngx_http_zstd_static },
 
+    { ngx_string("zstd_static_dict_bypass"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_zstd_static_conf_t, dict_bypass),
+      NULL },
+
     ngx_null_command
 };
 
 
 static ngx_int_t ngx_http_zstd_static_handler(ngx_http_request_t *r);
+static ngx_uint_t ngx_http_zstd_static_should_bypass(ngx_http_request_t *r);
 static void * ngx_http_zstd_static_create_main_conf(ngx_conf_t *cf);
 static void * ngx_http_zstd_static_create_loc_conf(ngx_conf_t *cf);
 static char * ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent,
@@ -770,6 +779,45 @@ ngx_http_zstd_static_dio_buf_release(void)
 #endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */
 
 
+static ngx_uint_t
+ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
+{
+    /*
+     * Do not validate Available-Dictionary or consult the configured
+     * dictionary store here: those are filter-owned policy.  This cheap
+     * routing predicate only asks whether the filter should get the request.
+     */
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *headers;
+
+    part = &r->headers_in.headers.part;
+    headers = part->elts;
+
+    for (i = 0; /* void */; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                return 0;
+            }
+
+            part = part->next;
+            headers = part->elts;
+            i = 0;
+        }
+
+        if (headers[i].key.len == sizeof("Available-Dictionary") - 1
+            && ngx_strncasecmp(headers[i].key.data,
+                               (u_char *) "Available-Dictionary",
+                               sizeof("Available-Dictionary") - 1) == 0)
+        {
+            return ngx_http_zstd_chain_coding_weight(
+                       r->headers_in.accept_encoding, "dcz",
+                       sizeof("dcz") - 1, 0) > 0;
+        }
+    }
+}
+
+
 static ngx_int_t
 ngx_http_zstd_static_handler(ngx_http_request_t *r)
 {
@@ -800,6 +848,30 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     zscf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_static_module);
 
     if (zscf->enable == NGX_HTTP_ZSTD_STATIC_OFF) {
+        return NGX_DECLINED;
+    }
+
+    /*
+     * The static content handler runs before the response filter can
+     * negotiate RFC 9842 dcz.  With this opt-in, stand aside when the
+     * client both presents a dictionary and explicitly accepts dcz, so
+     * the ordinary content handler and zstd filter get that opportunity.
+     * This deliberately precedes every static Vary/probe side effect,
+     * applies to "always" as well as "on", and stays limited to main
+     * requests because the dcz filter rejects subrequests.
+     */
+    if (zscf->dict_bypass && r == r->main
+        && ngx_http_zstd_static_should_bypass(r))
+    {
+        if (ngx_http_zstd_vary_accept_encoding(r) != NGX_OK
+            || ngx_http_zstd_vary_dcz(r) != NGX_OK)
+        {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd static: standing aside for dcz dictionary "
+                       "negotiation");
         return NGX_DECLINED;
     }
 
@@ -1472,10 +1544,9 @@ ngx_http_zstd_static_create_loc_conf(ngx_conf_t *cf)
     ngx_http_zstd_static_conf_t  *conf;
 
     /*
-     * ngx_palloc(), not ngx_pcalloc(): the struct's one field is
-     * unconditionally overwritten two lines below, before anything can
-     * read it, so zero-filling it first is dead work. Do NOT copy this
-     * substitution to a conf struct with more than one field, or one
+     * ngx_palloc(), not ngx_pcalloc(): both fields are unconditionally
+     * overwritten below before anything can read them, so zero-filling
+     * first is dead work. Do NOT copy this substitution to a conf struct
      * whose fields are conditionally written — the main conf
      * (ngx_http_zstd_static_main_conf_t.any_enabled) deliberately
      * depends on zero-init and must stay ngx_pcalloc().
@@ -1486,6 +1557,7 @@ ngx_http_zstd_static_create_loc_conf(ngx_conf_t *cf)
     }
 
     conf->enable = NGX_CONF_UNSET_UINT;
+    conf->dict_bypass = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -1499,6 +1571,7 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_uint_value(conf->enable, prev->enable,
                               NGX_HTTP_ZSTD_STATIC_OFF);
+    ngx_conf_merge_value(conf->dict_bypass, prev->dict_bypass, 0);
 
     /*
      * G5: there is no longer a gzip_vary-off warning here. The content
@@ -1506,9 +1579,10 @@ ngx_http_zstd_static_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
      * variant makes this URI Accept-Encoding-dependent (see
      * ngx_http_zstd_vary_accept_encoding()), so the header no longer
      * depends on the operator setting "gzip_vary on", and warning
-     * about that directive would be misleading. "always" still never
+     * about that directive would be misleading. "always" normally never
      * varies, by construction rather than by warning: it ignores
-     * Accept-Encoding and the handler does not emit the field for it.
+     * Accept-Encoding. zstd_static_dict_bypass is the explicit exception,
+     * because its routing decision consumes that request field.
      */
 
     return NGX_CONF_OK;

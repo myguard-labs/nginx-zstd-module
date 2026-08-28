@@ -1531,10 +1531,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
      * Available-Dictionary token must not drop this one.
      */
     if (zlcf->dcz_dicts != NULL && zlcf->dcz_dicts->nelts > 0) {
-        if (ngx_http_zstd_push_header(r, "Vary",
-                                       "Available-Dictionary, Sec-Fetch-Site")
-            != NGX_OK)
-        {
+        if (ngx_http_zstd_vary_dcz(r) != NGX_OK) {
             return NGX_ERROR;
         }
     }

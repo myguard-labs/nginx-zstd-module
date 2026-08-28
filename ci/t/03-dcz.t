@@ -1128,3 +1128,57 @@ hashed=1
 invalid dcz dictionary hash
 --- no_error_log
 [alert]
+
+
+
+=== TEST 45: static sidecar keeps priority when dictionary bypass is absent
+# Default-off compatibility control. Both dictionary negotiation inputs are
+# present, but the existing sidecar remains the selected representation.
+--- config
+    location /test {
+        zstd on;
+        zstd_types *;
+        zstd_min_length 1;
+        zstd_static on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        root $TEST_NGINX_PERL_PATH/suite;
+    }
+--- request
+GET /test
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Length: 3717
+ETag: "5be17d33-e85"
+Content-Encoding: zstd
+Vary: Accept-Encoding
+--- no_error_log
+[error]
+
+
+
+=== TEST 46: static dictionary bypass lets the filter negotiate dcz
+# The weak origin ETag and missing sidecar Content-Length distinguish this
+# response from TEST 45's precompressed representation, while the combined
+# Vary proves the static handler declined before emitting its own header.
+--- config
+    location /test {
+        zstd on;
+        zstd_types *;
+        zstd_min_length 1;
+        zstd_static on;
+        zstd_static_dict_bypass on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        root $TEST_NGINX_PERL_PATH/suite;
+    }
+--- request
+GET /test
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+! Content-Length
+ETag: W/"5be17d33-e95a"
+Content-Encoding: dcz
+Vary: Accept-Encoding, Available-Dictionary, Sec-Fetch-Site
+--- no_error_log
+[error]
