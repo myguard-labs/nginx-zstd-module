@@ -1394,7 +1394,7 @@ case_differential_generated(void)
 
 
 /*
- * Two named pins on the cursor contract, so a mutation that survives the
+ * Three named pins on the cursor contract, so a mutation that survives the
  * differential (it cannot -- but a pin is cheaper to read than a diff
  * dump) has a value-stating check as well.
  */
