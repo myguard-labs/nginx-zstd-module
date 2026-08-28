@@ -111,7 +111,10 @@ echo "OK: dcz window-log unit fixture (extracted from current $SRC)"
 # in ngx_http_zstd_dcz_window_log(). A plain native build on this (64-bit)
 # host has off_t == size_t width and cannot reach either defect -- -m32 with
 # _FILE_OFFSET_BITS=64 is what reproduces it, so it is not optional coverage.
-# Skipped (not failed) when the runner has no 32-bit toolchain at all.
+# Skipped (not failed) when the runner has no 32-bit toolchain at all --
+# UNLESS REQUIRE_M32=1, in which case a missing toolchain is a hard failure
+# rather than a silent skip (set in CI so a runner image that drops
+# multilib loses this lens loudly, not quietly).
 if "$CC" -m32 -x c -o /dev/null - <<<'int main(void){return 0;}' \
     >/dev/null 2>&1
 then
@@ -119,6 +122,9 @@ then
         -o "$OUT/dcz_window_log_unit_ilp32" "$OUT/test_dcz_window_log_unit.c"
     "$OUT/dcz_window_log_unit_ilp32"
     echo "OK: dcz window-log unit fixture (ILP32 + LFS, off_t wider than size_t)"
+elif [ "${REQUIRE_M32:-0}" = "1" ]; then
+    echo "FAIL: no -m32 toolchain available and REQUIRE_M32=1; ILP32/LFS pass cannot run" >&2
+    exit 1
 else
     echo "SKIP: no -m32 toolchain available; ILP32/LFS pass not run" >&2
 fi

@@ -163,6 +163,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            gcc-multilib \
             libpcre2-dev \
             zlib1g-dev \
             shellcheck \
@@ -258,6 +259,12 @@ jobs:
           bash "$GITHUB_WORKSPACE"/ci/tools/test_cctx_profile_pack.sh
 
       - name: dcz window-log unit fixture (clamps + range)
+        env:
+          # gcc-multilib is installed above, so a missing -m32 toolchain
+          # here means the runner image regressed, not that multilib is
+          # optionally absent -- fail loudly instead of silently losing
+          # the 32-bit off_t lens (see the scripts' own comments).
+          REQUIRE_M32: "1"
         run: |
           # ngx_http_zstd_dcz_window_log() is the single source of truth for
           # a value derived in TWO places that must never disagree: the CCtx

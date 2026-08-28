@@ -91,7 +91,9 @@ echo "OK: max_length cap unit fixture (extracted from current $SRC)"
 # off_t (glibc's legacy 32-bit off_t), which is what this cap's comment
 # describes and what reproduces the cast losing bits. Not optional
 # coverage; skipped (not failed) when the runner has no 32-bit toolchain
-# at all.
+# at all -- UNLESS REQUIRE_M32=1, in which case a missing toolchain is a
+# hard failure rather than a silent skip (set in CI so a runner image that
+# drops multilib loses this lens loudly, not quietly).
 if "$CC" -m32 -x c -o /dev/null - <<<'int main(void){return 0;}' \
     >/dev/null 2>&1
 then
@@ -99,6 +101,9 @@ then
         -o "$OUT/max_length_cap_unit_32off" "$OUT/test_max_length_cap_unit.c"
     "$OUT/max_length_cap_unit_32off"
     echo "OK: max_length cap unit fixture (32-bit off_t, bytes_in > INT32_MAX)"
+elif [ "${REQUIRE_M32:-0}" = "1" ]; then
+    echo "FAIL: no -m32 toolchain available and REQUIRE_M32=1; 32-bit off_t pass cannot run" >&2
+    exit 1
 else
     echo "SKIP: no -m32 toolchain available; 32-bit off_t pass not run" >&2
 fi
