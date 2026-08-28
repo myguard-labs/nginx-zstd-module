@@ -105,13 +105,21 @@ Usage
         --arm-a .build/nginx-1.31.4/objs/nginx:release \\
         --debug-binary .build/nginx-1.31.4/objs/nginx
 
+    # Focus one RFC 9842 lookup cell: 16 configured dictionaries, miss path
+    python3 ci/tools/ab_bench.py \\
+        --arm-a .build/nginx-1.31.4/objs/nginx \\
+        --workload dcz --dcz-dictionaries 16 --dcz-case miss
+
 Exit non-zero only on harness error, never on a "slow" result.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import dataclasses
+import hashlib
+import http.client
 import json
 import os
 import pathlib
@@ -151,6 +159,9 @@ BODY_SIZES: dict[str, int] = {
     "8kb": 8 * 1024,
     "64kb": 64 * 1024,
 }
+
+DCZ_DICTIONARY_COUNTS = (1, 4, 16)
+DCZ_CASES = ("hit", "miss")
 
 # The debug pass drives ONE body-size class (the smaller one, where the
 # cache win is largest -- see the block above) rather than the full mix,
@@ -257,6 +268,101 @@ class WitnessSample:
         if total == 0:
             return None
         return self.reused / total
+
+
+@dataclasses.dataclass(frozen=True)
+class Workload:
+    """Request/config contract for one benchmark run."""
+
+    mode: str
+    headers: tuple[tuple[str, str], ...]
+    expected_encoding: str
+    config: str = ""
+    dictionary_count: int = 0
+    dcz_case: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class PerfAttachment:
+    """perf stat output contract for nginx workers during measured runs."""
+
+    output: pathlib.Path
+    events: str
+
+
+def _available_dictionary(data: bytes) -> str:
+    digest = hashlib.sha256(data).digest()
+    return f":{base64.b64encode(digest).decode('ascii')}:"
+
+
+def _dcz_dictionary(index: int) -> bytes:
+    marker = f"dictionary-{index:02d}".encode()
+    unit = marker + body_bytes(8 * 1024)
+    return unit[: 8 * 1024]
+
+
+def prepare_workload(
+    root: pathlib.Path,
+    mode: str,
+    dictionary_count: int,
+    dcz_case: str,
+) -> Workload:
+    """Create deterministic dcz fixtures and the matching request contract."""
+    if mode == "zstd":
+        return Workload(
+            mode="zstd",
+            headers=(("Accept-Encoding", "zstd"),),
+            expected_encoding="zstd",
+        )
+    if mode != "dcz":
+        raise ValueError(f"unsupported workload: {mode!r}")
+    if dictionary_count not in DCZ_DICTIONARY_COUNTS:
+        raise ValueError(
+            f"dcz dictionary count must be one of {DCZ_DICTIONARY_COUNTS}, "
+            f"got {dictionary_count}"
+        )
+    if dcz_case not in DCZ_CASES:
+        raise ValueError(f"dcz case must be one of {DCZ_CASES}, got {dcz_case!r}")
+
+    dictionary_dir = root / "dictionaries"
+    dictionary_dir.mkdir()
+    configured: list[str] = []
+    directives: list[str] = [
+        "    zstd_dcz_assume_secure_transport on;",
+    ]
+    for index in range(dictionary_count):
+        data = _dcz_dictionary(index)
+        path = dictionary_dir / f"dict-{index:02d}.bin"
+        path.write_bytes(data)
+        configured.append(_available_dictionary(data))
+        digest_hex = hashlib.sha256(data).hexdigest()
+        directives.append(f"    zstd_dcz_dict_file {path} {digest_hex};")
+
+    if dcz_case == "hit":
+        # The lookup walks configuration order, so the last entry exercises
+        # the full configured table just like a miss does.
+        advertised = configured[-1]
+        expected_encoding = "dcz"
+    else:
+        advertised = _available_dictionary(b"unconfigured dcz benchmark dictionary")
+        if advertised in configured:
+            raise RuntimeError(
+                "dcz miss fixture unexpectedly matches a configured hash"
+            )
+        expected_encoding = "zstd"
+
+    return Workload(
+        mode="dcz",
+        headers=(
+            ("Accept-Encoding", "zstd, dcz"),
+            ("Available-Dictionary", advertised),
+            ("Sec-Fetch-Site", "same-origin"),
+        ),
+        expected_encoding=expected_encoding,
+        config="\n".join(directives),
+        dictionary_count=dictionary_count,
+        dcz_case=dcz_case,
+    )
 
 
 def parse_arm(spec: str) -> tuple[str, str]:
@@ -471,6 +577,7 @@ def write_conf(
     workers: int,
     log_level: str,
     comp_level: int,
+    workload: Workload,
 ) -> pathlib.Path:
     load = ""
     filt = arm.filter_module or detect_module(
@@ -503,6 +610,7 @@ http {{
     zstd_comp_level {comp_level};
     zstd_min_length 1;
     zstd_types application/octet-stream;
+{workload.config}
     server {{
         listen 127.0.0.1:{port};
         default_type application/octet-stream;
@@ -530,6 +638,74 @@ def start_nginx(arm: Arm, conf: pathlib.Path, root: pathlib.Path) -> subprocess.
         stdout=log,
         stderr=subprocess.STDOUT,
     )
+
+
+def nginx_worker_pids(master_pid: int, expected: int) -> list[int]:
+    """Wait for and return the exact worker child set of an nginx master."""
+    children_path = pathlib.Path(f"/proc/{master_pid}/task/{master_pid}/children")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            children = [int(pid) for pid in children_path.read_text().split()]
+        except (FileNotFoundError, ProcessLookupError):
+            children = []
+        if len(children) == expected:
+            return children
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"expected {expected} nginx worker pid(s), found {len(children)}"
+    )
+
+
+def start_worker_perf(
+    master_pid: int, workers: int, attachment: PerfAttachment
+) -> subprocess.Popen:
+    """Attach perf only to nginx workers, excluding harness/backend work."""
+    if workers != 1:
+        raise RuntimeError("worker perf attachment requires --workers 1")
+    pids = nginx_worker_pids(master_pid, workers)
+    proc = subprocess.Popen(
+        [
+            "/usr/bin/perf",
+            "stat",
+            "-p",
+            ",".join(str(pid) for pid in pids),
+            "-e",
+            attachment.events,
+            "-o",
+            str(attachment.output),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    time.sleep(0.1)
+    if proc.poll() is not None:
+        stderr = proc.stderr.read() if proc.stderr else ""
+        raise RuntimeError(f"perf stat failed to attach to nginx workers: {stderr}")
+    return proc
+
+
+def stop_worker_perf(proc: subprocess.Popen) -> None:
+    """Stop an attached perf process and require a usable exit."""
+    if proc.poll() is not None:
+        stderr = proc.stderr.read() if proc.stderr else ""
+        raise RuntimeError(
+            f"perf stat exited before the measured pass completed: {stderr}"
+        )
+    try:
+        proc.send_signal(signal.SIGINT)
+    except ProcessLookupError as exc:
+        raise RuntimeError("perf stat exited before it could be stopped") from exc
+    try:
+        returncode = proc.wait(timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        proc.wait(timeout=5)
+        raise RuntimeError("perf stat did not stop after the measured pass") from exc
+    if returncode not in (0, 128 + signal.SIGINT, -signal.SIGINT):
+        stderr = proc.stderr.read() if proc.stderr else ""
+        raise RuntimeError(f"perf stat failed with exit code {returncode}: {stderr}")
 
 
 def rss_monitor_start(master_pid: int, stop_path: pathlib.Path) -> subprocess.Popen:
@@ -621,8 +797,31 @@ def parse_wrk_duration_s(duration: str) -> float:
     return value * {"s": 1, "m": 60, "h": 3600}[unit]
 
 
+def verify_workload(port: int, workload: Workload) -> str:
+    """Fail before measurement unless the configured request path engages."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        conn.request("GET", "/8kb", headers=dict(workload.headers))
+        response = conn.getresponse()
+        response.read()
+    finally:
+        conn.close()
+    encoding = response.getheader("Content-Encoding", "")
+    if response.status != 200 or encoding != workload.expected_encoding:
+        raise RuntimeError(
+            f"{workload.mode} workload preflight failed: status={response.status}, "
+            f"Content-Encoding={encoding!r}, expected "
+            f"{workload.expected_encoding!r}"
+        )
+    return encoding
+
+
 def run_wrk(
-    url: str, connections: int, duration: str, threads: int
+    url: str,
+    connections: int,
+    duration: str,
+    threads: int,
+    headers: tuple[tuple[str, str], ...],
 ) -> tuple[float, float, float, int, int]:
     wrk_bin = shutil.which("wrk")
     assert wrk_bin
@@ -634,20 +833,21 @@ def run_wrk(
     # documented harness-error path. The margin covers wrk's own
     # connect/warmup/report overhead on top of the measured window.
     timeout_s = parse_wrk_duration_s(duration) + 30
+    command = [
+        wrk_bin,
+        "-t",
+        str(threads),
+        "-c",
+        str(connections),
+        "-d",
+        duration,
+        "--latency",
+    ]
+    for name, value in headers:
+        command.extend(("-H", f"{name}: {value}"))
+    command.append(url)
     proc = subprocess.run(
-        [
-            wrk_bin,
-            "-t",
-            str(threads),
-            "-c",
-            str(connections),
-            "-d",
-            duration,
-            "--latency",
-            "-H",
-            "Accept-Encoding: zstd",
-            url,
-        ],
+        command,
         capture_output=True,
         text=True,
         check=False,
@@ -674,6 +874,7 @@ def bench_one(
     body: str,
     conc: int,
     duration: str,
+    workload: Workload,
 ) -> BenchSample:
     # The config sets `daemon off; master_process on;`, so the Popen
     # object's own pid already IS the master -- no need to re-derive it
@@ -686,7 +887,9 @@ def bench_one(
 
     url = f"http://127.0.0.1:{port}/{body}"
     threads = min(conc, os.cpu_count() or 4)
-    rps, p50, p99, requests, errors = run_wrk(url, conc, duration, threads)
+    rps, p50, p99, requests, errors = run_wrk(
+        url, conc, duration, threads, workload.headers
+    )
 
     peak_rss = 0
     monitor.send_signal(signal.SIGTERM)
@@ -718,8 +921,12 @@ def run_release_pass(
     workers: int,
     base_port: int,
     comp_level: int,
-) -> dict:
-    """Interleaved A/B rounds. Returns {arm_label: {conc: {body: [samples]}}}."""
+    workload_mode: str,
+    dictionary_count: int,
+    dcz_case: str,
+    perf_attachment: PerfAttachment | None = None,
+) -> tuple[dict, dict[str, str], int]:
+    """Run interleaved rounds and return samples, engagement, and setup count."""
     samples: dict[str, dict[int, dict[str, list[BenchSample]]]] = {
         arm.label: {c: {b: [] for b in BODY_SIZES} for c in concurrencies}
         for arm in arms
@@ -727,8 +934,12 @@ def run_release_pass(
 
     bodies = {name: body_bytes(size) for name, size in BODY_SIZES.items()}
     procs: dict[str, tuple[subprocess.Popen, pathlib.Path, int]] = {}
+    workloads: dict[str, Workload] = {}
+    engagement: dict[str, str] = {}
+    setup_successful_requests = 0
     backends: list[PacedBackend] = []
     workdirs: list[pathlib.Path] = []
+    perf_proc: subprocess.Popen | None = None
     try:
         for i, arm in enumerate(arms):
             root = pathlib.Path(tempfile.mkdtemp(prefix=f"ab-bench-{arm.label}-"))
@@ -745,12 +956,23 @@ def run_release_pass(
             backend = PacedBackend(backend_port, bodies, pace=False)
             backend.start()
             backends.append(backend)
+            workload = prepare_workload(root, workload_mode, dictionary_count, dcz_case)
+            workloads[arm.label] = workload
             conf = write_conf(
-                root, port, backend_port, arm, workers, "warn", comp_level
+                root,
+                port,
+                backend_port,
+                arm,
+                workers,
+                "warn",
+                comp_level,
+                workload,
             )
             proc = start_nginx(arm, conf, root)
             require_own_nginx_ready(proc, port, root, f"arm {arm.label!r}")
             procs[arm.label] = (proc, root, port)
+            engagement[arm.label] = verify_workload(port, workload)
+            setup_successful_requests += 1
 
         # Warmup: one short untimed-ish run per arm/body so the cache is
         # warm before the FIRST measured round -- otherwise round 1 is
@@ -759,7 +981,21 @@ def run_release_pass(
         for arm in arms:
             _proc, root, port = procs[arm.label]
             for body in BODY_SIZES:
-                run_wrk(f"http://127.0.0.1:{port}/{body}", 8, WARMUP_DURATION, 4)
+                _rps, _p50, _p99, requests, errors = run_wrk(
+                    f"http://127.0.0.1:{port}/{body}",
+                    8,
+                    WARMUP_DURATION,
+                    4,
+                    workloads[arm.label].headers,
+                )
+                setup_successful_requests += max(requests - errors, 0)
+
+        if perf_attachment is not None:
+            if len(arms) != 1:
+                raise RuntimeError("worker perf attachment requires exactly one arm")
+            perf_proc = start_worker_perf(
+                procs[arms[0].label][0].pid, workers, perf_attachment
+            )
 
         for _rnd in range(rounds):
             for conc in concurrencies:
@@ -772,10 +1008,23 @@ def run_release_pass(
                     for arm in arms:
                         proc, root, port = procs[arm.label]
                         sample = bench_one(
-                            arm, proc.pid, root, port, body, conc, duration
+                            arm,
+                            proc.pid,
+                            root,
+                            port,
+                            body,
+                            conc,
+                            duration,
+                            workloads[arm.label],
                         )
                         samples[arm.label][conc][body].append(sample)
+        if perf_proc is not None:
+            stop_worker_perf(perf_proc)
+            perf_proc = None
     finally:
+        if perf_proc is not None:
+            perf_proc.kill()
+            perf_proc.wait(timeout=5)
         for proc, _root, _port in procs.values():
             proc.terminate()
             try:
@@ -787,7 +1036,7 @@ def run_release_pass(
         for root in workdirs:
             shutil.rmtree(root, ignore_errors=True)
 
-    return samples
+    return samples, engagement, setup_successful_requests
 
 
 def evaluate_contention_self_check(
@@ -860,6 +1109,9 @@ def run_debug_pass(
     workers: int,
     base_port: int,
     comp_level: int,
+    workload_mode: str,
+    dictionary_count: int,
+    dcz_case: str,
 ) -> dict[int, WitnessSample]:
     """Separate pass, debug-level logging, only for engagement witnesses.
     Its own throughput is NOT reported -- see module docstring.
@@ -899,10 +1151,21 @@ def run_debug_pass(
     try:
         backend.start()
         port = base_port
-        conf = write_conf(root, port, backend_port, arm, workers, "debug", comp_level)
+        workload = prepare_workload(root, workload_mode, dictionary_count, dcz_case)
+        conf = write_conf(
+            root,
+            port,
+            backend_port,
+            arm,
+            workers,
+            "debug",
+            comp_level,
+            workload,
+        )
         proc = start_nginx(arm, conf, root)
         try:
             require_own_nginx_ready(proc, port, root, "debug pass")
+            verify_workload(port, workload)
             elog_path = root / "error.log"
             prev_created = 0
             prev_reused = 0
@@ -914,6 +1177,7 @@ def run_debug_pass(
                     conc,
                     duration,
                     min(conc, 4),
+                    workload.headers,
                 )
                 time.sleep(0.3)  # let the debug log flush
                 elog = elog_path.read_text("utf-8", "replace")
@@ -1209,8 +1473,35 @@ def main() -> int:
         "default so an A/B between two different binaries never mixes a "
         "level change into the change actually under measurement.",
     )
+    ap.add_argument(
+        "--workload",
+        choices=("zstd", "dcz"),
+        default="zstd",
+        help="request workload (default zstd preserves the existing harness)",
+    )
+    ap.add_argument(
+        "--dcz-dictionaries",
+        type=int,
+        choices=DCZ_DICTIONARY_COUNTS,
+        default=1,
+        help="configured dictionary count for --workload dcz",
+    )
+    ap.add_argument(
+        "--dcz-case",
+        choices=DCZ_CASES,
+        default="hit",
+        help="advertise the last configured dictionary or an absent one",
+    )
     ap.add_argument("--base-port", type=int, default=18400)
     ap.add_argument("--json", help="write machine-readable results here")
+    ap.add_argument(
+        "--perf-stat-output",
+        help="attach perf only to nginx workers during measured release runs",
+    )
+    ap.add_argument(
+        "--perf-events",
+        help="comma-separated perf events (required with --perf-stat-output)",
+    )
     args = ap.parse_args()
 
     if args.self_test:
@@ -1218,6 +1509,15 @@ def main() -> int:
 
     if not args.arm_a:
         print("error: --arm-a is required unless --self-test is given", file=sys.stderr)
+        return 2
+    if bool(args.perf_stat_output) != bool(args.perf_events):
+        print(
+            "error: --perf-stat-output and --perf-events must be used together",
+            file=sys.stderr,
+        )
+        return 2
+    if args.perf_stat_output and args.workers != 1:
+        print("error: worker perf attachment requires --workers 1", file=sys.stderr)
         return 2
 
     # Everything the scratch roots below create must stay readable by the
@@ -1254,12 +1554,21 @@ def main() -> int:
         print("error: arm labels must be distinct", file=sys.stderr)
         return 2
 
+    workload_label = args.workload
+    if args.workload == "dcz":
+        workload_label += f"/{args.dcz_dictionaries}/{args.dcz_case}"
     print(
         f"=== RELEASE PASS: rps/p50/p99/RSS, {args.rounds} interleaved "
-        f"round(s), NO cache witnesses in this section ==="
+        f"round(s), workload={workload_label}, "
+        "NO cache witnesses in this section ==="
     )
     try:
-        samples = run_release_pass(
+        perf_attachment = None
+        if args.perf_stat_output:
+            perf_attachment = PerfAttachment(
+                pathlib.Path(args.perf_stat_output).resolve(), args.perf_events
+            )
+        samples, engagement, setup_successful_requests = run_release_pass(
             arms,
             concurrencies,
             args.rounds,
@@ -1267,8 +1576,12 @@ def main() -> int:
             args.workers,
             args.base_port,
             args.comp_level,
+            args.workload,
+            args.dcz_dictionaries,
+            args.dcz_case,
+            perf_attachment,
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -1289,6 +1602,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    completed_successful_requests = total_successful + setup_successful_requests
 
     print_release_table(arms, concurrencies, samples)
 
@@ -1312,6 +1626,9 @@ def main() -> int:
                 args.workers,
                 args.base_port + len(arms) * 2 + 2,
                 args.comp_level,
+                args.workload,
+                args.dcz_dictionaries,
+                args.dcz_case,
             )
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -1332,6 +1649,17 @@ def main() -> int:
                 "duration": args.duration,
                 "workers": args.workers,
                 "arms": [a.label for a in arms],
+                "workload": args.workload,
+                "dcz_dictionaries": args.dcz_dictionaries
+                if args.workload == "dcz"
+                else None,
+                "dcz_case": args.dcz_case if args.workload == "dcz" else None,
+                "engagement": engagement,
+                "successful_requests": total_successful,
+                "completed_successful_requests": completed_successful_requests,
+                "perf_scope": "nginx-workers-measured-release"
+                if perf_attachment is not None
+                else None,
                 "commit": subprocess.run(
                     ["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
                     capture_output=True,

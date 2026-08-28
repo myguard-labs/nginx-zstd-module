@@ -23,8 +23,11 @@ struct-of-arrays lookup into two arrays (a 40-byte index + pointer indirection)
 to reduce cache misses on negotiation. This recipe establishes:
 
 1. A baseline of cache-misses, cache-references, instructions, and cycles for
-   the current (unmodified) code running ab_bench.py release pass
-2. An A/B delta when the optimization is applied
+   the current code across 1, 4, and 16 configured dictionaries, with a hit
+   and full-scan miss at each size
+2. An A/B delta normalized by successful measured requests. perf attaches only
+   to the pinned nginx worker after preflight and warmup, so harness, backend,
+   wrk, startup, fixture, and cleanup work cannot contaminate the counters
 
 The repack row is retained ONLY if the counter delta supports the "third-cacheline"
 claim (fewer cache misses). Struct size reduction alone (pahole) does not retain
@@ -40,6 +43,10 @@ USAGE
 
     # Compare
     python3 ci/tools/perf_stat_recipe.py --compare baseline.json optimized.json
+
+    # Preserve the original plain-zstd single measurement when needed
+    python3 ci/tools/perf_stat_recipe.py --nginx /path/to/nginx \
+        --workload zstd --json zstd.json
 
 Environment: requires
   - perf (installed at /usr/bin/perf)
@@ -59,12 +66,32 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 
 TOOLS_DIR = pathlib.Path(__file__).resolve().parent
+DCZ_DICTIONARY_COUNTS = (1, 4, 16)
+DCZ_CASES = ("hit", "miss")
+
+
+def cpu_identity() -> str:
+    """Return stable CPU/PMU identity fields for cross-run compatibility."""
+    wanted = ("vendor_id", "cpu family", "model", "stepping", "model name")
+    fields: dict[str, str] = {}
+    for line in pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            break
+        key, separator, value = line.partition(":")
+        if separator and key.strip() in wanted:
+            fields[key.strip()] = value.strip()
+    if not all(field in fields for field in wanted):
+        raise RuntimeError("could not determine CPU identity from /proc/cpuinfo")
+    return "; ".join(f"{field}={fields[field]}" for field in wanted)
 
 
 @dataclasses.dataclass
@@ -108,6 +135,80 @@ class PerfCounters:
             instructions=d["instructions"],
             cycles=d["cycles"],
         )
+
+
+def normalize_counters(
+    counters: PerfCounters, successful_requests: int
+) -> dict[str, float]:
+    """Return raw hardware counts per successful measured request."""
+    if successful_requests <= 0:
+        raise RuntimeError("cannot normalize perf counters without successful requests")
+    return {
+        "cache_misses": counters.cache_misses / successful_requests,
+        "cache_references": counters.cache_references / successful_requests,
+        "instructions": counters.instructions / successful_requests,
+        "cycles": counters.cycles / successful_requests,
+    }
+
+
+def successful_requests_from_bench(result: dict) -> int:
+    """Read successful requests from the measured release-pass window."""
+    meta = result.get("meta", {})
+    meta_total = meta.get("successful_requests")
+    if isinstance(meta_total, int):
+        return meta_total
+
+    total = 0
+    for arm in result.get("release", {}).values():
+        for concurrency in arm.values():
+            for samples in concurrency.values():
+                for sample in samples:
+                    total += max(sample["requests"] - sample["errors"], 0)
+    return total
+
+
+def dcz_scenarios() -> tuple[tuple[int, str], ...]:
+    """Fixed lookup-depth matrix used by the repack measurement."""
+    return tuple(
+        (dictionary_count, case)
+        for dictionary_count in DCZ_DICTIONARY_COUNTS
+        for case in DCZ_CASES
+    )
+
+
+def build_dcz_bench_command(
+    nginx_path: pathlib.Path,
+    dictionary_count: int,
+    case: str,
+    result_path: pathlib.Path,
+    perf_path: pathlib.Path,
+    perf_events: str,
+) -> list[str]:
+    """Build one deterministic dcz hit/miss ab_bench invocation."""
+    return [
+        "python3",
+        str(TOOLS_DIR / "ab_bench.py"),
+        "--arm-a",
+        f"{nginx_path}:baseline",
+        "--rounds",
+        "1",
+        "--workers",
+        "1",
+        "--duration",
+        "5s",
+        "--workload",
+        "dcz",
+        "--dcz-dictionaries",
+        str(dictionary_count),
+        "--dcz-case",
+        case,
+        "--json",
+        str(result_path),
+        "--perf-stat-output",
+        str(perf_path),
+        "--perf-events",
+        perf_events,
+    ]
 
 
 def detect_hybrid_cores() -> tuple[str, str, int]:
@@ -307,6 +408,51 @@ def run_perf_stat(
     return PerfCounters(**counters_dict)
 
 
+def qualified_perf_events(core_type: str) -> str:
+    """Return the four PMU-qualified events for one hybrid core type."""
+    pmu = "cpu_core" if core_type == "P" else "cpu_atom"
+    return ",".join(
+        f"{pmu}/{event}/"
+        for event in ("cache-misses", "cache-references", "instructions", "cycles")
+    )
+
+
+def kill_process_group(process: subprocess.Popen) -> None:
+    """Kill and reap a detached benchmark process group."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.communicate()
+
+
+def run_pinned_bench(command: list[str], cpu_mask: str) -> None:
+    """Run a benchmark pinned to one core set; perf attaches inside it."""
+    full_command = ["taskset", "-c", cpu_mask.replace(" ", ","), *command]
+    process = subprocess.Popen(
+        full_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        kill_process_group(process)
+        raise RuntimeError(
+            "benchmark timed out after 600s; process group killed"
+        ) from exc
+    except BaseException:
+        kill_process_group(process)
+        raise
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"benchmark failed with exit code {process.returncode}.\n"
+            f"stderr: {stderr}\nstdout: {stdout}"
+        )
+
+
 def measure_baseline(
     nginx_path: str | pathlib.Path,
     output_json: str | None = None,
@@ -367,6 +513,85 @@ def measure_baseline(
     return counters
 
 
+def measure_dcz_matrix(
+    nginx_path: str | pathlib.Path,
+    output_json: str | None = None,
+    core_type: str = "P",
+) -> dict[str, dict]:
+    """Measure the fixed 1/4/16-dictionary hit/miss matrix."""
+    nginx_path_obj = pathlib.Path(nginx_path).resolve()
+    if not nginx_path_obj.exists():
+        raise RuntimeError(f"nginx binary not found: {nginx_path_obj}")
+
+    pcore_ids, ecore_ids, _ = detect_hybrid_cores()
+    cpu_mask = pcore_ids if core_type == "P" else ecore_ids
+    scenarios: dict[str, dict] = {}
+
+    with tempfile.TemporaryDirectory(prefix="zstd-perf-stat-") as temp_dir:
+        temp_root = pathlib.Path(temp_dir)
+        for dictionary_count, case in dcz_scenarios():
+            name = f"dicts-{dictionary_count}-{case}"
+            bench_json = temp_root / f"{name}.json"
+            perf_output = temp_root / f"{name}.perf"
+            command = build_dcz_bench_command(
+                nginx_path_obj,
+                dictionary_count,
+                case,
+                bench_json,
+                perf_output,
+                qualified_perf_events(core_type),
+            )
+            run_pinned_bench(command, cpu_mask)
+            try:
+                bench_result = json.loads(bench_json.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"ab_bench produced no usable JSON for {name}: {exc}"
+                ) from exc
+            try:
+                counters = PerfCounters(
+                    **parse_perf_output(
+                        perf_output.read_text(encoding="utf-8"), core_type
+                    )
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(f"perf produced no output for {name}") from exc
+            if bench_result.get("meta", {}).get("perf_scope") != (
+                "nginx-workers-measured-release"
+            ):
+                raise RuntimeError(
+                    f"ab_bench did not prove worker-only perf for {name}"
+                )
+
+            successful_requests = successful_requests_from_bench(bench_result)
+            per_request = normalize_counters(counters, successful_requests)
+            scenarios[name] = {
+                "dictionary_count": dictionary_count,
+                "case": case,
+                "command": command,
+                "measured_successful_requests": successful_requests,
+                "engagement": bench_result.get("meta", {}).get("engagement"),
+                "counters": counters.to_dict(),
+                "per_successful_request": per_request,
+            }
+
+    result = {
+        "schema_version": 2,
+        "workload": "dcz",
+        "core_type": core_type,
+        "cpu_mask": cpu_mask,
+        "cpu_identity": cpu_identity(),
+        "normalization": "measured_successful_requests",
+        "scenarios": scenarios,
+    }
+    if output_json:
+        pathlib.Path(output_json).write_text(
+            json.dumps(result, indent=2), encoding="utf-8"
+        )
+        print(f"Saved to {output_json}")
+    return scenarios
+
+
 def print_counters(
     label: str,
     counters: PerfCounters,
@@ -405,6 +630,108 @@ class CounterDelta:
         )
 
 
+def _percent_delta(baseline: float, optimized: float) -> float:
+    if baseline == 0:
+        raise RuntimeError("cannot compare against a zero normalized counter")
+    return (optimized - baseline) / baseline
+
+
+def compare_dcz_results(baseline_result: dict, optimized_result: dict) -> None:
+    """Compare dcz matrix cells using counters per successful request."""
+    identity_fields = (
+        "schema_version",
+        "workload",
+        "core_type",
+        "cpu_mask",
+        "cpu_identity",
+        "normalization",
+    )
+    expected_identity = {
+        "schema_version": 2,
+        "workload": "dcz",
+        "normalization": "measured_successful_requests",
+    }
+    for field, value in expected_identity.items():
+        if baseline_result.get(field) != value or optimized_result.get(field) != value:
+            raise RuntimeError(f"dcz comparison requires {field}={value!r}")
+    for field in identity_fields:
+        if baseline_result.get(field) != optimized_result.get(field):
+            raise RuntimeError(f"dcz comparison requires matching {field}")
+    for result in (baseline_result, optimized_result):
+        if result.get("core_type") not in ("P", "E"):
+            raise RuntimeError("dcz comparison requires core_type P or E")
+        if not isinstance(result.get("cpu_mask"), str) or not result["cpu_mask"]:
+            raise RuntimeError("dcz comparison requires a non-empty cpu_mask")
+        if (
+            not isinstance(result.get("cpu_identity"), str)
+            or not result["cpu_identity"]
+        ):
+            raise RuntimeError("dcz comparison requires a non-empty cpu_identity")
+
+    baseline_cells = baseline_result.get("scenarios", {})
+    optimized_cells = optimized_result.get("scenarios", {})
+    expected = {f"dicts-{count}-{case}" for count, case in dcz_scenarios()}
+    if set(baseline_cells) != expected or set(optimized_cells) != expected:
+        raise RuntimeError(
+            "dcz comparison requires matching 1/4/16 dictionary hit/miss matrices"
+        )
+
+    for dictionary_count, case in dcz_scenarios():
+        name = f"dicts-{dictionary_count}-{case}"
+        for cell in (baseline_cells[name], optimized_cells[name]):
+            if (
+                cell.get("dictionary_count") != dictionary_count
+                or cell.get("case") != case
+            ):
+                raise RuntimeError(f"dcz scenario metadata does not match {name}")
+            expected_encoding = "dcz" if case == "hit" else "zstd"
+            engagement = cell.get("engagement")
+            if not isinstance(engagement, dict) or set(engagement.values()) != {
+                expected_encoding
+            }:
+                raise RuntimeError(
+                    f"dcz scenario {name} requires {expected_encoding} engagement"
+                )
+
+    print("\nDCZ COUNTERS PER SUCCESSFUL REQUEST")
+    header = (
+        f"{'scenario':<16}{'base req':>11}{'opt req':>11}"
+        f"{'miss delta':>13}{'ref delta':>12}{'insn delta':>13}"
+        f"{'cycle delta':>14}"
+    )
+    print(header)
+    print("-" * len(header))
+    for dictionary_count, case in dcz_scenarios():
+        name = f"dicts-{dictionary_count}-{case}"
+        baseline = baseline_cells[name]
+        optimized = optimized_cells[name]
+        baseline_norm = normalize_counters(
+            PerfCounters.from_dict(baseline["counters"]),
+            baseline["measured_successful_requests"],
+        )
+        optimized_norm = normalize_counters(
+            PerfCounters.from_dict(optimized["counters"]),
+            optimized["measured_successful_requests"],
+        )
+        miss_delta = _percent_delta(
+            baseline_norm["cache_misses"], optimized_norm["cache_misses"]
+        )
+        reference_delta = _percent_delta(
+            baseline_norm["cache_references"],
+            optimized_norm["cache_references"],
+        )
+        instruction_delta = _percent_delta(
+            baseline_norm["instructions"], optimized_norm["instructions"]
+        )
+        cycle_delta = _percent_delta(baseline_norm["cycles"], optimized_norm["cycles"])
+        print(
+            f"{name:<16}{baseline['measured_successful_requests']:>11}"
+            f"{optimized['measured_successful_requests']:>11}{miss_delta:>+12.1%}"
+            f"{reference_delta:>+12.1%}{instruction_delta:>+13.1%}"
+            f"{cycle_delta:>+14.1%}"
+        )
+
+
 def compare_results(baseline_json: str, optimized_json: str) -> None:
     """Compare two measurement runs.
 
@@ -419,6 +746,10 @@ def compare_results(baseline_json: str, optimized_json: str) -> None:
         baseline_result = json.load(f)
     with open(optimized_json, encoding="utf-8") as f:
         optimized_result = json.load(f)
+
+    if "scenarios" in baseline_result or "scenarios" in optimized_result:
+        compare_dcz_results(baseline_result, optimized_result)
+        return
 
     baseline = PerfCounters.from_dict(baseline_result["counters"])
     optimized = PerfCounters.from_dict(optimized_result["counters"])
@@ -463,6 +794,17 @@ def compare_results(baseline_json: str, optimized_json: str) -> None:
     print("=" * 70 + "\n")
 
 
+def normalize_cli_argv(argv: list[str]) -> list[str]:
+    """Map documented flag-first spellings onto the argparse subcommands."""
+    if argv[:1] in (["-h"], ["--help"]):
+        return argv
+    if argv and argv[0] == "--compare":
+        return ["compare", *argv[1:]]
+    if argv and argv[0].startswith("-"):
+        return ["measure", *argv]
+    return argv
+
+
 def main() -> int:
     """Entry point."""
     parser = argparse.ArgumentParser(
@@ -492,6 +834,12 @@ def main() -> int:
         default="P",
         help="Pin to P-cores (default) or E-cores",
     )
+    measure_parser.add_argument(
+        "--workload",
+        choices=("dcz", "zstd"),
+        default="dcz",
+        help="measure the dcz lookup matrix (default) or legacy zstd workload",
+    )
 
     # "compare" subcommand
     compare_parser = subparsers.add_parser(
@@ -507,18 +855,26 @@ def main() -> int:
         help="Optimized measurement JSON file",
     )
 
-    args = parser.parse_args()
+    argv = normalize_cli_argv(sys.argv[1:])
+    args = parser.parse_args(argv)
 
-    if args.command in ("measure", "baseline", None):
+    if args.command in ("measure", "baseline"):
         if not args.nginx:
             parser.print_help()
             return 1
         try:
-            measure_baseline(
-                args.nginx,
-                output_json=args.json,
-                core_type=args.core_type,
-            )
+            if args.workload == "dcz":
+                measure_dcz_matrix(
+                    args.nginx,
+                    output_json=args.json,
+                    core_type=args.core_type,
+                )
+            else:
+                measure_baseline(
+                    args.nginx,
+                    output_json=args.json,
+                    core_type=args.core_type,
+                )
             return 0
         except (RuntimeError, FileNotFoundError, subprocess.TimeoutExpired) as e:
             print(f"ERROR: {e}", file=sys.stderr)
@@ -527,7 +883,7 @@ def main() -> int:
         try:
             compare_results(args.baseline, args.optimized)
             return 0
-        except (FileNotFoundError, json.JSONDecodeError) as e:
+        except (FileNotFoundError, json.JSONDecodeError, KeyError, RuntimeError) as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
     else:

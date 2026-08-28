@@ -1353,6 +1353,16 @@ CLIs linked against the same libzstd/zlib, so ratio is machine-stable;
 throughput scales with CPU). Figures below: **libzstd 1.5.5**, single
 core, `--repeat 3`, best wall-time.
 
+For nginx request-path measurements, `ci/tools/ab_bench.py` keeps its existing
+plain-zstd workload by default and accepts `--workload dcz` for a focused RFC
+9842 dictionary hit or miss. `ci/tools/perf_stat_recipe.py` runs the fixed 1,
+4, and 16 configured-dictionary hit/miss matrix, records the response-encoding
+preflight and every successful measured request in JSON. Hardware counters
+attach only to the pinned nginx worker during measured release runs, excluding
+the Python harness, backend, wrk, startup, fixture creation, and cleanup; the
+comparison reports cache misses, references, instructions, and cycles per
+measured request.
+
 | Payload | Codec | Ratio | MB/s |
 |---|---|---:|---:|
 | HTML, 58 KB (test fixture) | gzip-6 | 15.5 | 29 |

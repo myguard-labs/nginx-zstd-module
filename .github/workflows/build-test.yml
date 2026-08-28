@@ -186,7 +186,10 @@ jobs:
       - name: Python unit tests (test harness self-checks)
         run: |
           cd "$GITHUB_WORKSPACE/ci/tools"
-          python3 -m unittest -v test_test_encoding test_test_package_artifact
+          python3 -m unittest -v \
+            test_test_encoding \
+            test_test_package_artifact \
+            test_perf_stat_recipe
 
       # Cheapest test layer over the real pure decision functions -- the
       # Accept-Encoding parser and the .zst frame-header probe: no nginx
