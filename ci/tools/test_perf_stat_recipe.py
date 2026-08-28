@@ -263,6 +263,23 @@ class PerfRecipeTests(unittest.TestCase):
         )
         self.assertEqual(saved["normalization"], "measured_successful_requests")
 
+    def test_matrix_identity_failure_prevents_scenario_execution(self) -> None:
+        with (
+            mock.patch.object(
+                perf_recipe, "detect_hybrid_cores", return_value=("0 1", "2 3", 0)
+            ),
+            mock.patch.object(
+                perf_recipe,
+                "cpu_identity",
+                side_effect=RuntimeError("missing CPU identity"),
+            ),
+            mock.patch.object(perf_recipe, "run_pinned_bench") as run,
+            self.assertRaisesRegex(RuntimeError, "missing CPU identity"),
+        ):
+            perf_recipe.measure_dcz_matrix(pathlib.Path(sys.executable))
+
+        run.assert_not_called()
+
     def test_pinned_bench_timeout_kills_the_process_group(self) -> None:
         process = mock.Mock(pid=4321)
         process.communicate.side_effect = [

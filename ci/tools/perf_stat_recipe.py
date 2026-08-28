@@ -525,6 +525,7 @@ def measure_dcz_matrix(
 
     pcore_ids, ecore_ids, _ = detect_hybrid_cores()
     cpu_mask = pcore_ids if core_type == "P" else ecore_ids
+    identity = cpu_identity()
     scenarios: dict[str, dict] = {}
 
     with tempfile.TemporaryDirectory(prefix="zstd-perf-stat-") as temp_dir:
@@ -580,7 +581,7 @@ def measure_dcz_matrix(
         "workload": "dcz",
         "core_type": core_type,
         "cpu_mask": cpu_mask,
-        "cpu_identity": cpu_identity(),
+        "cpu_identity": identity,
         "normalization": "measured_successful_requests",
         "scenarios": scenarios,
     }
