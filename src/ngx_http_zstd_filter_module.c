@@ -1104,7 +1104,15 @@ ngx_http_zstd_profile_pack(ngx_int_t level, ngx_flag_t long_mode,
  * Inverse of ngx_http_zstd_profile_pack() for diagnostics and tests. Kept
  * adjacent to the packer on purpose: the two encode one layout, and splitting
  * them is how a pack/unpack pair drifts.
+ *
+ * Its only in-tree caller is the cctx-reuse debug log in
+ * ngx_http_zstd_acquire_cctx(), which is itself #if (NGX_DEBUG); without the
+ * same guard here a release build trips -Werror=unused-function. The
+ * standalone unit in ci/tools/test_cctx_profile_pack.sh extracts the
+ * "static void" line through the closing brace, so this #if stays outside
+ * that range on purpose -- do not fold it into the signature.
  */
+#if (NGX_DEBUG)
 static void
 ngx_http_zstd_profile_unpack(uint64_t key, ngx_int_t *level,
     ngx_flag_t *long_mode, ngx_int_t *window_log)
@@ -1115,6 +1123,7 @@ ngx_http_zstd_profile_unpack(uint64_t key, ngx_int_t *level,
                                & NGX_HTTP_ZSTD_PROFILE_WLOG_MAX);
     *long_mode = (ngx_flag_t) ((key >> NGX_HTTP_ZSTD_PROFILE_LONG_SHIFT) & 1);
 }
+#endif
 
 
 /*
