@@ -21,6 +21,14 @@ objs/
 ci/t/servroot/
 ci/t/servroot-*/
 
+# Test::Nginx defaults to t/servroot/ relative to CWD when
+# TEST_NGINX_SERVROOT is unset (e.g. `prove ci/t/foo.t` run from the repo
+# root). CI always sets TEST_NGINX_SERVROOT explicitly, so this is narrowly
+# scoped to the generated servroot dir rather than ignoring all of `t/`,
+# which could later mask a real source directory.
+/t/servroot/
+/t/servroot-*/
+
 # Python bytecode cache (test tooling under tools/)
 __pycache__/
 *.pyc
