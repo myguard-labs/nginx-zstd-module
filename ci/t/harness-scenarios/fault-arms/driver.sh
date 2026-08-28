@@ -411,8 +411,12 @@ fi
 REF_ERR_OUT="$PROBER_PREFIX/refprefix-err.out"
 ELOG_MARK_12="$(wc -l < "$ELOG")"
 GOT200_12=0
-if fetch /dcz/body.bin "$REF_ERR_OUT" "${DCZ_HEADERS[@]}" \
-    && grep -q '^HTTP/1.1 200' "$REF_ERR_OUT.hdrs" 2>/dev/null
+# Manual mutation control (2026-08-28): inverting the empty-body check made
+# this named oracle turn red. A reset or truncated response is acceptable
+# here only when no representation bytes escaped before the connection failed.
+if (fetch /dcz/body.bin "$REF_ERR_OUT" "${DCZ_HEADERS[@]}" \
+    && grep -q '^HTTP/1.1 200' "$REF_ERR_OUT.hdrs" 2>/dev/null) \
+    || [ -s "$REF_ERR_OUT" ]
 then
     GOT200_12=1
 fi
