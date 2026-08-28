@@ -3264,24 +3264,29 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
             lender = slot;
             borrowed = 1;
 
-            {
-            ngx_int_t   dbg_level, dbg_wlog;
-            ngx_flag_t  dbg_long;
+#if (NGX_DEBUG)
+            if (r->connection->log->log_level & NGX_LOG_DEBUG_HTTP) {
+                ngx_int_t   dbg_level, dbg_wlog;
+                ngx_flag_t  dbg_long;
 
-            /*
-             * Unpack rather than read zlcf: this prints what the SLOT was
-             * built for, which is the thing a reuse decision turns on, and
-             * it exercises the key's reversibility on the hot debug path.
-             */
-            ngx_http_zstd_profile_unpack(slot->profile.key, &dbg_level,
-                                         &dbg_long, &dbg_wlog);
+                /*
+                 * Unpack rather than read zlcf: this prints what the SLOT
+                 * was built for, which is the thing a reuse decision turns
+                 * on, and it exercises the key's reversibility on the hot
+                 * debug path -- gated on NGX_DEBUG and the runtime log
+                 * level so the unpack only runs when the line below will
+                 * actually be emitted.
+                 */
+                ngx_http_zstd_profile_unpack(slot->profile.key, &dbg_level,
+                                             &dbg_long, &dbg_wlog);
 
-            ngx_log_debug5(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                           "zstd: reusing worker cctx %p (slot:%ui) "
-                           "level:%i long:%i window_log:%i",
-                           ctx->cctx, i, dbg_level, (ngx_int_t) dbg_long,
-                           dbg_wlog);
+                ngx_log_debug5(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                               "zstd: reusing worker cctx %p (slot:%ui) "
+                               "level:%i long:%i window_log:%i",
+                               ctx->cctx, i, dbg_level, (ngx_int_t) dbg_long,
+                               dbg_wlog);
             }
+#endif
             break;
         }
     }
