@@ -100,6 +100,46 @@ class DczWorkloadTests(unittest.TestCase):
         )
         response.read.assert_called_once_with()
 
+    def test_readiness_failure_reaps_the_spawned_nginx_process(self) -> None:
+        process = mock.Mock()
+        process.wait.side_effect = [
+            ab_bench.subprocess.TimeoutExpired(["nginx"], 10),
+            0,
+        ]
+        backend = mock.Mock()
+        workload = ab_bench.Workload(
+            mode="zstd",
+            headers=(("Accept-Encoding", "zstd"),),
+            expected_encoding="zstd",
+        )
+        arm = ab_bench.Arm("baseline", pathlib.Path("/nginx"))
+
+        with (
+            mock.patch.object(ab_bench, "PacedBackend", return_value=backend),
+            mock.patch.object(ab_bench, "prepare_workload", return_value=workload),
+            mock.patch.object(
+                ab_bench, "write_conf", return_value=pathlib.Path("/nginx.conf")
+            ),
+            mock.patch.object(ab_bench, "start_nginx", return_value=process),
+            mock.patch.object(
+                ab_bench,
+                "require_own_nginx_ready",
+                side_effect=RuntimeError("readiness failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "readiness failed"),
+        ):
+            ab_bench.run_release_pass(
+                [arm], [1], 1, "1s", 1, 18400, 6, "zstd", 1, "hit"
+            )
+
+        process.terminate.assert_called_once_with()
+        self.assertEqual(
+            process.wait.call_args_list,
+            [mock.call(timeout=10), mock.call(timeout=5)],
+        )
+        process.kill.assert_called_once_with()
+        backend.stop.assert_called_once_with()
+
     def test_perf_attaches_only_to_resolved_nginx_workers(self) -> None:
         process = mock.Mock()
         process.poll.return_value = None
@@ -282,32 +322,84 @@ class PerfRecipeTests(unittest.TestCase):
 
     def test_pinned_bench_timeout_kills_the_process_group(self) -> None:
         process = mock.Mock(pid=4321)
-        process.communicate.side_effect = [
-            perf_recipe.subprocess.TimeoutExpired(["taskset"], 600),
-            ("", ""),
-        ]
         with (
             mock.patch.object(perf_recipe.subprocess, "Popen", return_value=process),
-            mock.patch.object(perf_recipe.os, "killpg") as killpg,
+            mock.patch.object(
+                perf_recipe,
+                "wait_process_without_reaping",
+                side_effect=perf_recipe.subprocess.TimeoutExpired(["taskset"], 600),
+            ),
+            mock.patch.object(perf_recipe, "kill_process_group") as kill_group,
             self.assertRaisesRegex(RuntimeError, "process group killed"),
         ):
             perf_recipe.run_pinned_bench(["bench"], "0 1")
 
-        killpg.assert_called_once_with(4321, perf_recipe.signal.SIGKILL)
-        self.assertEqual(process.communicate.call_count, 2)
+        kill_group.assert_called_once_with(process)
 
     def test_pinned_bench_interrupt_kills_the_process_group(self) -> None:
         process = mock.Mock(pid=4321)
-        process.communicate.side_effect = [KeyboardInterrupt, ("", "")]
         with (
             mock.patch.object(perf_recipe.subprocess, "Popen", return_value=process),
-            mock.patch.object(perf_recipe.os, "killpg") as killpg,
+            mock.patch.object(
+                perf_recipe,
+                "wait_process_without_reaping",
+                side_effect=KeyboardInterrupt,
+            ),
+            mock.patch.object(perf_recipe, "kill_process_group") as kill_group,
             self.assertRaises(KeyboardInterrupt),
         ):
             perf_recipe.run_pinned_bench(["bench"], "0 1")
 
-        killpg.assert_called_once_with(4321, perf_recipe.signal.SIGKILL)
-        self.assertEqual(process.communicate.call_count, 2)
+        kill_group.assert_called_once_with(process)
+
+    def test_pinned_bench_nonzero_exit_kills_the_process_group(self) -> None:
+        process = mock.Mock(returncode=1)
+        with (
+            mock.patch.object(perf_recipe.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                perf_recipe, "wait_process_without_reaping", return_value=False
+            ),
+            mock.patch.object(perf_recipe, "kill_process_group") as kill_group,
+            self.assertRaisesRegex(RuntimeError, "exit code 1"),
+        ):
+            perf_recipe.run_pinned_bench(["bench"], "0 1")
+
+        kill_group.assert_called_once_with(process)
+
+    def test_failed_status_is_observed_without_reaping_the_group_leader(self) -> None:
+        process = mock.Mock(pid=4321, args=["bench"])
+        status = mock.Mock(si_code=perf_recipe.os.CLD_EXITED, si_status=1)
+        with mock.patch.object(perf_recipe.os, "waitid", return_value=status) as waitid:
+            self.assertFalse(perf_recipe.wait_process_without_reaping(process, 1))
+
+        waitid.assert_called_once_with(
+            perf_recipe.os.P_PID,
+            4321,
+            perf_recipe.os.WEXITED | perf_recipe.os.WNOHANG | perf_recipe.os.WNOWAIT,
+        )
+        process.wait.assert_not_called()
+
+    def test_clean_status_is_observed_without_reaping_the_group_leader(self) -> None:
+        process = mock.Mock(pid=4321, args=["bench"])
+        status = mock.Mock(si_code=perf_recipe.os.CLD_EXITED, si_status=0)
+        with mock.patch.object(perf_recipe.os, "waitid", return_value=status):
+            self.assertTrue(perf_recipe.wait_process_without_reaping(process, 1))
+
+        process.wait.assert_not_called()
+
+    def test_pinned_bench_success_reaps_without_group_kill(self) -> None:
+        process = mock.Mock(pid=4321)
+        with (
+            mock.patch.object(perf_recipe.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                perf_recipe, "wait_process_without_reaping", return_value=True
+            ),
+            mock.patch.object(perf_recipe, "kill_process_group") as kill_group,
+        ):
+            perf_recipe.run_pinned_bench(["bench"], "0 1")
+
+        process.wait.assert_called_once_with(timeout=10)
+        kill_group.assert_not_called()
 
     def test_dcz_command_selects_workload_and_evidence_json(self) -> None:
         command = perf_recipe.build_dcz_bench_command(
@@ -428,6 +520,13 @@ class PerfRecipeTests(unittest.TestCase):
         del baseline["core_type"]
         del optimized["core_type"]
         with self.assertRaisesRegex(RuntimeError, "core_type P or E"):
+            perf_recipe.compare_dcz_results(baseline, optimized)
+
+        baseline = self._matrix_result(perf_recipe.PerfCounters(1, 2, 3, 4), 1)
+        optimized = self._matrix_result(perf_recipe.PerfCounters(1, 2, 3, 4), 1)
+        del baseline["cpu_identity"]
+        del optimized["cpu_identity"]
+        with self.assertRaisesRegex(RuntimeError, "non-empty cpu_identity"):
             perf_recipe.compare_dcz_results(baseline, optimized)
 
         baseline = self._matrix_result(perf_recipe.PerfCounters(1, 2, 3, 4), 1)

@@ -73,6 +73,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 TOOLS_DIR = pathlib.Path(__file__).resolve().parent
 DCZ_DICTIONARY_COUNTS = (1, 4, 16)
@@ -423,34 +424,58 @@ def kill_process_group(process: subprocess.Popen) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    process.communicate()
+    process.wait(timeout=10)
+
+
+def wait_process_without_reaping(process: subprocess.Popen, timeout: float) -> bool:
+    """Wait for exit while retaining the leader PID for group cleanup."""
+    deadline = time.monotonic() + timeout
+    while True:
+        status = os.waitid(
+            os.P_PID,
+            process.pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+        if status is not None:
+            return status.si_code == os.CLD_EXITED and status.si_status == 0
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        time.sleep(0.05)
 
 
 def run_pinned_bench(command: list[str], cpu_mask: str) -> None:
     """Run a benchmark pinned to one core set; perf attaches inside it."""
     full_command = ["taskset", "-c", cpu_mask.replace(" ", ","), *command]
-    process = subprocess.Popen(
-        full_command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=600)
-    except subprocess.TimeoutExpired as exc:
-        kill_process_group(process)
-        raise RuntimeError(
-            "benchmark timed out after 600s; process group killed"
-        ) from exc
-    except BaseException:
-        kill_process_group(process)
-        raise
-    if process.returncode != 0:
-        raise RuntimeError(
-            f"benchmark failed with exit code {process.returncode}.\n"
-            f"stderr: {stderr}\nstdout: {stdout}"
+    with (
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file,
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file,
+    ):
+        process = subprocess.Popen(
+            full_command,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=True,
+            start_new_session=True,
         )
+        try:
+            succeeded = wait_process_without_reaping(process, 600)
+        except subprocess.TimeoutExpired as exc:
+            kill_process_group(process)
+            raise RuntimeError(
+                "benchmark timed out after 600s; process group killed"
+            ) from exc
+        except BaseException:
+            kill_process_group(process)
+            raise
+        if not succeeded:
+            kill_process_group(process)
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            raise RuntimeError(
+                f"benchmark failed with exit code {process.returncode}.\n"
+                f"stderr: {stderr_file.read()}\nstdout: {stdout_file.read()}"
+            )
+        process.wait(timeout=10)
 
 
 def measure_baseline(

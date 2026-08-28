@@ -969,8 +969,8 @@ def run_release_pass(
                 workload,
             )
             proc = start_nginx(arm, conf, root)
-            require_own_nginx_ready(proc, port, root, f"arm {arm.label!r}")
             procs[arm.label] = (proc, root, port)
+            require_own_nginx_ready(proc, port, root, f"arm {arm.label!r}")
             engagement[arm.label] = verify_workload(port, workload)
             setup_successful_requests += 1
 
@@ -1031,6 +1031,7 @@ def run_release_pass(
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=5)
         for backend in backends:
             backend.stop()
         for root in workdirs:
