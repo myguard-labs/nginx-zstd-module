@@ -208,12 +208,12 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char **pp)
                  * Strict qvalue grammar. Leading digit must be 0 or 1.
                  */
                 if (q_seen) {
-                    goto malformed;          /* repeated "q" parameter */
+                    goto malformed;     /* repeated "q" parameter */
                 }
                 q_seen = 1;
 
                 if (p >= end) {
-                    goto malformed;          /* "q=" with no value */
+                    goto malformed;     /* "q=" with no value */
                 }
 
                 if (*p == '0') {
@@ -240,7 +240,7 @@ ngx_http_zstd_eval_qvalue(const ngx_str_t *ae, u_char **pp)
                     }
 
                 } else {
-                    goto malformed;          /* leading digit not 0 or 1 */
+                    goto malformed;     /* leading digit not 0 or 1 */
                 }
 
                 /*
