@@ -1,0 +1,44 @@
+# UBSan ignorelist (compile-time, -fsanitize-ignorelist=) for a debug-level
+# ASAN+UBSAN nginx build.
+#
+# Scope: ONE nginx-core function, ONE known-benign UB pattern. Nothing of
+# this module's is or may ever be listed here.
+#
+# What: src/core/ngx_string.c, ngx_sprintf_str() (the static helper
+# ngx_vslprintf() calls for every %s/%*s conversion) does:
+#
+#     buf = ngx_cpymem(buf, src, len);   // ngx_string.c:586
+#
+# ngx_cpymem is a memcpy wrapper. When ngx_vslprintf is asked to format a
+# NULL char* with an explicit zero length (a "%*s" argument pair of
+# (NULL, 0), or a %s field whose string pointer is NULL and len resolves to
+# 0 after clamping against the buffer), src is NULL and len is 0. UBSan's
+# nonnull-attribute check flags this as "null pointer passed as argument 2,
+# which is declared to never be null" because libc's memcpy prototype is
+# annotated nonnull, even though passing NULL with a zero count copies
+# nothing and is well-defined in practice on every libc this project
+# targets. This is nginx core's own long-standing pattern, not a bug this
+# module introduced, and not reachable through any ngx_http_zstd_* symbol.
+#
+# Why it only shows up now: it only fires when the format actually hits that
+# NULL/zero-length pair, which in practice means `error_log ... debug` --
+# nginx's own debug logging is by far the heaviest user of ngx_vslprintf
+# with caller-assembled, sometimes-empty string arguments. Every other log
+# level in this project's CI runs at `info` or `warn` (see ci/tools/soak.sh),
+# so a plain ASAN+UBSAN run never reaches it; only a debug-level run does.
+#
+# Why an ignorelist and not a suppressions= file: UBSan's runtime
+# `UBSAN_OPTIONS=suppressions=` mechanism does NOT support the
+# nonnull-attribute check -- verified empirically (clang 19.1.7, three
+# suppression patterns against `nonnull-attribute:<symbol>`, all still
+# aborted). -fsanitize-ignorelist= is a compile-time, function-scoped
+# mechanism that DOES work for this check, verified the same way: a second,
+# unlisted function with the identical memcpy(dst, NULL, 0) call still
+# aborts with the identical ignorelist file in effect.
+#
+# DO NOT add ngx_http_zstd_* (or any other symbol) to this file. Its entire
+# purpose is to keep the module's own undefined behaviour aborting the build
+# it is compiled into -- widening this list defeats that.
+
+[nonnull-attribute]
+fun:ngx_sprintf_str

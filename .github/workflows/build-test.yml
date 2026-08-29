@@ -1410,14 +1410,39 @@ jobs:
           # inside libcrypto anyway), while the mainline build asserts the
           # EVP path.
           NGX_ZSTD_NO_LIBCRYPTO: 1
+          # ubsan.ignorelist below needs -fsanitize-ignorelist=, which is a
+          # clang-only flag (gcc has no equivalent); force the compiler so
+          # this step does not silently fall back to whatever `cc` resolves
+          # to on the runner. Verified present: clang is preinstalled on
+          # this pool's images.
+          CC: clang
         run: |
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
           cd "nginx-${NGINX_VERSION}"
           SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g3 -O1"
+          IGNORELIST="-fsanitize-ignorelist=$GITHUB_WORKSPACE/ubsan.ignorelist"
+          # The Perl suites below (`asan-perl-*`) run ci/t/00-filter.t and
+          # ci/t/01-static.t, both `log_level 'debug'`. nginx core's
+          # ngx_sprintf_str (src/core/ngx_string.c:586, called from
+          # ngx_vslprintf on every debug log line) does memcpy(dst, NULL, 0)
+          # for a NULL/zero-length %s argument -- well-defined in practice,
+          # flagged by UBSan's nonnull-attribute check, and unreachable
+          # below `info`/`warn` log levels, which is why this only surfaces
+          # once the suite runs at debug. -fno-sanitize-recover=undefined
+          # above makes that abort the worker outright, regardless of any
+          # runtime UBSAN_OPTIONS=halt_on_error override -- verified: the
+          # nonnull-attribute check has no UBSAN_OPTIONS=suppressions=
+          # runtime opt-out either. ubsan.ignorelist scopes the ONLY
+          # workaround that verifiably works (-fsanitize-ignorelist=, which
+          # IS honored per-function) to that one nginx-core function by
+          # name; see the file's header for the full derivation. It applies
+          # to this whole compile (module included, since nginx's build has
+          # no per-file cc-opt), but it cannot silence this module's own UB
+          # because no ngx_http_zstd_* symbol is listed.
           ./configure \
             --with-compat \
             --with-debug \
-            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $SAN $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $SAN $IGNORELIST $(pkg-config --cflags libzstd zlib libpcre2-8)" \
             --with-ld-opt="$SAN $(pkg-config --libs libzstd zlib libpcre2-8)" \
             --with-http_sub_module \
             --add-module="$GITHUB_WORKSPACE"
