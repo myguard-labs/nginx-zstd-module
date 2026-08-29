@@ -2173,7 +2173,11 @@ jobs:
           # it fires in -- an nginx worker started by a harness, whose CWD is
           # not the workspace. A relative path there fails to open and LSan
           # aborts, so the suppressions must not depend on where nginx ran.
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan.suppress:print_suppressions=0
+          # verbosity=1 supplies a per-process exit-hook witness. LLVM's
+          # ptrace preflight is only a heuristic and can false-warn before the
+          # real stop-the-world check; ci/tools/lsan_log_verdict.sh separates
+          # that warning from an actual attach failure.
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan.suppress:print_suppressions=0:verbosity=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
           cd "$GITHUB_WORKSPACE"
@@ -2242,85 +2246,8 @@ jobs:
             --nginx-binary "$TEST_NGINX_BINARY" \
             --port 18107 --backend-port 18108 --off-port 18112
 
-          # Leak verdict. Everything in lsan.suppress is gone by now, so any
-          # surviving "ERROR: LeakSanitizer" is an unsuppressed leak and fails
-          # the job -- which is the coverage this step never had.
-          #
-          # A ptrace-blocked runner cannot run the exit-time check at all
-          # (LXC seccomp / yama on builder02). That is INDETERMINATE, not
-          # clean: warn rather than print a checkmark that would mean "no
-          # leaks" when nothing was actually checked. Same distinction
-          # ci/tools/test_reload_leak.sh draws.
-          #
-          # Order matters, and the two conditions are NOT mutually exclusive.
-          # log_path writes one file per process, so a run can easily produce
-          # a ptrace warning from one nginx worker and a real leak report from
-          # another -- ptrace works only intermittently on this runner. Test
-          # the leak FIRST: checking ptrace first lets a warning anywhere in
-          # the set short-circuit the verdict and mask a leak elsewhere, which
-          # is the exact defect this whole step exists to fix.
-          if grep -q 'ERROR: LeakSanitizer' /tmp/lsan-smoke.* 2>/dev/null; then
-            echo "❌ unsuppressed leak under the smoke tests:"
-            cat /tmp/lsan-smoke.* 2>/dev/null
-            exit 1
-          elif grep -qE 'ptrace appears to be blocked|LeakSanitizer may hang' \
-                 /tmp/lsan-smoke.* 2>/dev/null; then
-            echo "::warning::LeakSanitizer could not run its exit-time check" \
-                 "(ptrace blocked on this runner — LXC seccomp / yama). Smoke" \
-                 "leak check INDETERMINATE, not clean; fix the runner profile" \
-                 "to restore coverage."
-            echo "⚠ smoke tests passed; leak check INDETERMINATE"
-            exit 1
-          else
-            # A clean log here is NOT proof LSan ran: run 33084048220 printed
-            # this exact "clean" verdict, and seconds later in the SAME job
-            # the reload-leak step's ptrace-blocked signature fired 4/4 --
-            # same runner, same environment. A log with neither a finding
-            # nor the ptrace signature is indistinguishable from "LSan never
-            # attempted its exit-time check at all", so a bare grep miss is
-            # not enough to call this clean. Prove the detector actually
-            # works here first, with the SAME positive control
-            # test_reload_leak.sh uses (ci/tools/lsan_positive_control.sh),
-            # before trusting the "no finding" reading above.
-            #
-            # Three outcomes, not two: rc=2 ("could not even attempt the
-            # control" -- no cc, or the ASan compile failed) is a
-            # different, honest fact from rc=1 ("attempted, LSan failed to
-            # catch the canary" -- ptrace is the known cause here). Only
-            # rc=1 is the run-33084048220 ambiguity this fix closes; rc=2
-            # gets its own loud, distinct label rather than being folded
-            # into either "clean" or the ptrace-specific warning.
-            . "$GITHUB_WORKSPACE/ci/tools/lsan_positive_control.sh"
-            set +e
-            lsan_positive_control
-            control_rc=$?
-            set -e
-            if [ "$control_rc" -eq 0 ]; then
-              echo "✓ no unsuppressed leaks under the smoke tests"
-              echo "✓ positive control confirmed LSan can detect a deliberate leak here"
-              echo "✓ All smoke tests clean under ASAN+UBSAN"
-            elif [ "$control_rc" -eq 2 ]; then
-              echo "::warning::LeakSanitizer's positive control could not even" \
-                   "be attempted (no ASan-capable cc on this runner) --" \
-                   "cannot confirm the clean smoke log above means no leaks." \
-                   "Smoke leak check INDETERMINATE (could not attempt control)."
-              echo "⚠ smoke tests passed; leak check INDETERMINATE (control could not run)"
-              exit 1
-            else
-              echo "::warning::LeakSanitizer's positive control failed here" \
-                   "(a deliberate canary leak was not caught, so LSan's" \
-                   "exit-time check is not provably working). The most" \
-                   "likely cause on this runner pool is ptrace being" \
-                   "blocked (LXC seccomp / yama), same as run 33084048220's" \
-                   "reload-leak step; if that is ruled out, check the ASan" \
-                   "toolchain install instead. The clean smoke log above" \
-                   "does NOT mean no leaks; it means the leak check could" \
-                   "not run. Smoke leak check INDETERMINATE, not clean;" \
-                   "fix the runner profile to restore coverage."
-              echo "⚠ smoke tests passed; leak check INDETERMINATE (could not run)"
-              exit 1
-            fi
-          fi
+          bash ci/tools/lsan_log_verdict.sh '/tmp/lsan-smoke.*'
+          echo "✓ All smoke tests clean under ASAN+UBSAN"
 
       - name: zstd_dict_file reload leak check (CDict lifecycle)
         env:

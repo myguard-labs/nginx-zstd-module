@@ -12,29 +12,18 @@
 # then stop nginx cleanly. ASAN's leak detector reports on exit; a leak
 # report in the log fails this script.
 #
-# Environment caveat this script must survive: LeakSanitizer's exit-time
-# check ptrace-attaches a stop-the-world tracer, and runners whose
-# seccomp/yama policy blocks ptrace kill that tracer ("WARNING: ptrace
-# appears to be blocked", "Child exited with signal ..."), after which
-# LSan reports NOTHING. Two failure modes follow: the warning lands in
-# log_path and a file-existence check misreads it as a leak (the CI
-# flake that motivated this script's triage), and a genuinely quiet run
-# is a VACUOUS pass because the detector never ran. Hence the positive
-# control below, verdicts read from log content rather than log
-# existence, and a watchdog on shutdown ("LeakSanitizer may hang" is
-# real). Indeterminate environments fail with a ::warning:: GitHub
-# annotation naming the runner fix: this is a load-bearing leak lane, so
-# "the detector could not run" cannot be a passing verdict. A real leak
-# still fails first because it produces an actual "ERROR: LeakSanitizer"
-# report.
+# LeakSanitizer uses ptrace for its exit-time stop-the-world phase. LLVM first
+# runs a heuristic preflight which may print "ptrace appears to be blocked"
+# even though it then continues and the real check succeeds. Verbose logs plus
+# ci/tools/lsan_log_verdict.sh distinguish that false warning from an actual
+# attach failure, require an exit-hook marker for every process, and run a
+# deliberate-leak control. The shutdown watchdog still bounds a real hang.
 #
 # Usage: tools/test_reload_leak.sh <nginx-binary> [reloads]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=ci/tools/lsan_positive_control.sh
-. "$SCRIPT_DIR/lsan_positive_control.sh"
 
 NGINX="${1:?usage: test_reload_leak.sh <nginx-binary> [reloads]}"
 RELOADS="${2:-5}"
@@ -44,34 +33,6 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/html"
-
-# ── Positive control ─────────────────────────────────────────────────
-# Prove LSan can detect a DELIBERATE leak in this environment before
-# trusting any verdict below; a broken detector must read as
-# indeterminate, never as "no leak". Shared with the smoke-tests step in
-# .github/workflows/build-test.yml via lsan_positive_control.sh so both
-# call sites prove the SAME thing the SAME way.
-#
-# rc=2 ("could not attempt": no cc, or the ASan compile itself failed) is
-# NOT the same fact as rc=1 ("attempted, LSan failed to catch it") -- only
-# rc=1 says anything about whether THIS runner's LSan works, so only rc=1
-# short-circuits here. rc=2 falls through and still runs the real
-# reload-leak test below, exactly as this script did before the positive
-# control existed.
-set +e
-lsan_positive_control
-control_rc=$?
-set -e
-if [ "$control_rc" -eq 1 ]; then
-    echo "::warning::LeakSanitizer failed its positive control" \
-         "(a deliberate canary leak was not caught, so LSan's exit-time" \
-         "check is not provably working here). The most likely cause on" \
-         "this runner pool is ptrace being blocked (LXC seccomp / yama);" \
-         "if that is ruled out, check the ASan toolchain install instead." \
-         "Leak check INDETERMINATE and therefore failed; fix the runner profile to" \
-         "restore coverage."
-    exit 1
-fi
 
 # A non-trivial dictionary so ZSTD_createCDict() actually allocates.
 head -c 8192 /dev/urandom | base64 >"$WORK/html/zstd.dict"
@@ -101,7 +62,7 @@ http {
 EOF
 
 # ASAN must report leaks on exit and treat them as failures.
-export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:exitcode=23:log_path=$WORK/logs/asan"
+export ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:exitcode=23:verbosity=1:log_path=$WORK/logs/asan"
 
 "$NGINX" -p "$WORK" -c "$WORK/conf/nginx.conf" &
 NGINX_PID=$!
@@ -148,38 +109,6 @@ rc=$?
 set -e
 kill "$WATCHDOG" 2>/dev/null || true
 
-# ── Verdict triage: read the sanitizer output, never just stat it ────
-# log_path receives EVERYTHING the sanitizer prints, warnings included.
-if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
-
-    # Real sanitizer findings fail unconditionally — even if the
-    # watchdog had to kill a hung exit, a written report stands.
-    if grep -q -E 'ERROR: (Leak|Address)Sanitizer|SUMMARY: (Leak|Address)Sanitizer' \
-        "$WORK"/logs/asan*
-    then
-        echo "❌ sanitizer reported errors across $RELOADS reloads:"
-        cat "$WORK"/logs/asan*
-        exit 1
-    fi
-
-    # The known lockdown signature: LSan's tracer was killed before it
-    # could inspect anything. No verdict exists in either direction.
-    if grep -q -E 'ptrace.*blocked|LeakSanitizer may hang|Child exited with signal' \
-        "$WORK"/logs/asan*
-    then
-        echo "::warning::LeakSanitizer could not run its exit-time check" \
-             "(ptrace blocked on this runner — LXC seccomp / yama). Leak" \
-             "check INDETERMINATE and therefore failed; fix the runner profile to" \
-             "restore coverage."
-        cat "$WORK"/logs/asan*
-        exit 1
-    fi
-
-    echo "❌ unexpected sanitizer output (treating as failure):"
-    cat "$WORK"/logs/asan*
-    exit 1
-fi
-
 if [ "$rc" -eq 137 ]; then
     echo "::warning::nginx under ASAN had to be killed by the shutdown" \
          "watchdog (LeakSanitizer hang?). Leak check INDETERMINATE and" \
@@ -193,4 +122,5 @@ if [ "$rc" -ne 0 ]; then
     exit 1
 fi
 
+"$SCRIPT_DIR/lsan_log_verdict.sh" "$WORK/logs/asan*"
 echo "✓ No CDict leak across $RELOADS config reloads under ASAN"
