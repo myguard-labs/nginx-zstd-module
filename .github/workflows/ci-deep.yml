@@ -220,7 +220,7 @@ jobs:
           MATRIX_PORT: ${{ matrix.port }}
         run: ci/tools/max-port.sh "$MATRIX_PORT" 10
 
-      - name: Run ci/t/ (filter + static + conf-warn)
+      - name: Run ci/t/ (filter + static + conf-warn + dcz)
         env:
           # See build-test.yml's identical setting for why this must be 20,
           # not the ~2s Test::Nginx::Socket default.
@@ -244,6 +244,7 @@ jobs:
           export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-$MATRIX_FLAVOR-$MATRIX_VERSION"
           mkdir -p "$TEST_NGINX_SERVROOT"
           prove -v ci/t/00-filter.t ci/t/02-conf-warn.t
+          prove -v ci/t/03-dcz.t
           # 01-static.t serves fixtures via "root ../suite", resolved against
           # the servroot's PARENT, so the servroot must be a sibling of
           # ci/t/suite — i.e. inside ci/t/. A /tmp servroot makes every static

@@ -249,7 +249,10 @@ worker() {
         echo "FAIL worker $wid: no dcz response was ever verified"
         return 1
     fi
-    [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]
+    if [ "$bad" -ne 0 ] || [ "$ok" -eq 0 ]; then
+        return 1
+    fi
+    return 0
 }
 
 pids=()

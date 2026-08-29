@@ -32,6 +32,31 @@ MODULE_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 cd "$MODULE_DIR" || exit 1
 
 fail=0
+toc="$(sed -n '/^# Table of Contents$/,/^# Status$/p' README.md)"
+local_suites="$(sed -n '/^Run the suites locally:/,/^# Unit tests/p' README.md)"
+deep_suite_step="$(sed -n '/name: Run ci\/t\//,/^  fuzz:/p' .github/workflows/ci-deep.yml)"
+
+# Every public directive heading must be reachable from the README index.
+while IFS= read -r directive; do
+    if ! grep -Fq -- "[$directive](#$directive)" <<<"$toc"; then
+        echo "FAIL: README directive section $directive is missing from the table of contents"
+        fail=1
+    fi
+done < <(sed -n 's/^### \(zstd[_a-z]*\)$/\1/p' README.md)
+
+# Commands advertised as the local/deep full suite must include every Perl suite.
+for suite in ci/t/*.t; do
+    name="$(basename "$suite")"
+    grep -Fq -- "$name" <<<"$local_suites" || {
+        echo "FAIL: README local test instructions omit $name"
+        fail=1
+    }
+    if ! grep -F -- "$name" <<<"$deep_suite_step" \
+        | grep -Eq '^[[:space:]]*prove '; then
+        echo "FAIL: CI Deep full-suite claim omits $name"
+        fail=1
+    fi
+done
 
 # --- every real workflow file is mentioned in README.md ---
 for wf in .github/workflows/*.yml; do

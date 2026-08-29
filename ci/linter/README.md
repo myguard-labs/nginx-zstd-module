@@ -77,7 +77,7 @@ externally-managed, so a bare `pip3 install` fails and
 
 ```sh
 pipx install 'ruff==0.16.1'         # pinned to the CI version on purpose
-pipx install 'semgrep==1.169.0'     # pinned to the CI version on purpose
+pipx install 'semgrep==1.173.0'     # pinned to the CI version on purpose
 ```
 
 `ruff` and `semgrep` are pinned because an unpinned upgrade changes findings

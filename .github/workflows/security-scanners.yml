@@ -50,10 +50,10 @@ jobs:
           # system Python on the Ubuntu 24.04 self-hosted runner). Fall back to a
           # user pip install with --break-system-packages if pipx is unavailable.
           if command -v pipx >/dev/null; then
-            pipx install --quiet semgrep
+            pipx install --quiet semgrep==1.173.0
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           else
-            pip3 install --quiet --user --break-system-packages semgrep
+            pip3 install --quiet --user --break-system-packages semgrep==1.173.0
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
       - name: Configure nginx src tree (clang-tidy headers)

@@ -429,6 +429,7 @@ jobs:
 
       - name: cppcheck (static analysis)
         run: |
+          set -o pipefail
           # Gate on real bug categories (warning/performance/portability), not
           # the full --enable=all style/unusedFunction noise. error-exitcode=1
           # fails the job on any such finding; a checked-in suppressions file is
@@ -445,6 +446,7 @@ jobs:
 
       - name: clang static analyzer
         run: |
+          set -o pipefail
           N="$NGINX_SRC_TREE"
           INCLUDE_FLAGS="-I$N/src/core -I$N/src/event -I$N/src/event/modules \
             -I$N/src/event/quic -I$N/src/os/unix -I$N/objs -I$N/src/http \
