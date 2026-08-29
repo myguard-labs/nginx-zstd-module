@@ -1367,18 +1367,22 @@ ngx_http_zstd_static_send(ngx_http_request_t *r, ngx_open_file_info_t *of,
 }
 
 
+/*
+ * Decide whether this request is a candidate for a precompressed .zst
+ * at all, before any filesystem work: method, URI shape, the
+ * zstd_static setting, and the RFC 9842 dcz stand-aside. Split out of
+ * ngx_http_zstd_static_handler() purely for readability -- the tests,
+ * their order, their log lines and their return values are unchanged.
+ *
+ * Returns NGX_OK to mean "keep going", with the zscf out-param set and
+ * the accepts out-param holding the Accept-Encoding verdict the Vary
+ * decision needs later. Any other value is the handler return.
+ */
 static ngx_int_t
-ngx_http_zstd_static_handler(ngx_http_request_t *r)
+ngx_http_zstd_static_negotiate(ngx_http_request_t *r,
+    const ngx_http_zstd_static_conf_t **zscfp, ngx_uint_t *accepts)
 {
-    u_char                       *p;
-    ngx_int_t                     rc;
-    ngx_uint_t                    accepts;
-    ngx_uint_t                    level;
-    size_t                        root;
-    ngx_str_t                     path;
-    ngx_log_t                    *log;
-    ngx_open_file_info_t          of;
-    ngx_http_core_loc_conf_t           *clcf;
+    ngx_int_t                           rc;
     const ngx_http_zstd_static_conf_t  *zscf;
 
     if (!(r->method & (NGX_HTTP_GET|NGX_HTTP_HEAD))) {
@@ -1443,7 +1447,32 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * variable to reach the Vary decision after the .zst has been
      * validated (see the emission site near the end of the probe).
      */
-    accepts = (rc == NGX_OK);
+
+    *accepts = (rc == NGX_OK);
+    *zscfp = zscf;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_zstd_static_handler(ngx_http_request_t *r)
+{
+    u_char                       *p;
+    ngx_int_t                     rc;
+    ngx_uint_t                    accepts;
+    ngx_uint_t                    level;
+    size_t                        root;
+    ngx_str_t                     path;
+    ngx_log_t                    *log;
+    ngx_open_file_info_t          of;
+    ngx_http_core_loc_conf_t           *clcf;
+    const ngx_http_zstd_static_conf_t  *zscf;
+
+    rc = ngx_http_zstd_static_negotiate(r, &zscf, &accepts);
+    if (rc != NGX_OK) {
+        return rc;
+    }
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
@@ -1468,10 +1497,10 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
      * stored zstd body for this one.
      *
      * "always" ignores Accept-Encoding and never varies, so it keeps
-     * its own shortcut: rc is forced to NGX_OK for it above, which
+     * its own shortcut: accepts is forced true for it above, which
      * leaves this test false regardless of gzip_vary.
      */
-    if (zscf->enable != NGX_HTTP_ZSTD_STATIC_ON && rc != NGX_OK) {
+    if (zscf->enable != NGX_HTTP_ZSTD_STATIC_ON && !accepts) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0,
                        "zstd static: skip, client did not accept zstd");
         return NGX_DECLINED;
