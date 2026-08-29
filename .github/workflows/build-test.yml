@@ -1374,7 +1374,12 @@ jobs:
             'Acquire::https::Timeout "20";' \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+          # clang, not just build-essential: the ASAN+UBSAN configure below
+          # passes -fsanitize-ignorelist=, which gcc does not implement, so
+          # this step sets CC=clang. runs-on is a pool variable rather than a
+          # pinned image, so the compiler is installed here rather than
+          # assumed present on the runner.
+          sudo apt-get install -y build-essential clang pkg-config libzstd-dev \
             libpcre2-dev zlib1g-dev wget
 
       - name: Cache nginx source tarball
