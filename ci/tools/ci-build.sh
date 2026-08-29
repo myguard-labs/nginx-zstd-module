@@ -277,16 +277,16 @@ echo ""
 #     (without either, config load fails with "unknown directive" and
 #      Test::Nginx bails out of the whole TAP file)
 #   --with-debug         — TEST 91 asserts on a debug-level error.log line
-#   ZSTD_STATIC_LINKING_ONLY — TEST 45 needs the memory-estimation API that
-#     zstd_max_cctx_memory is built on; auto/zstd only defines it on the
-#     explicit ZSTD_INC path, not on the pkg-config auto-discovery path this
-#     script takes.
+#   no ZSTD_STATIC_LINKING_ONLY — this script builds a deployable dynamic
+#     module against libzstd.so, whose ABI does not guarantee the static-only
+#     entry points. auto/zstd enables that macro only after a true static
+#     archive probe succeeds.
 # Coverage adds --coverage to BOTH cc-opt and ld-opt via the configure
 # argument, not env CC/CFLAGS -- nginx's configure probes the compiler with
 # its own invocations (`` `$CC -v ...` ``, unquoted so it also splits on a
 # ccache prefix) and ignores a bare CC=/CFLAGS= override entirely: nothing in
 # configure or the generated Makefile ever reads it.
-CC_OPT="-DZSTD_STATIC_LINKING_ONLY"
+CC_OPT=""
 LD_OPT=""
 if [ "$MODE" = "coverage" ]; then
     CC_OPT="$CC_OPT --coverage -O0"
@@ -338,6 +338,8 @@ echo "==========================================================================
 echo ""
 
 make -j"$(nproc)" 2>&1 | tail -10
+"$ZSTD_MODULE_DIR/ci/tools/check-zstd-dynamic-linkage.sh" \
+    objs/ngx_http_zstd_filter_module.so
 
 echo ""
 echo "=========================================================================="
