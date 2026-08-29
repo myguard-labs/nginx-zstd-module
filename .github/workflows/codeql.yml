@@ -104,13 +104,21 @@ jobs:
         with:
           languages: c-cpp
           queries: security-extended
-          paths: |
-            filter
-            static
-            *.c
-            *.h
-          paths-ignore: |
-            nginx-*/**
+          # `paths:`/`paths-ignore:` are NOT init-action inputs (verified
+          # against codeql-action's action.yml at this pinned SHA — they
+          # don't appear in its `inputs:` list at all); they are CodeQL
+          # *config-file* keys, so passing them as `with:` silently no-ops
+          # and the requested source scope was never applied. `config:`
+          # (inline YAML, same schema as config-file, takes precedence over
+          # it) is what actually wires them in.
+          config: |
+            paths:
+              - filter
+              - static
+              - '*.c'
+              - '*.h'
+            paths-ignore:
+              - 'nginx-*/**'
 
       - name: Build module sources for CodeQL
         run: |
@@ -132,6 +140,42 @@ jobs:
           make -j"$(nproc)"
 
       - name: Perform CodeQL analysis
+        id: analyze
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: "/language:c-cpp"
+
+      - name: Assert database saw module sources, not just nginx core
+        env:
+          DB_LOCATIONS: ${{ steps.analyze.outputs.db-locations }}
+        run: |
+          set -euo pipefail
+          # db-locations is a JSON map {"cpp": "/abs/path"} — use the
+          # action's own reported path rather than guessing RUNNER_TEMP
+          # layout, which is an implementation detail not part of its
+          # documented contract.
+          db="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["cpp"])' "$DB_LOCATIONS")"
+          if [ -z "$db" ] || [ ! -d "$db" ]; then
+            echo "::error::could not resolve the CodeQL cpp database path from db-locations: $DB_LOCATIONS"
+            exit 1
+          fi
+          src="$db/src"
+          if [ ! -d "$src" ]; then
+            echo "::error::CodeQL database has no src/ directory at $src"
+            exit 1
+          fi
+          echo "Extracted source tree: $src"
+          module_hits="$(find "$src" -path '*/nginx-*' -prune -o \
+            \( -path '*/filter/*' -o -path '*/static/*' -o -name '*.c' -o -name '*.h' \) \
+            -type f -print | grep -vcE '/nginx-[0-9]')"
+          nginx_core_only="$(find "$src" -path '*/nginx-*/src/*' -type f -print | wc -l)"
+          echo "module source files in database: $module_hits"
+          echo "nginx-core src/ files in database: $nginx_core_only"
+          if [ "$module_hits" -eq 0 ]; then
+            echo "::error::CodeQL database contains zero module source files" \
+                 "(filter/, static/, *.c, *.h) — the extracted DB regressed to" \
+                 "nginx-core-only or empty, same failure class as the original" \
+                 "'no source code seen during build' report."
+            exit 1
+          fi
+          echo "✓ database includes module sources ($module_hits files)"

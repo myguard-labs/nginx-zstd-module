@@ -1867,6 +1867,16 @@ jobs:
           python3 ci/tools/test_dcz_cache_partition.py \
             --nginx-binary "$TEST_NGINX_BINARY" --port 18120 --origin-port 18121
           echo "✓ RFC 9842 dcz end-to-end test passed"
+          # dcz 40-byte prefix inlining: one compressor-buffer allocation
+          # per response, not a separate dedicated prefix buffer, and the
+          # wire body still decodes byte-exact. Needs --with-debug (same as
+          # the ring-key test above): the allocation-count oracle greps
+          # debug log lines ("zstd get_buf: allocated buffer" /
+          # "zstd dcz: 40-byte frame header queued"). This tool previously
+          # existed in ci/tools/ but was never wired into any CI job.
+          python3 ci/tools/test_dcz_prefix_alloc.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18311
+          echo "✓ dcz prefix single-allocation regression passed"
 
       - name: Test summary
         if: success()
@@ -1968,6 +1978,44 @@ jobs:
           export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/ci/t/servroot-static-${RUN_ID}-${JOB_NAME}"
           mkdir -p "$TEST_NGINX_SERVROOT"
           perl ci/t/01-static.t > ci/t/static-asan.log 2>&1 || true
+
+          # Functional pass/fail stays ungated (see comment above), but a
+          # suite that executed ZERO tests -- broken harness, bad servroot,
+          # module not found -- must not pass silently just because grep
+          # found no sanitizer report in an empty/short-circuited log. Gate
+          # on "tests actually ran", not on their verdicts: require a TAP
+          # plan line (`1..N`, N>0) and at least one `ok`/`not ok` result
+          # line whose count matches N, for BOTH suites.
+          check_tap_ran() {
+            local label="$1" log="$2"
+            local plan executed
+            plan="$(grep -oE '^1\.\.[0-9]+' "$log" | head -1 | cut -d. -f3)"
+            executed="$(grep -cE '^(not )?ok ' "$log")"
+            if [ -z "$plan" ] || [ "$plan" -eq 0 ]; then
+              echo "❌ $label produced no valid TAP plan (expected '1..N' with N>0):"
+              tail -20 "$log"
+              return 1
+            fi
+            if [ "$executed" -eq 0 ]; then
+              echo "❌ $label planned $plan tests but executed 0:"
+              tail -20 "$log"
+              return 1
+            fi
+            if [ "$executed" -ne "$plan" ]; then
+              echo "❌ $label planned $plan tests but only $executed ran/reported:"
+              tail -20 "$log"
+              return 1
+            fi
+            echo "✓ $label ran $executed/$plan planned tests"
+          }
+          tap_ok=1
+          check_tap_ran "00-filter.t" ci/t/filter-asan.log || tap_ok=0
+          check_tap_ran "01-static.t" ci/t/static-asan.log || tap_ok=0
+          if [ "$tap_ok" -eq 0 ]; then
+            echo "❌ one or more Perl suites did not execute their full planned test count"
+            exit 1
+          fi
+
           # Gate strictly on sanitizer reports attributable to this module.
           if cat /tmp/asan-zstd.* ci/t/filter-asan.log ci/t/static-asan.log 2>/dev/null \
                | grep -nE 'ngx_http_zstd' \
