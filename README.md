@@ -34,6 +34,7 @@ This is a hardened fork: every push/PR is exercised against **nginx mainline**, 
     * [zstd_max_length](#zstd_max_length)
     * [zstd_types](#zstd_types)
     * [zstd_buffers](#zstd_buffers)
+    * [zstd_buffers_unsafe](#zstd_buffers_unsafe)
     * [zstd_target_cblock_size](#zstd_target_cblock_size)
     * [zstd_window_log](#zstd_window_log)
     * [zstd_long](#zstd_long)
@@ -42,7 +43,9 @@ This is a hardened fork: every push/PR is exercised against **nginx mainline**, 
     * [zstd_bypass_vary](#zstd_bypass_vary)
     * [zstd_dict_file](#zstd_dict_file)
     * [zstd_dict_strict_path](#zstd_dict_strict_path)
+    * [zstd_dict_file_unsafe](#zstd_dict_file_unsafe)
     * [zstd_dcz_dict_file](#zstd_dcz_dict_file)
+    * [zstd_dcz_dict_trust_hashes](#zstd_dcz_dict_trust_hashes)
     * [zstd_dcz_assume_secure_transport](#zstd_dcz_assume_secure_transport)
   * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
     * [zstd_static](#zstd_static)
@@ -209,7 +212,7 @@ Notes on the libzstd floor — these are enforced in code, not assumed:
   values are also unsupported and are clamped to `1` with a warning
   (guarded by `#if ZSTD_VERSION_NUMBER >= 10400`).
 * **< 1.5.6**: `zstd_target_cblock_size` has no effect — the directive
-  is accepted but silently ignored (apply path gated by
+  is accepted as a warned no-op (apply path gated by
   `#if ZSTD_VERSION_NUMBER >= 10506`, with a config-load warning).
   Everything else works. This fallback path is exercised in CI by a
   dedicated "Build (libzstd 1.4.x — fallback paths)" job that links the
@@ -630,7 +633,7 @@ Sets the target compressed block size for zstd frames. Controlling block size im
 
 > **Rationale:** When the zstd encoder produces large compressed blocks, the entire block must be decompressed before any content within it becomes available to the client. Smaller blocks allow incremental decompression and earlier access to critical resources. For example, CSS in `<head>` can be parsed sooner if it lands in an early, smaller block.
 
-> **Compatibility:** This directive requires libzstd v1.5.6 or later. On older versions, the directive is silently ignored. If not set (value 0 or unset), zstd uses its internal defaults, typically yielding blocks of 128–256 KB depending on the compression level and content.
+> **Compatibility:** This directive requires libzstd v1.5.6 or later. On older versions, the directive is accepted as a warned no-op. If not set (value 0 or unset), zstd uses its internal defaults, typically yielding blocks of 128–256 KB depending on the compression level and content.
 
 **Example:**
 
@@ -1373,7 +1376,8 @@ Run the suites locally:
 
 ```bash
 # Perl suites (needs Test::Nginx::Socket and a built nginx)
-TEST_NGINX_BINARY=/path/to/nginx prove ci/t/00-filter.t ci/t/01-static.t
+TEST_NGINX_BINARY=/path/to/nginx prove \
+  ci/t/00-filter.t ci/t/01-static.t ci/t/02-conf-warn.t ci/t/03-dcz.t
 
 # Unit tests over the Accept-Encoding decision function
 ci/tests/unit/run.sh
