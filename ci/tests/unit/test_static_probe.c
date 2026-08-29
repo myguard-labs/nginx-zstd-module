@@ -49,6 +49,8 @@ typedef intptr_t       ngx_int_t;
 typedef uintptr_t      ngx_uint_t;
 typedef unsigned char  u_char;
 
+#define ngx_memcpy  memcpy
+
 /*
  * From <zstd.h>, stable since 0.8.0. Reproduced rather than included so
  * this layer needs no libzstd headers -- same reasoning as ngx_shim.h for
@@ -97,17 +99,19 @@ check(int ok, const char *what)
 
 
 /*
- * Poisoned probe buffer: 18 usable bytes preceded and followed by a guard
- * region of 0xA5. A read past either end that happens to land on a guard
+ * Poisoned, deliberately unaligned probe buffer: 18 usable bytes preceded
+ * and followed by a guard region of 0xA5. The backing array is uint64_t-
+ * aligned and the one-byte leading guard offsets every probe address. A read
+ * past either end that happens to land on a guard
  * byte changes the verdict (0xA5A5A5A5 is neither magic), and the trailing
  * guard is what would absorb an off-by-one in the "enough bytes for this
  * layout" checks -- so a mutant that reads hdr[n] instead of stopping is
  * reading a defined, wrong value rather than heap garbage that might
  * happen to be correct.
  */
-#define GUARD  8
+#define GUARD  1
 
-static u_char  buf[GUARD + 18 + GUARD];
+static _Alignas(uint64_t) u_char  buf[GUARD + 18 + GUARD];
 
 
 static const u_char *

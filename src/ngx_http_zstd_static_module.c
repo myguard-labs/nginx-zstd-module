@@ -331,14 +331,18 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
 {
     uint32_t    mw;
     uint64_t    w;
-    ngx_uint_t  i, fhd, fcs_size, off;
+    ngx_uint_t  fhd, fcs_size, off;
 
     static const ngx_uint_t  did_len[4] = { 0, 1, 2, 4 };
 
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    ngx_memcpy(&mw, hdr, sizeof(mw));
+#else
     mw = ((uint32_t) hdr[0])
        | ((uint32_t) hdr[1] << 8)
        | ((uint32_t) hdr[2] << 16)
        | ((uint32_t) hdr[3] << 24);
+#endif
 
     if (mw != ZSTD_MAGICNUMBER
         && (mw & ZSTD_MAGIC_SKIPPABLE_MASK) != ZSTD_MAGIC_SKIPPABLE_START)
@@ -366,10 +370,19 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
             return NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED;
         }
 
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        {
+            uint32_t  skip_size;
+
+            ngx_memcpy(&skip_size, hdr + 4, sizeof(skip_size));
+            *window = skip_size;
+        }
+#else
         *window = ((uint64_t) hdr[4])
                 | ((uint64_t) hdr[5] << 8)
                 | ((uint64_t) hdr[6] << 16)
                 | ((uint64_t) hdr[7] << 24);
+#endif
 
         return NGX_HTTP_ZSTD_STATIC_FRAME_SKIP;
     }
@@ -427,10 +440,39 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
             return NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED;
         }
 
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        switch (fcs_size) {
+        case 1:
+            w = hdr[off];
+            break;
+        case 2:
+            {
+                uint16_t  value;
+
+                ngx_memcpy(&value, hdr + off, sizeof(value));
+                w = value;
+            }
+            break;
+        case 4:
+            {
+                uint32_t  value;
+
+                ngx_memcpy(&value, hdr + off, sizeof(value));
+                w = value;
+            }
+            break;
+        default:
+            ngx_memcpy(&w, hdr + off, sizeof(w));
+            break;
+        }
+#else
+        ngx_uint_t  i;
+
         w = 0;
         for (i = 0; i < fcs_size; i++) {
             w |= (uint64_t) hdr[off + i] << (8 * i);
         }
+#endif
 
         if (fcs_size == 2) {
             w += 256;  /* RFC 8878: 2-byte field is offset */
