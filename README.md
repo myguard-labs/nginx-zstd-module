@@ -1133,7 +1133,7 @@ Opts out of verifying the SHA-256 of each dictionary file when a hash literal is
 
 This is an optimization for deployments where dictionaries are identified by content-addressed paths and the tooling that generates the config is the same tooling that places the files — a pipeline that can be trusted to derive each literal from the file it ships. It reclaims the config-load cost of hashing: measured on a production config with 737 dictionary lines, `nginx -t` runs 5.10s with the verify pass (4.26s user — the SHA-256 alone) against 0.87s with trusted literals (0.03s user). Lines without a literal are hashed as always; trust changes only what a supplied literal means.
 
-The stated trade: a stale or mistyped literal is advertised verbatim, and clients holding the advertised dictionary will receive responses that may fail to decode. Only enable this when the pipeline that writes the literal is the same one that placed the file. The directive must precede every [`zstd_dcz_dict_file`](#zstd_dcz_dict_file) that carries a literal; declaring it after one is a config-load error.
+The stated trade: a stale or mistyped literal is advertised verbatim, and clients holding the advertised dictionary receive responses they may fail to decode — or, when the stale dictionary happens to be the same size, that silently decode to wrong content. Only enable this when the pipeline that writes the literal is the same one that placed the file. The directive must precede every [`zstd_dcz_dict_file`](#zstd_dcz_dict_file) that carries a literal; declaring it after one is a config-load error.
 
 **Example (content-addressed deployment with optimized hashing):**
 
@@ -1146,7 +1146,7 @@ http {
         location /app/ {
             # Hash comes from the same tool that places the file;
             # the verify pass is skipped.
-            zstd_dcz_dict_file /srv/dicts/app-v41-a1b2c3d4.bin a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef0;
+            zstd_dcz_dict_file /srv/dicts/app-v41-a1b2c3d4.bin a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01;
         }
     }
 }

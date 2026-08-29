@@ -58,10 +58,11 @@ jobs:
       # Replay every triaged past crash FIRST -- fast (each is one input)
       # and deterministic, so a reintroduced bug fails in seconds instead
       # of waiting on the 120s fresh budget to happen to rediscover it.
-      # The glob guard below ensures visibility: an empty directory is a
-      # real state (not a bug), but a stale directory that stopped matching
-      # anything after a rename WOULD be a bug, so this step always reports
-      # its case count explicitly to catch either scenario.
+      # The glob guard below reports the number of matching crash-* cases
+      # explicitly, so a corpus that silently stopped being replayed is
+      # visible in the log rather than passing as a no-op. It counts only
+      # what matches crash-*; an entry renamed out of that pattern is not
+      # replayed and is not reported here.
       - name: Replay recorded crash regressions
         run: |
           set -euo pipefail
