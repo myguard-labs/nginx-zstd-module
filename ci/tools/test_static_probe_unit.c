@@ -7,10 +7,13 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef intptr_t       ngx_int_t;
 typedef uintptr_t      ngx_uint_t;
 typedef unsigned char  u_char;
+
+#define ngx_memcpy  memcpy
 
 #define ZSTD_MAGICNUMBER              0xFD2FB528U
 #define ZSTD_MAGIC_SKIPPABLE_START    0x184D2A50U
