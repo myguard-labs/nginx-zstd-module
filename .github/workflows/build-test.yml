@@ -693,6 +693,174 @@ jobs:
           path: ${{ matrix.dir }}/objs/${{ matrix.flavor }}
           retention-days: 1
 
+  # ── Native arm64 build and decoded runtime smoke with current libzstd ───
+  build-arm64:
+    name: Build (nginx arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    needs: [resolve, validation]
+    env:
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
+
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'DPkg::Lock::Timeout "120";' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "20";' \
+            'Acquire::https::Timeout "20";' \
+            | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libzstd-dev \
+            libpcre2-dev \
+            zlib1g-dev \
+            python3 \
+            python3-requests \
+            wget \
+            zstd
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball-arm64
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx
+        if: steps.nginx-tarball-arm64.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        run: |
+          set -euo pipefail
+          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
+            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
+          gnupghome="$(mktemp -d)"
+          export GNUPGHOME="$gnupghome"
+          chmod 700 "$gnupghome"
+          for keyfile in ci/tools/keys/*.key; do
+            gpg --quiet --import "$keyfile" 2>/dev/null
+          done
+          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
+          rm -rf "$gnupghome"
+
+      - name: Configure arm64 build
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure \
+            --with-compat \
+            --with-debug \
+            --with-http_ssl_module \
+            --with-http_gzip_static_module \
+            --with-http_realip_module \
+            --with-http_v2_module \
+            --with-http_sub_module \
+            --with-http_auth_request_module \
+            --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $(pkg-config --cflags libzstd zlib libpcre2-8)" \
+            --with-ld-opt="$(pkg-config --libs libzstd zlib libpcre2-8)" \
+            --add-dynamic-module="$GITHUB_WORKSPACE"
+
+      - name: Strict compile module sources
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+          NGINX_CFLAGS=$(awk '/^CFLAGS[[:space:]]*=/{sub(/^CFLAGS[[:space:]]*=[[:space:]]*/,""); print; exit}' objs/Makefile)
+          ALL_INCS=$(awk '/^ALL_INCS[[:space:]]*=/{found=1} found{line=$0; sub(/^ALL_INCS[[:space:]]*=[[:space:]]*/,"",line); gsub(/\\$/, "", line); printf "%s ", line; if (!/\\$/) exit}' objs/Makefile)
+          for src in \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
+            "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c"; do
+            # NGINX_CFLAGS and ALL_INCS are flag lists that MUST word-split.
+            # shellcheck disable=SC2086
+            gcc -c -fPIC $NGINX_CFLAGS \
+              -Wall -Wextra -Wshadow -Wstrict-aliasing \
+              -Wunreachable-code -Wunused -Werror \
+              $ALL_INCS \
+              "$src" -o "/tmp/$(basename "$src" .c)-arm64.o"
+          done
+
+      - name: Build and verify arm64 binary
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+          make -j"$(nproc)"
+          file objs/nginx | grep -Eq 'ARM aarch64|ARM64'
+          for module in \
+            objs/ngx_http_zstd_filter_module.so \
+            objs/ngx_http_zstd_static_module.so; do
+            test -f "$module"
+            grep -q "$module" objs/Makefile
+          done
+          grep -q -- '-lzstd' objs/Makefile
+          objs/nginx -V 2>&1
+          echo "TEST_NGINX_BINARY=$PWD/objs/nginx" >> "$GITHUB_ENV"
+
+      - name: Decoded runtime smoke on arm64
+        run: |
+          set -euo pipefail
+          python3 ci/tools/test_encoding.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18094
+          smoke_root="$(mktemp -d)"
+          module_dir="$(dirname "$TEST_NGINX_BINARY")"
+          mkdir -p "$smoke_root/conf" "$smoke_root/logs" "$smoke_root/html"
+          printf 'origin body\n' > "$smoke_root/html/bad.txt"
+          printf 'not a zstd frame' > "$smoke_root/html/bad.txt.zst"
+          cat > "$smoke_root/conf/nginx.conf" <<EOF
+          load_module $module_dir/ngx_http_zstd_filter_module.so;
+          load_module $module_dir/ngx_http_zstd_static_module.so;
+          events {}
+          http {
+              server {
+                  listen 127.0.0.1:18095;
+                  root $smoke_root/html;
+                  zstd_static on;
+              }
+          }
+          EOF
+          "$TEST_NGINX_BINARY" -t -p "$smoke_root" -c conf/nginx.conf
+          "$TEST_NGINX_BINARY" -p "$smoke_root" -c conf/nginx.conf
+          trap '"$TEST_NGINX_BINARY" -s quit -p "$smoke_root" -c conf/nginx.conf >/dev/null 2>&1 || true' EXIT
+          python3 - <<'PY' > /tmp/bad-static-response.zst
+          import http.client, time
+
+          for _ in range(40):
+              try:
+                  conn = http.client.HTTPConnection("127.0.0.1", 18095, timeout=2)
+                  conn.request("GET", "/bad.txt.zst", headers={"Accept-Encoding": "zstd"})
+                  resp = conn.getresponse()
+                  body = resp.read()
+                  if resp.status != 200:
+                      raise SystemExit(f"unexpected malformed-static response: {resp.status} {resp.getheaders()!r}")
+                  import sys
+                  sys.stdout.buffer.write(body)
+                  break
+              except OSError:
+                  time.sleep(0.25)
+              finally:
+                  try:
+                      conn.close()
+                  except Exception:
+                      pass
+          else:
+              raise SystemExit("nginx did not answer malformed static request")
+          PY
+          if zstd -dc /tmp/bad-static-response.zst >/dev/null 2>&1; then
+            echo "invalid zstd frame served by nginx decoded successfully" >&2
+            exit 1
+          fi
+          echo "✓ native arm64 build and decoded runtime smoke passed"
+
   # ── Build against libzstd 1.4.x — exercises the documented fallback
   #    paths (#ifdef ZSTD_c_targetCBlockSize and the ZSTD_VERSION_NUMBER
   #    boundary in zstd_comp_level validation) that the main 1.5.x build
