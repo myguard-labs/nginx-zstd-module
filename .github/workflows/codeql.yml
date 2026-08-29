@@ -165,9 +165,13 @@ jobs:
             exit 1
           fi
           echo "Extracted source tree: $src"
+          # grep -c exits 1 when it counts zero, and under `set -e` that
+          # would abort here -- swallowing the ::error:: below, which is
+          # the entire point of the assertion. Keep the `|| true`.
           module_hits="$(find "$src" -path '*/nginx-*' -prune -o \
             \( -path '*/filter/*' -o -path '*/static/*' -o -name '*.c' -o -name '*.h' \) \
-            -type f -print | grep -vcE '/nginx-[0-9]')"
+            -type f -print | grep -vcE '/nginx-[0-9]' || true)"
+          module_hits="${module_hits:-0}"
           nginx_core_only="$(find "$src" -path '*/nginx-*/src/*' -type f -print | wc -l)"
           echo "module source files in database: $module_hits"
           echo "nginx-core src/ files in database: $nginx_core_only"
