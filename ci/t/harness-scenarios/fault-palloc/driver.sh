@@ -4,8 +4,8 @@
 #
 # Reachable only through the harness's TEST_HARNESS build (see the requires
 # gate): the per-request allocation sites in the filter go through the
-# ngx_http_zstd_{palloc,pnalloc,pcalloc,alloc_chain_link,create_temp_buf,
-# list_push,pool_cleanup_add} wrappers, which consult the PALLOC fault site
+# ngx_http_zstd_{palloc,pnalloc,pcalloc,alloc_chain_link,list_push,
+# pool_cleanup_add} wrappers, which consult the PALLOC fault site
 # before delegating to the real allocator. Armed via
 # GET /__probe?fault_palloc=<n>: the n-th WRAPPED allocation since the arm
 # returns NULL. Negative disarms.
@@ -27,7 +27,7 @@
 #    2    Content-Encoding ngx_list_push, header filter  no
 #    3    CCtx cleanup ngx_pool_cleanup_add              no
 #    4    incoming-chain link, body filter               no
-#    5    out_buf ngx_create_temp_buf                    no
+#    5    out_buf combined allocation                    no
 #    6-8  incoming-chain link, body filter               no
 #    9    emit chain link                                no
 #   10-12 incoming-chain link, body filter               YES

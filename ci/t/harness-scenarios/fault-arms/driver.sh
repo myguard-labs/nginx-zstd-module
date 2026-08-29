@@ -282,7 +282,8 @@ fi
 # zero-length last_buf (the suppression arm lets it through on purpose), and
 # nginx's writer only tolerates a zero-size buffer that ngx_buf_special()
 # accepts: `(flush||last_buf||sync) && !ngx_buf_in_memory(b) && !b->in_file`.
-# out_buf comes from ngx_create_temp_buf(), so `temporary` stays set and
+# out_buf comes from ngx_http_zstd_create_temp_buf(), so `temporary` stays set
+# and
 # ngx_buf_in_memory() stays true even when the buffer is fully drained. That
 # made ngx_http_write_filter log "zero size buf in writer" and abort the
 # response mid-stream.

@@ -37,16 +37,16 @@
  * with an internal guard: a function would still be a call the optimizer
  * has to reason about, and the hot path must not pay for a test feature.
  *
- * There is no ngx_http_zstd_palloc(): every raw ngx_palloc() in this file
- * is a cf->pool call, and those are deliberately not wrapped (below). A
- * wrapper nothing calls would be dead code that looks like coverage.
- *
  * CONFIG-TIME sites (cf->pool) are deliberately NOT wrapped. They run once
  * at startup, their failure mode is "nginx refuses to start" rather than a
  * mid-request branch, and arming a fault that fires during configuration
  * would break the probe endpoint itself before any test could use it.
  */
 #ifdef NGX_TEST_HARNESS
+
+#define ngx_http_zstd_palloc(pool, size)                                     \
+    (ngx_http_zstd_probe_palloc_should_fail()                                \
+        ? NULL : ngx_palloc(pool, size))
 
 #define ngx_http_zstd_pnalloc(pool, size)                                    \
     (ngx_http_zstd_probe_palloc_should_fail()                                \
@@ -60,10 +60,6 @@
     (ngx_http_zstd_probe_palloc_should_fail()                                \
         ? NULL : ngx_alloc_chain_link(pool))
 
-#define ngx_http_zstd_create_temp_buf(pool, size)                            \
-    (ngx_http_zstd_probe_palloc_should_fail()                                \
-        ? NULL : ngx_create_temp_buf(pool, size))
-
 #define ngx_http_zstd_list_push(list)                                        \
     (ngx_http_zstd_probe_palloc_should_fail()                                \
         ? NULL : ngx_list_push(list))
@@ -74,11 +70,10 @@
 
 #else
 
+#define ngx_http_zstd_palloc(pool, size)          ngx_palloc(pool, size)
 #define ngx_http_zstd_pnalloc(pool, size)         ngx_pnalloc(pool, size)
 #define ngx_http_zstd_pcalloc(pool, size)         ngx_pcalloc(pool, size)
 #define ngx_http_zstd_alloc_chain_link(pool)      ngx_alloc_chain_link(pool)
-#define ngx_http_zstd_create_temp_buf(pool, size)                            \
-    ngx_create_temp_buf(pool, size)
 #define ngx_http_zstd_list_push(list)             ngx_list_push(list)
 #define ngx_http_zstd_pool_cleanup_add(pool, size)                            \
     ngx_pool_cleanup_add(pool, size)
@@ -822,6 +817,7 @@ static ngx_int_t ngx_http_zstd_filter_add_data(ngx_http_request_t *r,
 static ngx_int_t ngx_http_zstd_filter_get_buf(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx,
     ngx_http_zstd_loc_conf_t *zlcf);
+static ngx_buf_t *ngx_http_zstd_create_temp_buf(ngx_pool_t *pool, size_t size);
 static ngx_int_t ngx_http_zstd_set_param(ngx_http_request_t *r,
     ZSTD_CCtx *cctx, ZSTD_cParameter param, int value, const char *name);
 static ngx_int_t ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
@@ -2832,9 +2828,10 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
      * what the suppression arm above deliberately lets through. But the writer
      * only tolerates a zero-size buffer when ngx_buf_special() accepts it, and
      * that macro requires !ngx_buf_in_memory(b) && !b->in_file. out_buf comes
-     * from ngx_create_temp_buf(), so `temporary` is set and start/end point at
-     * a real allocation: ngx_buf_in_memory() stays true even once the buffer is
-     * fully drained, the special test fails, and ngx_http_write_filter logs
+     * from ngx_http_zstd_create_temp_buf(), so `temporary` is set and
+     * start/end point at a real allocation: ngx_buf_in_memory() stays true
+     * even once the buffer is fully drained, the special test fails, and
+     * ngx_http_write_filter logs
      * "zero size buf in writer" and aborts the response mid-stream.
      *
      * Clearing `temporary` on an empty buffer is exactly what nginx's own gzip
@@ -2971,6 +2968,37 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->bytes_in += in_size;
 
     return NGX_OK;
+}
+
+
+static ngx_buf_t *
+ngx_http_zstd_create_temp_buf(ngx_pool_t *pool, size_t size)
+{
+    size_t      data_offset;
+    u_char     *allocation;
+    ngx_buf_t  *b;
+
+    data_offset = ngx_align(sizeof(ngx_buf_t), NGX_ALIGNMENT);
+
+    if (size > NGX_MAX_SIZE_T_VALUE - data_offset) {
+        return NULL;
+    }
+
+    allocation = ngx_http_zstd_palloc(pool, data_offset + size);
+    if (allocation == NULL) {
+        return NULL;
+    }
+
+    b = (ngx_buf_t *) allocation;
+    ngx_memzero(b, sizeof(ngx_buf_t));
+
+    b->start = allocation + data_offset;
+    b->pos = b->start;
+    b->last = b->start;
+    b->end = b->start + size;
+    b->temporary = 1;
+
+    return b;
 }
 
 
