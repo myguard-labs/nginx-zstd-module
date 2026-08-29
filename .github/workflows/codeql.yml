@@ -107,10 +107,24 @@ jobs:
           # `paths:`/`paths-ignore:` are NOT init-action inputs (verified
           # against codeql-action's action.yml at this pinned SHA — they
           # don't appear in its `inputs:` list at all); they are CodeQL
-          # *config-file* keys, so passing them as `with:` silently no-ops
-          # and the requested source scope was never applied. `config:`
-          # (inline YAML, same schema as config-file, takes precedence over
-          # it) is what actually wires them in.
+          # *config-file* keys, so passing them as `with:` silently no-ops.
+          # `config:` (inline YAML, same schema as config-file) is what
+          # actually wires them in.
+          #
+          # Scope caveat, and the reason this is `paths-ignore` and not a
+          # narrower build: for a COMPILED language the C/C++ tracer
+          # extracts every translation unit the build actually compiles, so
+          # these keys cannot keep nginx core OUT of the database — they
+          # filter which extracted files are analyzed and reported, not
+          # which are extracted. Excluding nginx from extraction would mean
+          # compiling the module alone, and that is exactly what produced
+          # the "no source code seen during build" failure recorded on the
+          # build step below (`--add-module` links the module objects into
+          # the nginx binary; there is no module-only compile). So: nginx
+          # core is extracted and then filtered out of results, which is
+          # the intended and only workable arrangement here. The assertion
+          # step after `analyze` therefore checks that module sources are
+          # PRESENT, and deliberately does not assert nginx core is absent.
           config: |
             paths:
               - filter
