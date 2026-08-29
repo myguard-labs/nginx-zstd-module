@@ -67,6 +67,7 @@ typedef unsigned char  u_char;
 #define NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED   2
 #define NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG  3
 #define NGX_HTTP_ZSTD_STATIC_FRAME_SKIP        4
+#define NGX_HTTP_ZSTD_STATIC_FRAME_RESERVED    5
 
 /*
  * Included by RELATIVE path, not via -I, for the same reason
@@ -228,6 +229,22 @@ case_valid_zst_frame(void)
     check(w == (uint64_t) NGX_HTTP_ZSTD_STATIC_MAX_WINDOW
                + (NGX_HTTP_ZSTD_STATIC_MAX_WINDOW / 8),
           "WINDOW_BIG reports the declared window (8 MB + one eighth)");
+}
+
+
+/*
+ * Zstd reserves Frame_Header_Descriptor bit 0x08. A static sidecar with that
+ * bit set is not a valid frame; the handler must decline it and fall back to
+ * the uncompressed file rather than serving undecodable bytes.
+ */
+static void
+case_reserved_descriptor_bit(void)
+{
+    static const u_char  f[] = { MAGIC, 0x08, 0x00 };
+    uint64_t             w;
+
+    check(probe(f, sizeof(f), &w) == NGX_HTTP_ZSTD_STATIC_FRAME_RESERVED,
+          "a frame descriptor with reserved bit 0x08 is RESERVED");
 }
 
 
@@ -594,6 +611,7 @@ main(void)
     case_smallest_complete_streaming_header();
     case_exactly_probe_buffer_size();
     case_valid_zst_frame();
+    case_reserved_descriptor_bit();
     case_skippable_frame_reports_skip_not_ok();
     case_skippable_frame_header_truncation();
     case_magic_mismatch();
