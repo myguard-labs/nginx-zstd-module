@@ -42,6 +42,7 @@ env:
   # this repo already resolves to (verified against a recent successful
   # CI log) and is also CPAN's current latest release.
   TEST_NGINX_SOCKET_VERSION: "0.32"
+  TEST_NGINX_SOCKET_DIST: "AGENT/Test-Nginx-0.32.tar.gz"
 
 on:
   schedule:
@@ -206,14 +207,7 @@ jobs:
 
       - name: Install Test::Nginx::Socket
         run: |
-          cpanm -l ~/perl5 --notest "Test::Nginx::Socket@${TEST_NGINX_SOCKET_VERSION}"
-          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
-          installed="$(perl -I "$HOME/perl5/lib/perl5" -MTest::Nginx::Socket -e 'print $Test::Nginx::Socket::VERSION')"
-          echo "Test::Nginx::Socket installed version: $installed"
-          if [ "$installed" != "$TEST_NGINX_SOCKET_VERSION" ]; then
-            echo "::error::Test::Nginx::Socket version mismatch: pinned $TEST_NGINX_SOCKET_VERSION, got $installed"
-            exit 1
-          fi
+          ci/tools/install-test-nginx-socket.sh "$HOME/perl5"
 
       - name: Verify test port band
         # Before the first `prove` -- see ci/tools/max-port.sh. The three
@@ -891,14 +885,7 @@ jobs:
           key: perl-modules-${{ runner.os }}-Test-Nginx-Socket-${{ env.TEST_NGINX_SOCKET_VERSION }}
       - name: Install Test::Nginx::Socket
         run: |
-          cpanm -l ~/perl5 --notest "Test::Nginx::Socket@${TEST_NGINX_SOCKET_VERSION}"
-          echo "PERL5LIB=$HOME/perl5/lib/perl5:$PERL5LIB" >> "$GITHUB_ENV"
-          installed="$(perl -I "$HOME/perl5/lib/perl5" -MTest::Nginx::Socket -e 'print $Test::Nginx::Socket::VERSION')"
-          echo "Test::Nginx::Socket installed version: $installed"
-          if [ "$installed" != "$TEST_NGINX_SOCKET_VERSION" ]; then
-            echo "::error::Test::Nginx::Socket version mismatch: pinned $TEST_NGINX_SOCKET_VERSION, got $installed"
-            exit 1
-          fi
+          ci/tools/install-test-nginx-socket.sh "$HOME/perl5"
       - name: Verify test port band
         # Before the first `prove` inside coverage.sh -- see ci/tools/max-port.sh.
         run: ci/tools/max-port.sh "$TEST_BASE_PORT"
