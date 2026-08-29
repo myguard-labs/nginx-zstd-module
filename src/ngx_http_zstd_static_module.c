@@ -915,6 +915,92 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
  * that reintroduces the gap this change closes.
  */
 static ngx_int_t
+ngx_http_zstd_static_probe_verdict(const u_char *frame, size_t avail,
+    off_t file_size, off_t *pos, ngx_str_t *path, ngx_log_t *log)
+{
+    uint64_t   window, skip;
+
+    switch (ngx_http_zstd_static_probe_frame(frame, avail, &window)) {
+
+    case NGX_HTTP_ZSTD_STATIC_FRAME_NOT_ZSTD:
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "zstd static: \"%s\" is not a zstd frame "
+                      "(leading bytes 0x%02xd%02xd%02xd%02xd)",
+                      path->data,
+                      (ngx_uint_t) frame[0], (ngx_uint_t) frame[1],
+                      (ngx_uint_t) frame[2], (ngx_uint_t) frame[3]);
+        return NGX_DECLINED;
+
+    case NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED:
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "zstd static: \"%s\" frame header truncated",
+                      path->data);
+        return NGX_DECLINED;
+
+    case NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG:
+        /*
+         * "8 MB" and "window log <= 23" below are prose, not
+         * derived: they must be updated by hand whenever
+         * NGX_HTTP_ZSTD_STATIC_MAX_WINDOW changes.
+         */
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "zstd static: \"%s\" declares a %uL-byte "
+                      "decompression window, above the 8 MB limit "
+                      "browsers enforce for Content-Encoding: zstd "
+                      "(RFC 8878) -- declining so a fallback "
+                      "encoding is used; recompress with a window "
+                      "log <= 23 (streaming encoders default to "
+                      "the compression level's window when not "
+                      "told the input size)",
+                      path->data, window);
+        return NGX_DECLINED;
+
+    case NGX_HTTP_ZSTD_STATIC_FRAME_RESERVED:
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "zstd static: \"%s\" frame header sets reserved "
+                      "Frame_Header_Descriptor bit 0x08 -- declining "
+                      "static variant",
+                      path->data);
+        return NGX_DECLINED;
+
+    case NGX_HTTP_ZSTD_STATIC_FRAME_SKIP:
+        /*
+         * `window` carries the declared skip length here (see
+         * the probe's doc comment). Prove the 8-byte skippable
+         * header AND the full declared skip both fit within the
+         * file before trusting the jump.
+         */
+        skip = window;
+
+        if ((uint64_t) *pos > (uint64_t) file_size
+            || (uint64_t) file_size - (uint64_t) *pos < 8)
+        {
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "zstd static: \"%s\" skippable frame "
+                          "header runs past end of file",
+                          path->data);
+            return NGX_DECLINED;
+        }
+
+        if (skip > (uint64_t) file_size - (uint64_t) *pos - 8) {
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "zstd static: \"%s\" skippable frame "
+                          "declares a %uL-byte skip past end of "
+                          "file", path->data, skip);
+            return NGX_DECLINED;
+        }
+
+        *pos += (off_t) 8 + (off_t) skip;
+
+        return NGX_AGAIN;
+
+    default:
+        return NGX_OK;
+    }
+}
+
+
+static ngx_int_t
 ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     const ngx_http_core_loc_conf_t *clcf, ngx_open_file_info_t *of,
     ngx_str_t *path, ngx_log_t *log)
@@ -931,7 +1017,6 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     u_char      *hdr, *frame;
     size_t       want, align, frame_off, avail, got;
     ssize_t      n;
-    uint64_t     window, skip;
     ngx_uint_t   frames, scratch, have_block;
     off_t        pos, base, have_base;
     ngx_int_t    probe_rc;
@@ -1138,93 +1223,14 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
                            "directio file \"%s\"", align, path->data);
         }
 
-        switch (ngx_http_zstd_static_probe_frame(frame, avail, &window))
-        {
-
-        case NGX_HTTP_ZSTD_STATIC_FRAME_NOT_ZSTD:
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "zstd static: \"%s\" is not a zstd frame "
-                          "(leading bytes 0x%02xd%02xd%02xd%02xd)",
-                          path->data,
-                          (ngx_uint_t) frame[0], (ngx_uint_t) frame[1],
-                          (ngx_uint_t) frame[2], (ngx_uint_t) frame[3]);
-            probe_rc = NGX_DECLINED;
-            goto probe_done;
-
-        case NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED:
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "zstd static: \"%s\" frame header truncated",
-                          path->data);
-            probe_rc = NGX_DECLINED;
-            goto probe_done;
-
-        case NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG:
-            /*
-             * "8 MB" and "window log <= 23" below are prose, not
-             * derived: they must be updated by hand whenever
-             * NGX_HTTP_ZSTD_STATIC_MAX_WINDOW changes.
-             */
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "zstd static: \"%s\" declares a %uL-byte "
-                          "decompression window, above the 8 MB limit "
-                          "browsers enforce for Content-Encoding: zstd "
-                          "(RFC 8878) -- declining so a fallback "
-                          "encoding is used; recompress with a window "
-                          "log <= 23 (streaming encoders default to "
-                          "the compression level's window when not "
-                          "told the input size)",
-                          path->data, window);
-            probe_rc = NGX_DECLINED;
-            goto probe_done;
-
-        case NGX_HTTP_ZSTD_STATIC_FRAME_RESERVED:
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "zstd static: \"%s\" frame header sets reserved "
-                          "Frame_Header_Descriptor bit 0x08 -- declining "
-                          "static variant",
-                          path->data);
-            probe_rc = NGX_DECLINED;
-            goto probe_done;
-
-        case NGX_HTTP_ZSTD_STATIC_FRAME_SKIP:
-
-            /*
-             * `window` carries the declared skip length here (see
-             * the probe's doc comment). Prove the 8-byte skippable
-             * header AND the full declared skip both fit within
-             * of->size before trusting the jump — checked
-             * arithmetic throughout, since `skip` is attacker-
-             * controlled and 32-bit-wide enough to overflow a
-             * 32-bit off_t/size_t add on its own.
-             */
-            skip = window;
-
-            if ((uint64_t) pos > (uint64_t) of->size
-                || (uint64_t) of->size - (uint64_t) pos < 8)
-            {
-                ngx_log_error(NGX_LOG_ERR, log, 0,
-                              "zstd static: \"%s\" skippable frame "
-                              "header runs past end of file",
-                              path->data);
-                probe_rc = NGX_DECLINED;
-                goto probe_done;
-            }
-
-            if (skip > (uint64_t) of->size - (uint64_t) pos - 8) {
-                ngx_log_error(NGX_LOG_ERR, log, 0,
-                              "zstd static: \"%s\" skippable frame "
-                              "declares a %uL-byte skip past end of "
-                              "file", path->data, skip);
-                probe_rc = NGX_DECLINED;
-                goto probe_done;
-            }
-
-            pos += (off_t) 8 + (off_t) skip;
-
+        probe_rc = ngx_http_zstd_static_probe_verdict(frame, avail, of->size,
+                                                      &pos, path, log);
+        if (probe_rc == NGX_AGAIN) {
             continue;
+        }
 
-        default:
-            break;
+        if (probe_rc != NGX_OK) {
+            goto probe_done;
         }
 
         break;
