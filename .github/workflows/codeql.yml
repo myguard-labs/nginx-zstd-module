@@ -158,6 +158,12 @@ jobs:
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: "/language:c-cpp"
+          # `analyze` finalizes the database and then tears the cluster
+          # down ("Cleaned up database cluster directory"), so by the time
+          # a following step runs, <db>/src is already gone -- the
+          # assertion below cannot see it under the default cleanup. Keep
+          # the database on disk so the extraction scope stays checkable.
+          cleanup-level: none
 
       - name: Assert database saw module sources, not just nginx core
         env:
@@ -173,10 +179,23 @@ jobs:
             echo "::error::could not resolve the CodeQL cpp database path from db-locations: $DB_LOCATIONS"
             exit 1
           fi
+          # CodeQL stores extracted sources either as a src/ tree or as
+          # src.zip, depending on version and cleanup level. Accept both:
+          # unpack the zip to a scratch dir so the same find/grep logic
+          # below works either way.
           src="$db/src"
           if [ ! -d "$src" ]; then
-            echo "::error::CodeQL database has no src/ directory at $src"
-            exit 1
+            if [ -f "$db/src.zip" ]; then
+              src="$RUNNER_TEMP/codeql-src"
+              rm -rf "$src"
+              mkdir -p "$src"
+              unzip -qq "$db/src.zip" -d "$src"
+              echo "Unpacked src.zip for inspection"
+            else
+              echo "::error::CodeQL database has neither src/ nor src.zip under $db"
+              ls -la "$db" || true
+              exit 1
+            fi
           fi
           echo "Extracted source tree: $src"
           # grep -c exits 1 when it counts zero, and under `set -e` that
