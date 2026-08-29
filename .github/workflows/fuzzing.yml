@@ -58,21 +58,35 @@ jobs:
       # Replay every triaged past crash FIRST -- fast (each is one input)
       # and deterministic, so a reintroduced bug fails in seconds instead
       # of waiting on the 120s fresh budget to happen to rediscover it.
-      # The glob guard below reports the number of matching crash-* cases
-      # explicitly, so a corpus that silently stopped being replayed is
-      # visible in the log rather than passing as a no-op. It counts only
-      # what matches crash-*; an entry renamed out of that pattern is not
-      # replayed and is not reported here.
+      # The replay guard below reports the number of matching crash-* cases
+      # explicitly and fails when a non-empty corpus contains an entry outside
+      # that naming contract. Empty corpora and README metadata are still
+      # allowed, but a renamed regression must not pass as a no-op.
       - name: Replay recorded crash regressions
         run: |
           set -euo pipefail
           cd ci/fuzz
-          shopt -s nullglob
-          cases=(regressions/crash-*)
+          case_list="$(mktemp)"
+          trap 'rm -f "$case_list"' EXIT
+          find regressions -mindepth 1 -maxdepth 1 -print0 > "$case_list"
+          cases=()
+          total=0
+          while IFS= read -r -d '' case_path; do
+            total=$((total + 1))
+            case_name="${case_path##*/}"
+            if [[ "$case_name" == README.md ]]; then
+              continue
+            elif [[ "$case_name" == crash-* ]]; then
+              cases+=("$case_path")
+            else
+              echo "::error::recorded regression does not match crash-* naming contract: $case_path"
+              exit 1
+            fi
+          done < "$case_list"
           if [ "${#cases[@]}" -eq 0 ]; then
             echo "no recorded regressions yet (ci/fuzz/regressions/ is empty)"
           else
-            echo "replaying ${#cases[@]} recorded crash(es)"
+            echo "replaying ${#cases[@]} recorded crash(es); inspected $total corpus entries"
             ./fuzz_accept_encoding "${cases[@]}"
             echo "✓ all recorded regressions still pass"
           fi
@@ -86,12 +100,27 @@ jobs:
         run: |
           set -euo pipefail
           cd ci/fuzz
-          shopt -s nullglob
-          cases=(regressions_dcz/crash-*)
+          case_list="$(mktemp)"
+          trap 'rm -f "$case_list"' EXIT
+          find regressions_dcz -mindepth 1 -maxdepth 1 -print0 > "$case_list"
+          cases=()
+          total=0
+          while IFS= read -r -d '' case_path; do
+            total=$((total + 1))
+            case_name="${case_path##*/}"
+            if [[ "$case_name" == README.md ]]; then
+              continue
+            elif [[ "$case_name" == crash-* ]]; then
+              cases+=("$case_path")
+            else
+              echo "::error::recorded dcz regression does not match crash-* naming contract: $case_path"
+              exit 1
+            fi
+          done < "$case_list"
           if [ "${#cases[@]}" -eq 0 ]; then
             echo "no recorded dcz regressions yet (ci/fuzz/regressions_dcz/ is empty)"
           else
-            echo "replaying ${#cases[@]} recorded dcz crash(es)"
+            echo "replaying ${#cases[@]} recorded dcz crash(es); inspected $total corpus entries"
             ./fuzz_dcz "${cases[@]}"
             echo "✓ all recorded dcz regressions still pass"
           fi
