@@ -380,6 +380,14 @@ jobs:
           # directio mount. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_static_pread_unit.sh
 
+      - name: static frame-header probe unit fixture
+        run: |
+          # ngx_http_zstd_static_probe_frame(): pure frame-header arithmetic.
+          # Extracts the helper verbatim and checks the reserved descriptor
+          # bit, a passing small frame and the oversized-window verdict without
+          # standing up nginx. Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_static_probe_unit.sh
+
       - name: freeCCtxParams six-exit unit fixture (config-time leak-on-error)
         run: |
           # ngx_http_zstd_estimate_cctx_memory() runs during "nginx -t"

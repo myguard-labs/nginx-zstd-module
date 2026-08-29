@@ -1,5 +1,6 @@
 use Test::Nginx::Socket;
 use File::Basename;
+use File::Spec;
 use lib 'lib';
 
 my @dynamic_modules;
@@ -814,6 +815,48 @@ big.js.zst
 declares a 134217728-byte decompression window
 above the 8 MB limit browsers enforce for Content-Encoding: zstd
 recompress with a window log <= 23
+
+
+
+=== TEST 31b: a .zst with reserved frame descriptor bit 0x08 is declined
+# RFC 8878 reserves Frame_Header_Descriptor bit 3.  The static probe is the
+# browser-facing guard before we emit Content-Encoding: zstd, so it must not
+# serve a frame that libzstd itself rejects.  The eval block keeps that
+# decoder-backed oracle attached to the handcrafted fixture when zstd is
+# available locally; hosts without the CLI still run the live fallback check.
+--- config
+    location /reserved/ {
+        zstd_static on;
+        root html;
+    }
+--- user_files eval
+my $bad = pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x08, 0x00, 0x00);
+if (system("zstd", "--version") == 0) {
+    require File::Temp;
+    my ($fh, $path) = File::Temp::tempfile();
+    binmode $fh;
+    print $fh $bad;
+    close $fh;
+    open my $old_stderr, ">&", \*STDERR or die "dup STDERR: $!";
+    open STDERR, ">", File::Spec->devnull() or die "redirect STDERR: $!";
+    my $rc = system("zstd", "-q", "-t", $path);
+    open STDERR, ">&", $old_stderr or die "restore STDERR: $!";
+    unlink $path;
+    die "decoder unexpectedly accepted reserved descriptor bit 0x08" if $rc == 0;
+}
+">>> reserved/bit.js\nreserved-bit origin body\n>>> reserved/bit.js.zst\n" . $bad
+--- request
+GET /reserved/bit.js
+--- more_headers
+Accept-Encoding: gzip, zstd
+--- response_headers
+! Content-Encoding
+--- response_body
+reserved-bit origin body
+--- error_code: 200
+--- error_log
+frame header sets reserved Frame_Header_Descriptor bit 0x08
+declining static variant
 
 
 

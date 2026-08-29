@@ -272,6 +272,7 @@ ngx_module_t  ngx_http_zstd_static_module = {
 #define NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED   2
 #define NGX_HTTP_ZSTD_STATIC_FRAME_WINDOW_BIG  3
 #define NGX_HTTP_ZSTD_STATIC_FRAME_SKIP        4
+#define NGX_HTTP_ZSTD_STATIC_FRAME_RESERVED    5
 
 /*
  * How many leading skippable frames the caller's walk (in the handler,
@@ -385,6 +386,10 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
     }
 
     fhd = hdr[4];
+
+    if (fhd & 0x08) {
+        return NGX_HTTP_ZSTD_STATIC_FRAME_RESERVED;
+    }
 
     if (!(fhd & 0x20)) {
         /* No Single_Segment flag: Window_Descriptor follows. */
@@ -1159,6 +1164,15 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
             probe_rc = NGX_DECLINED;
             goto probe_done;
 
+        case NGX_HTTP_ZSTD_STATIC_FRAME_RESERVED:
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "zstd static: \"%s\" frame header sets reserved "
+                          "Frame_Header_Descriptor bit 0x08 -- declining "
+                          "static variant",
+                          path->data);
+            probe_rc = NGX_DECLINED;
+            goto probe_done;
+
         case NGX_HTTP_ZSTD_STATIC_FRAME_SKIP:
 
             /*
@@ -1263,7 +1277,8 @@ ngx_http_zstd_static_send(ngx_http_request_t *r, ngx_open_file_info_t *of,
     }
 
     /*
-     * ngx_http_set_content_type() uses r->exten which is derived from the
+     * ngx_http_set_content_type() uses nginx's URI-extension field, derived
+     * from the
      * original URI, not from path. No path manipulation is needed here.
      */
     if (ngx_http_set_content_type(r) != NGX_OK) {
