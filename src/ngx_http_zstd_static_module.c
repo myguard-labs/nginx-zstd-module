@@ -336,7 +336,7 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
     static const ngx_uint_t  did_len[4] = { 0, 1, 2, 4 };
 
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    ngx_memcpy(&mw, hdr, sizeof(mw));
+    ngx_memcpy(&mw, hdr, sizeof(uint32_t));
 #else
     mw = ((uint32_t) hdr[0])
        | ((uint32_t) hdr[1] << 8)
@@ -374,7 +374,7 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
         {
             uint32_t  skip_size;
 
-            ngx_memcpy(&skip_size, hdr + 4, sizeof(skip_size));
+            ngx_memcpy(&skip_size, hdr + 4, sizeof(uint32_t));
             *window = skip_size;
         }
 #else
@@ -449,7 +449,7 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
             {
                 uint16_t  value;
 
-                ngx_memcpy(&value, hdr + off, sizeof(value));
+                ngx_memcpy(&value, hdr + off, sizeof(uint16_t));
                 w = value;
             }
             break;
@@ -457,12 +457,12 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
             {
                 uint32_t  value;
 
-                ngx_memcpy(&value, hdr + off, sizeof(value));
+                ngx_memcpy(&value, hdr + off, sizeof(uint32_t));
                 w = value;
             }
             break;
         default:
-            ngx_memcpy(&w, hdr + off, sizeof(w));
+            ngx_memcpy(&w, hdr + off, sizeof(uint64_t));
             break;
         }
 #else
