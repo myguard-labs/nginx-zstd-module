@@ -134,6 +134,95 @@ jobs:
           Test-Directive 'zstd_not_a_directive on;' $false
           exit 0
 
+      - name: Run static request smoke
+        shell: pwsh
+        working-directory: nginx-${{ env.NGINX_VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --disable-pip-version-check --no-input zstandard==0.25.0
+          New-Item -ItemType Directory -Force conf, logs, html | Out-Null
+          @'
+          import pathlib, zstandard
+
+          root = pathlib.Path("html")
+          plain = b"windows static zstd smoke\n" * 256
+          root.joinpath("plain.txt").write_bytes(plain)
+          root.joinpath("static.txt").write_bytes(plain)
+          root.joinpath("static.txt.zst").write_bytes(zstandard.ZstdCompressor().compress(plain))
+          '@ | Set-Content -Encoding ascii make-smoke-files.py
+          python make-smoke-files.py
+          @'
+          events {}
+          http {
+              server {
+                  listen 127.0.0.1:18080;
+                  root html;
+                  zstd on;
+                  zstd_types text/plain;
+                  zstd_static on;
+              }
+          }
+          '@ | Set-Content -Encoding ascii conf/nginx.conf
+          @'
+          events {}
+          http { server { listen 127.0.0.1:18080; zstd_not_a_directive on; } }
+          '@ | Set-Content -Encoding ascii conf/invalid.conf
+          if (& .\objs\nginx.exe -t -p . -c conf/invalid.conf 2>$null) {
+            throw 'invalid zstd directive was accepted'
+          }
+          & .\objs\nginx.exe -t -p . -c conf/nginx.conf
+          if ($LASTEXITCODE -ne 0) { throw "nginx -t failed with $LASTEXITCODE" }
+          try {
+            $nginx = Start-Process -FilePath .\objs\nginx.exe -ArgumentList @('-p', '.', '-c', 'conf/nginx.conf') -PassThru
+            Start-Sleep -Milliseconds 500
+            if ($nginx.HasExited) { throw "nginx exited during startup with $($nginx.ExitCode)" }
+            @'
+          import http.client, time, zstandard
+
+          expected = b"windows static zstd smoke\n" * 256
+
+          def request(path, accept=True):
+              headers = {"Accept-Encoding": "zstd"} if accept else {}
+              for _ in range(40):
+                  try:
+                      conn = http.client.HTTPConnection("127.0.0.1", 18080, timeout=2)
+                      conn.request("GET", path, headers=headers)
+                      resp = conn.getresponse()
+                      body = resp.read()
+                      return resp.status, dict(resp.getheaders()), body
+                  except OSError:
+                      time.sleep(0.25)
+                  finally:
+                      try:
+                          conn.close()
+                      except Exception:
+                          pass
+              raise SystemExit("nginx did not answer")
+
+          status, headers, body = request("/plain.txt")
+          if status != 200 or headers.get("Content-Encoding") != "zstd":
+              raise SystemExit(f"dynamic zstd response missing: {status} {headers!r}")
+          if zstandard.ZstdDecompressor().decompress(body) != expected:
+              raise SystemExit("dynamic zstd response decoded to unexpected bytes")
+
+          status, headers, body = request("/static.txt")
+          if status != 200 or headers.get("Content-Encoding") != "zstd":
+              raise SystemExit(f"static zstd response missing: {status} {headers!r}")
+          if zstandard.ZstdDecompressor().decompress(body) != expected:
+              raise SystemExit("static zstd response decoded to unexpected bytes")
+
+          status, _, _ = request("/missing.txt", accept=False)
+          if status != 404:
+              raise SystemExit(f"missing static file returned {status}, not 404")
+          '@ | Set-Content -Encoding ascii smoke-request.py
+            python smoke-request.py
+          } finally {
+            & .\objs\nginx.exe -s quit -p . -c conf/nginx.conf 2>$null
+            if ($nginx -and -not $nginx.WaitForExit(5000)) {
+              Stop-Process -Id $nginx.Id -Force
+            }
+          }
+
   mingw:
     name: MinGW-w64 x64 dynamic
     runs-on: windows-latest
@@ -202,3 +291,92 @@ jobs:
             echo 'bogus directive was accepted' >&2
             exit 1
           fi
+
+      - name: Run dynamic request smoke
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "nginx-$NGINX_VERSION"
+          pacman --noconfirm -S --needed mingw-w64-x86_64-python-zstandard
+          mkdir -p conf logs html
+          python - <<'PY'
+          import pathlib, zstandard
+
+          root = pathlib.Path("html")
+          plain = b"windows dynamic zstd smoke\n" * 256
+          root.joinpath("plain.txt").write_bytes(plain)
+          root.joinpath("static.txt").write_bytes(plain)
+          root.joinpath("static.txt.zst").write_bytes(zstandard.ZstdCompressor().compress(plain))
+          PY
+          cat > conf/nginx.conf <<'EOF'
+          load_module objs/ngx_http_zstd_filter_module.so;
+          load_module objs/ngx_http_zstd_static_module.so;
+          events {}
+          http {
+              server {
+                  listen 127.0.0.1:18081;
+                  root html;
+                  zstd on;
+                  zstd_types text/plain;
+                  zstd_static on;
+              }
+          }
+          EOF
+          cat > conf/invalid.conf <<'EOF'
+          load_module objs/ngx_http_zstd_filter_module.so;
+          load_module objs/ngx_http_zstd_static_module.so;
+          events {}
+          http { server { listen 127.0.0.1:18081; zstd_not_a_directive on; } }
+          EOF
+          if ./objs/nginx.exe -t -p . -c conf/invalid.conf 2>/dev/null; then
+            echo 'bogus directive was accepted' >&2
+            exit 1
+          fi
+          ./objs/nginx.exe -t -p . -c conf/nginx.conf
+          ./objs/nginx.exe -p . -c conf/nginx.conf &
+          nginx_pid=$!
+          sleep 0.5
+          if ! kill -0 "$nginx_pid" 2>/dev/null; then
+            echo "nginx exited during startup" >&2
+            exit 1
+          fi
+          trap './objs/nginx.exe -s quit -p . -c conf/nginx.conf >/dev/null 2>&1 || true' EXIT
+          python - <<'PY'
+          import http.client, time, zstandard
+
+          expected = b"windows dynamic zstd smoke\n" * 256
+
+          def request(path, accept=True):
+              headers = {"Accept-Encoding": "zstd"} if accept else {}
+              for _ in range(40):
+                  try:
+                      conn = http.client.HTTPConnection("127.0.0.1", 18081, timeout=2)
+                      conn.request("GET", path, headers=headers)
+                      resp = conn.getresponse()
+                      body = resp.read()
+                      return resp.status, dict(resp.getheaders()), body
+                  except OSError:
+                      time.sleep(0.25)
+                  finally:
+                      try:
+                          conn.close()
+                      except Exception:
+                          pass
+              raise SystemExit("nginx did not answer")
+
+          status, headers, body = request("/plain.txt")
+          if status != 200 or headers.get("Content-Encoding") != "zstd":
+              raise SystemExit(f"dynamic zstd response missing: {status} {headers!r}")
+          if zstandard.ZstdDecompressor().decompress(body) != expected:
+              raise SystemExit("dynamic zstd response decoded to unexpected bytes")
+
+          status, headers, body = request("/static.txt")
+          if status != 200 or headers.get("Content-Encoding") != "zstd":
+              raise SystemExit(f"static zstd response missing: {status} {headers!r}")
+          if zstandard.ZstdDecompressor().decompress(body) != expected:
+              raise SystemExit("static zstd response decoded to unexpected bytes")
+
+          status, _, _ = request("/missing.txt", accept=False)
+          if status != 404:
+              raise SystemExit(f"missing static file returned {status}, not 404")
+          PY
