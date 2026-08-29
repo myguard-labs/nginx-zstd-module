@@ -152,7 +152,9 @@ def main() -> int:
         fixture_path = html_dir / "test.js"
         expected = build_terminal_fixture(fixture_path)
         conf_path = conf_dir / "nginx.conf"
-        test_encoding.write_config(conf_path, html_dir, args.port, "off", modules)
+        test_encoding.write_config(
+            conf_path, html_dir, args.port, args.port + 1, "off", modules
+        )
 
         process = subprocess.Popen(
             [
