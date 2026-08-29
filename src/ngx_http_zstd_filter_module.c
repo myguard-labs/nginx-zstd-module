@@ -140,6 +140,25 @@ ngx_http_zstd_ceil_log2(size_t x)
 }
 
 
+static ngx_inline u_char
+ngx_http_zstd_hex_nibble(u_char c)
+{
+    u_char  lower;
+
+    if (c >= '0' && c <= '9') {
+        return (u_char) (c - '0');
+    }
+
+    lower = (u_char) (c | 0x20);
+
+    if (lower >= 'a' && lower <= 'f') {
+        return (u_char) (lower - 'a' + 10);
+    }
+
+    return 0xff;
+}
+
+
 /*
  * The ONLY sanctioned way to hash a dcz dictionary at config load: the
  * $zstd_dcz_dicts_hashed accounting is inseparable from the operation.
@@ -5908,16 +5927,10 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         for (i = 0; i < NGX_HTTP_ZSTD_SHA256_DIGEST_LEN; i++) {
 
             c = value[2].data[2 * i];
-            hi = (c >= '0' && c <= '9') ? (u_char) (c - '0')
-                 : (c >= 'a' && c <= 'f') ? (u_char) (c - 'a' + 10)
-                 : (c >= 'A' && c <= 'F') ? (u_char) (c - 'A' + 10)
-                 : 0xff;
+            hi = ngx_http_zstd_hex_nibble(c);
 
             c = value[2].data[2 * i + 1];
-            lo = (c >= '0' && c <= '9') ? (u_char) (c - '0')
-                 : (c >= 'a' && c <= 'f') ? (u_char) (c - 'a' + 10)
-                 : (c >= 'A' && c <= 'F') ? (u_char) (c - 'A' + 10)
-                 : 0xff;
+            lo = ngx_http_zstd_hex_nibble(c);
 
             if (hi == 0xff || lo == 0xff) {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,

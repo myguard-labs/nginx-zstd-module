@@ -64,6 +64,7 @@ our $bad_b64  = encode_base64("\x01" x 32, "");
 # $zstd_dcz_dicts_hashed counts every loaded dictionary by default
 # (TESTs 21-23), but excludes trusted literals (TESTs 41-42).
 our $dict_hex = unpack("H*", sha256($dict_raw));
+our $dict_hex_upper = uc($dict_hex);
 our $odd_hex  = "01" x 32;
 our $odd_b64  = encode_base64("\x01" x 32, "");
 
@@ -505,6 +506,27 @@ qr/does not match the supplied hash "0101010101010101010101010101010101010101010
         zstd on;
         zstd_min_length 16;
         zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::dict_hex;
+        default_type text/plain;
+        return 200 \"dcz negotiation body: shared-boilerplate compute render\n\";
+    }"
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 50: an uppercase supplied hash loads and negotiates
+# Pins the case-folding branch in ngx_http_zstd_hex_nibble().
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict $::dict_hex_upper;
         default_type text/plain;
         return 200 \"dcz negotiation body: shared-boilerplate compute render\n\";
     }"
