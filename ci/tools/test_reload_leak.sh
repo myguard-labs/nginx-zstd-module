@@ -22,10 +22,11 @@
 # is a VACUOUS pass because the detector never ran. Hence the positive
 # control below, verdicts read from log content rather than log
 # existence, and a watchdog on shutdown ("LeakSanitizer may hang" is
-# real). Indeterminate environments exit 0 with a ::warning:: GitHub
-# annotation naming the runner fix — they are infrastructure findings,
-# not leaks, and a real leak still fails every time because it produces
-# an actual "ERROR: LeakSanitizer" report.
+# real). Indeterminate environments fail with a ::warning:: GitHub
+# annotation naming the runner fix: this is a load-bearing leak lane, so
+# "the detector could not run" cannot be a passing verdict. A real leak
+# still fails first because it produces an actual "ERROR: LeakSanitizer"
+# report.
 #
 # Usage: tools/test_reload_leak.sh <nginx-binary> [reloads]
 
@@ -67,9 +68,9 @@ if [ "$control_rc" -eq 1 ]; then
          "check is not provably working here). The most likely cause on" \
          "this runner pool is ptrace being blocked (LXC seccomp / yama);" \
          "if that is ruled out, check the ASan toolchain install instead." \
-         "Leak check INDETERMINATE, not failed; fix the runner profile to" \
+         "Leak check INDETERMINATE and therefore failed; fix the runner profile to" \
          "restore coverage."
-    exit 0
+    exit 1
 fi
 
 # A non-trivial dictionary so ZSTD_createCDict() actually allocates.
@@ -168,10 +169,10 @@ if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
     then
         echo "::warning::LeakSanitizer could not run its exit-time check" \
              "(ptrace blocked on this runner — LXC seccomp / yama). Leak" \
-             "check INDETERMINATE, not failed; fix the runner profile to" \
+             "check INDETERMINATE and therefore failed; fix the runner profile to" \
              "restore coverage."
         cat "$WORK"/logs/asan*
-        exit 0
+        exit 1
     fi
 
     echo "❌ unexpected sanitizer output (treating as failure):"
@@ -181,9 +182,9 @@ fi
 
 if [ "$rc" -eq 137 ]; then
     echo "::warning::nginx under ASAN had to be killed by the shutdown" \
-         "watchdog (LeakSanitizer hang?). Leak check INDETERMINATE, not" \
-         "failed."
-    exit 0
+         "watchdog (LeakSanitizer hang?). Leak check INDETERMINATE and" \
+         "therefore failed."
+    exit 1
 fi
 
 if [ "$rc" -ne 0 ]; then
