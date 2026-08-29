@@ -480,7 +480,7 @@ The default buffer **size** is `ZSTD_CStreamOutSize()` — the value libzstd doc
 
 The default **count** is `2`: one buffer being filled by the compressor while the other is in flight down the output chain. This sets the per-request filter-memory floor at roughly `2 × ZSTD_CStreamOutSize()` (~256 KB), up from the previous ~128 KB — the deliberate cost of never forcing zstd to flush mid-block. If that trade is wrong for your workload (many concurrent connections, memory-constrained), set `zstd_buffers` explicitly to a smaller value; configurations that set it are unaffected by this default.
 
-> **Bounded exception with dictionary responses:** The first output buffer in a response using `zstd_dict_file` is allocated at `size + 40` bytes to hold the RFC 9842 skippable-frame dictionary-identifier prefix inline. This is a bounded, one-time overhead per dcz response, not a per-buffer or per-request scaling change.
+> **Bounded exception with dictionary responses:** The first output buffer in a response using `zstd_dcz_dict_file` is allocated at `size + 40` bytes to hold the RFC 9842 skippable-frame dictionary-identifier prefix inline. This is a bounded, one-time +40-byte overhead per dcz response, not a per-buffer or per-request scaling change.
 
 Increasing these values allows larger chunks to be accumulated before writing, potentially improving throughput at the cost of higher per-request memory usage.
 
@@ -592,6 +592,30 @@ The check runs once the value is fully resolved (explicit, inherited
 from an outer block, or this module's own default) so all three sources
 are covered by the same bound; an explicit value that also happens to be
 the one that ends up in effect is reported once, not twice.
+
+---
+
+### zstd_buffers_unsafe
+
+**Syntax:** `zstd_buffers_unsafe on | off;`
+**Default:** `off`
+**Context:** `http, server, location`
+
+Acknowledges and accepts the total memory allocated by [`zstd_buffers`](#zstd_buffers) when the product of `number × size` exceeds 256 MB. By default, such configurations fail to load with a config-load error. Setting this directive to `on` skips the hard error and instead logs a warning (the warning is always emitted, even with `zstd_buffers_unsafe on;`, so the acknowledgement remains visible).
+
+This directive is intended for operators who have calculated their total concurrency, compressor memory, and output-chain memory budgets and deliberately chosen a buffer configuration above the safety threshold. If you are not sure whether you need this, leave it `off` — the hard error is the safer default.
+
+**Example:**
+
+```nginx
+http {
+    # An unusually large buffer pool, above the 256 MB threshold.
+    # Only do this if you have explicitly calculated the total
+    # per-request cost and verified that it fits your deployment.
+    zstd_buffers          1000 10m;
+    zstd_buffers_unsafe   on;
+}
+```
 
 ---
 
@@ -1004,6 +1028,22 @@ http {
 
 ---
 
+### zstd_dict_file_unsafe
+
+**Syntax:** `zstd_dict_file_unsafe on | off;`
+**Default:** `off`
+**Context:** `http`
+
+Acknowledges that responses compressed with [`zstd_dict_file`](#zstd_dict_file) are not RFC 9842 negotiated — they carry an ordinary `Content-Encoding: zstd` even though they were compressed with an external dictionary. This is an **unsafe** configuration for shared caches: a generic client that only advertises `Accept-Encoding: zstd` will receive a body compressed against a dictionary it does not possess and cannot decode.
+
+nginx refuses to start if `zstd_dict_file` is configured without `zstd_dict_file_unsafe on;`, acknowledging that you control both ends of the connection (client and server) and will ensure the shared cache keys the response appropriately (or is absent).
+
+Only use this directive when you control both the client and server and can guarantee that both use the same dictionary. If you need standards-based HTTP negotiation, use [`zstd_dcz_dict_file`](#zstd_dcz_dict_file) instead.
+
+**Example:** See [`zstd_dict_file`](#zstd_dict_file) for an example that includes this directive.
+
+---
+
 ### zstd_dict_strict_path
 
 **Syntax:** `zstd_dict_strict_path on | off;`
@@ -1079,6 +1119,37 @@ curl -s -H 'Accept-Encoding: zstd, dcz' \
      -H "Available-Dictionary: :$(openssl dgst -sha256 -binary app-v41.js | base64):" \
      https://example.com/app/app-v42.js \
 | zstd -d -D app-v41.js | diff - app-v42.js && echo "byte-exact"
+```
+
+---
+
+### zstd_dcz_dict_trust_hashes
+
+**Syntax:** `zstd_dcz_dict_trust_hashes on | off;`
+**Default:** `off`
+**Context:** `http`
+
+Opts out of verifying the SHA-256 of each dictionary file when a hash literal is supplied to [`zstd_dcz_dict_file`](#zstd_dcz_dict_file). By default, a supplied hash is verified against the file's actual content at config load, catching deployment errors where the file on disk does not match what the config expects. With `zstd_dcz_dict_trust_hashes on;`, the supplied literal is trusted **verbatim** as the negotiation key and the hashing pass is skipped entirely.
+
+This is an optimization for deployments where dictionaries are identified by content-addressed paths and the tooling that generates the config is the same tooling that places the files — a pipeline that can be trusted to derive each literal from the file it ships. It reclaims the config-load cost of hashing: measured on a production config with 737 dictionary lines, `nginx -t` runs 5.10s with the verify pass (4.26s user — the SHA-256 alone) against 0.87s with trusted literals (0.03s user). Lines without a literal are hashed as always; trust changes only what a supplied literal means.
+
+The stated trade: a stale or mistyped literal is advertised verbatim, and clients holding the advertised dictionary will receive responses that may fail to decode. Only enable this when the pipeline that writes the literal is the same one that placed the file. The directive must precede every [`zstd_dcz_dict_file`](#zstd_dcz_dict_file) that carries a literal; declaring it after one is a config-load error.
+
+**Example (content-addressed deployment with optimized hashing):**
+
+```nginx
+http {
+    zstd on;
+    zstd_dcz_dict_trust_hashes on;   # pipeline places files and generates hashes
+
+    server {
+        location /app/ {
+            # Hash comes from the same tool that places the file;
+            # the verify pass is skipped.
+            zstd_dcz_dict_file /srv/dicts/app-v41-a1b2c3d4.bin a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef0;
+        }
+    }
+}
 ```
 
 ---

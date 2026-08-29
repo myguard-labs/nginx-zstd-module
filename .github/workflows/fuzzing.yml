@@ -58,11 +58,10 @@ jobs:
       # Replay every triaged past crash FIRST -- fast (each is one input)
       # and deterministic, so a reintroduced bug fails in seconds instead
       # of waiting on the 120s fresh budget to happen to rediscover it.
-      # Currently empty (see ci/fuzz/regressions/README.md) -- the glob
-      # guard below keeps that from being a silent no-op forever: an
-      # empty directory is a real state, not a bug, but a stale directory
-      # that stopped matching anything after a rename WOULD be, so this
-      # step still reports its case count explicitly either way.
+      # The glob guard below ensures visibility: an empty directory is a
+      # real state (not a bug), but a stale directory that stopped matching
+      # anything after a rename WOULD be a bug, so this step always reports
+      # its case count explicitly to catch either scenario.
       - name: Replay recorded crash regressions
         run: |
           set -euo pipefail
