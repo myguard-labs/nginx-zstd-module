@@ -75,6 +75,7 @@ class WriteConfigTests(unittest.TestCase):
                 conf_path,
                 html_dir,
                 18080,
+                18081,
                 "on",
                 [filter_module, static_module],
             )
@@ -100,7 +101,7 @@ class WriteConfigTests(unittest.TestCase):
             html_dir = root / "html"
             html_dir.mkdir()
 
-            test_encoding.write_config(conf_path, html_dir, 18080, "off", [])
+            test_encoding.write_config(conf_path, html_dir, 18080, 18081, "off", [])
 
             config = conf_path.read_text(encoding="utf-8")
             self.assertTrue(config.startswith("worker_processes  1;\n"))
