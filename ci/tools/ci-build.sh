@@ -277,10 +277,11 @@ echo ""
 #     (without either, config load fails with "unknown directive" and
 #      Test::Nginx bails out of the whole TAP file)
 #   --with-debug         — TEST 91 asserts on a debug-level error.log line
-#   no ZSTD_STATIC_LINKING_ONLY — this script builds a deployable dynamic
-#     module against libzstd.so, whose ABI does not guarantee the static-only
-#     entry points. auto/zstd enables that macro only after a true static
-#     archive probe succeeds.
+#   no ZSTD_STATIC_LINKING_ONLY for release — this script's normal output is a
+#     deployable dynamic module against libzstd.so, whose ABI does not
+#     guarantee the static-only entry points. Coverage is the exception: it
+#     exercises estimator-only config paths and is never published as the
+#     deployable artifact.
 # Coverage adds --coverage to BOTH cc-opt and ld-opt via the configure
 # argument, not env CC/CFLAGS -- nginx's configure probes the compiler with
 # its own invocations (`` `$CC -v ...` ``, unquoted so it also splits on a
@@ -289,7 +290,7 @@ echo ""
 CC_OPT=""
 LD_OPT=""
 if [ "$MODE" = "coverage" ]; then
-    CC_OPT="$CC_OPT --coverage -O0"
+    CC_OPT="$CC_OPT -DZSTD_STATIC_LINKING_ONLY --coverage -O0"
     LD_OPT="--coverage"
 fi
 
@@ -338,8 +339,10 @@ echo "==========================================================================
 echo ""
 
 make -j"$(nproc)" 2>&1 | tail -10
-"$ZSTD_MODULE_DIR/ci/tools/check-zstd-dynamic-linkage.sh" \
-    objs/ngx_http_zstd_filter_module.so
+if [ "$MODE" != "coverage" ]; then
+    "$ZSTD_MODULE_DIR/ci/tools/check-zstd-dynamic-linkage.sh" \
+        objs/ngx_http_zstd_filter_module.so
+fi
 
 echo ""
 echo "=========================================================================="

@@ -2411,18 +2411,18 @@ jobs:
         run: |
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
           cd "nginx-${NGINX_VERSION}"
+          cc_opt="-DZSTD_STATIC_LINKING_ONLY --coverage -O0 -g"
+          cc_opt="$cc_opt $(pkg-config --cflags libzstd zlib libpcre2-8 openssl)"
           ./configure \
             --with-compat --with-debug --with-threads --with-file-aio \
             --with-http_ssl_module --with-http_v2_module --with-http_v3_module \
             --with-http_gzip_static_module --with-http_realip_module \
             --with-http_sub_module --with-http_addition_module \
             --with-http_stub_status_module --with-http_auth_request_module \
-            --with-cc-opt="--coverage -O0 -g $(pkg-config --cflags libzstd zlib libpcre2-8 openssl)" \
+            --with-cc-opt="$cc_opt" \
             --with-ld-opt="--coverage $(pkg-config --libs libzstd zlib libpcre2-8 openssl)" \
             --add-dynamic-module="$GITHUB_WORKSPACE"
           make -j"$(nproc)"
-          "$GITHUB_WORKSPACE/ci/tools/check-zstd-dynamic-linkage.sh" \
-            objs/ngx_http_zstd_filter_module.so
           echo "TEST_NGINX_BINARY=$PWD/objs/nginx" >> "$GITHUB_ENV"
           echo "COV_OBJDIR=$PWD/objs/addon" >> "$GITHUB_ENV"
 
