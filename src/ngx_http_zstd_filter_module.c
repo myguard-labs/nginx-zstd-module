@@ -1382,6 +1382,96 @@ ngx_module_t  ngx_http_zstd_filter_module = {
 
 
 static ngx_int_t
+ngx_http_zstd_cache_control_value_no_transform(ngx_table_elt_t *cc)
+{
+    u_char  *p, *last, *start, *end, *semi;
+
+    if (cc->value.len == 0) {
+        return 0;
+    }
+
+    p = cc->value.data;
+    last = p + cc->value.len;
+
+    while (p < last) {
+        start = p;
+        while (start < last && (*start == ' ' || *start == '\t')) {
+            start++;
+        }
+
+        end = start;
+        while (end < last && *end != ',') {
+            end++;
+        }
+
+        semi = start;
+        while (semi < end && *semi != ';') {
+            semi++;
+        }
+        end = semi;
+
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+            end--;
+        }
+
+        if ((size_t) (end - start) == sizeof("no-transform") - 1
+            && ngx_strncasecmp(start, (u_char *) "no-transform",
+                               sizeof("no-transform") - 1) == 0)
+        {
+            return 1;
+        }
+
+        p = semi;
+        while (p < last && *p != ',') {
+            p++;
+        }
+        if (p < last) {
+            p++;
+        }
+    }
+
+    return 0;
+}
+
+
+static ngx_int_t
+ngx_http_zstd_cache_control_no_transform(ngx_http_request_t *r)
+{
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h;
+
+    part = &r->headers_out.headers.part;
+    h = part->elts;
+
+    for (i = 0; /* void */; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].hash == 0 || h[i].key.len != sizeof("Cache-Control") - 1) {
+            continue;
+        }
+
+        if (ngx_strncasecmp(h[i].key.data, (u_char *) "Cache-Control",
+                            sizeof("Cache-Control") - 1) == 0
+            && ngx_http_zstd_cache_control_value_no_transform(&h[i]))
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+static ngx_int_t
 ngx_http_zstd_header_filter(ngx_http_request_t *r)
 {
     ngx_table_elt_t           *h;
@@ -1486,6 +1576,12 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd: skip, content type \"%V\" not in zstd_types",
                        &r->headers_out.content_type);
+        return ngx_http_next_header_filter(r);
+    }
+
+    if (ngx_http_zstd_cache_control_no_transform(r)) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd: skip, Cache-Control no-transform");
         return ngx_http_next_header_filter(r);
     }
 

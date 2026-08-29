@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import concurrent.futures
+import http.server
 import os
 import pathlib
 import re
@@ -9,8 +10,10 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
+from typing import ClassVar
 
 FIXTURE_SENTINEL = "END-OF-ZSTD-TRUNCATION-FIXTURE-9f4c3d1b"
 
@@ -43,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=18080,
         help="Local TCP port for the temporary nginx instance.",
+    )
+    parser.add_argument(
+        "--backend-port",
+        type=int,
+        help="Local TCP port for the temporary Cache-Control upstream.",
     )
     parser.add_argument(
         "--zstd-bin",
@@ -137,6 +145,7 @@ def write_config(
     conf_path: pathlib.Path,
     root_dir: pathlib.Path,
     port: int,
+    backend_port: int,
     gzip_vary: str,
     modules: list[pathlib.Path],
 ) -> None:
@@ -175,6 +184,46 @@ http {{
             zstd_types application/javascript;
             access_log logs/zstd_ratio.log zstd_ratio_fmt;
         }}
+        location = /cache-control-public.js {{
+            types {{
+                application/javascript js;
+            }}
+            default_type application/javascript;
+            zstd on;
+            zstd_min_length 1;
+            zstd_types application/javascript;
+            proxy_pass http://127.0.0.1:{backend_port}/cache-control-public.js;
+        }}
+        location = /cache-control-no-transform-comma.js {{
+            types {{
+                application/javascript js;
+            }}
+            default_type application/javascript;
+            zstd on;
+            zstd_min_length 1;
+            zstd_types application/javascript;
+            proxy_pass http://127.0.0.1:{backend_port}/cache-control-no-transform-comma.js;
+        }}
+        location = /cache-control-no-transform-ows.js {{
+            types {{
+                application/javascript js;
+            }}
+            default_type application/javascript;
+            zstd on;
+            zstd_min_length 1;
+            zstd_types application/javascript;
+            proxy_pass http://127.0.0.1:{backend_port}/cache-control-no-transform-ows.js;
+        }}
+        location = /cache-control-no-transform-repeat.js {{
+            types {{
+                application/javascript js;
+            }}
+            default_type application/javascript;
+            zstd on;
+            zstd_min_length 1;
+            zstd_types application/javascript;
+            proxy_pass http://127.0.0.1:{backend_port}/cache-control-no-transform-repeat.js;
+        }}
     }}
 }}
 """.lstrip(),
@@ -182,9 +231,40 @@ http {{
     )
 
 
+class CacheControlHandler(http.server.BaseHTTPRequestHandler):
+    payload = b""
+    cache_control: ClassVar[dict[str, list[str]]] = {
+        "/cache-control-public.js": ["public"],
+        "/cache-control-no-transform-comma.js": ["public, no-transform"],
+        "/cache-control-no-transform-ows.js": [" public ; max-age=60 , No-Transform "],
+        "/cache-control-no-transform-repeat.js": ["public", "no-transform"],
+    }
+
+    def do_GET(self) -> None:
+        values = self.cache_control.get(self.path)
+        if values is None:
+            self.send_error(404)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/javascript")
+        self.send_header("Content-Length", str(len(self.payload)))
+        for value in values:
+            self.send_header("Cache-Control", value)
+        self.end_headers()
+        self.wfile.write(self.payload)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+
 def fetch_response(port: int) -> tuple[bytes, str, str]:
+    return fetch_path(port, "/test.js")
+
+
+def fetch_path(port: int, path: str) -> tuple[bytes, str, str]:
     request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/test.js",
+        f"http://127.0.0.1:{port}{path}",
         headers={"Accept-Encoding": "zstd", "User-Agent": "zstd-ci-smoke-test/1.0"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -192,6 +272,31 @@ def fetch_response(port: int) -> tuple[bytes, str, str]:
         content_encoding = response.headers.get("Content-Encoding", "")
         vary = response.headers.get("Vary", "")
     return compressed, content_encoding, vary
+
+
+def validate_cache_control_no_transform(port: int, expected: bytes) -> None:
+    public_body, public_encoding, _ = fetch_path(port, "/cache-control-public.js")
+    if public_encoding.lower() != "zstd":
+        raise RuntimeError(
+            "Cache-Control public negative control did not compress: "
+            f"Content-Encoding={public_encoding!r}"
+        )
+
+    for path in (
+        "/cache-control-no-transform-comma.js",
+        "/cache-control-no-transform-ows.js",
+        "/cache-control-no-transform-repeat.js",
+    ):
+        body, encoding, _ = fetch_path(port, path)
+        if encoding:
+            raise RuntimeError(
+                f"{path}: expected no Content-Encoding for no-transform, got {encoding!r}"
+            )
+        if body != expected:
+            raise RuntimeError(f"{path}: identity response body changed")
+
+    if public_body == expected:
+        raise RuntimeError("Cache-Control public negative control was not transformed")
 
 
 def decompress_payload(zstd_bin: str, compressed: bytes) -> bytes:
@@ -302,6 +407,7 @@ def main() -> int:
         raise ValueError(
             f"concurrent-requests must be >= 1, got {args.concurrent_requests}"
         )
+    backend_port = args.backend_port or args.port + 1
 
     filter_module = detect_module_path(
         args.filter_module,
@@ -342,7 +448,16 @@ def main() -> int:
         fixture_path = html_dir / "test.js"
         expected = build_fixture(fixture_path, args.fixture_lines)
         conf_path = conf_dir / "nginx.conf"
-        write_config(conf_path, html_dir, args.port, args.gzip_vary, modules)
+        write_config(
+            conf_path, html_dir, args.port, backend_port, args.gzip_vary, modules
+        )
+
+        CacheControlHandler.payload = expected
+        backend = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", backend_port), CacheControlHandler
+        )
+        backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+        backend_thread.start()
 
         process = subprocess.Popen(
             [
@@ -388,6 +503,8 @@ def main() -> int:
                     for future in futures:
                         future.result()
 
+            validate_cache_control_no_transform(args.port, expected)
+
             validate_ratio_log(
                 pathlib.Path(temp_dir) / "logs" / "zstd_ratio.log",
                 args.request_count,
@@ -410,6 +527,8 @@ def main() -> int:
             )
             return 0
         finally:
+            backend.shutdown()
+            backend.server_close()
             process.terminate()
             try:
                 # 30s, not 5: gcov-instrumented nginx flushing .gcda
