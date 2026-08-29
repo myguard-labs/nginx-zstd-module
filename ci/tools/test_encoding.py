@@ -194,6 +194,16 @@ http {{
             zstd_types application/javascript;
             proxy_pass http://127.0.0.1:{backend_port}/cache-control-public.js;
         }}
+        location = /cache-control-quoted-no-transform.js {{
+            types {{
+                application/javascript js;
+            }}
+            default_type application/javascript;
+            zstd on;
+            zstd_min_length 1;
+            zstd_types application/javascript;
+            proxy_pass http://127.0.0.1:{backend_port}/cache-control-quoted-no-transform.js;
+        }}
         location = /cache-control-no-transform-comma.js {{
             types {{
                 application/javascript js;
@@ -235,6 +245,7 @@ class CacheControlHandler(http.server.BaseHTTPRequestHandler):
     payload = b""
     cache_control: ClassVar[dict[str, list[str]]] = {
         "/cache-control-public.js": ["public"],
+        "/cache-control-quoted-no-transform.js": ['public, extension="no-transform"'],
         "/cache-control-no-transform-comma.js": ["public, no-transform"],
         "/cache-control-no-transform-ows.js": [" public ; max-age=60 , No-Transform "],
         "/cache-control-no-transform-repeat.js": ["public", "no-transform"],
@@ -280,6 +291,18 @@ def validate_cache_control_no_transform(port: int, expected: bytes) -> None:
         raise RuntimeError(
             "Cache-Control public negative control did not compress: "
             f"Content-Encoding={public_encoding!r}"
+        )
+    quoted_body, quoted_encoding, _ = fetch_path(
+        port, "/cache-control-quoted-no-transform.js"
+    )
+    if quoted_encoding.lower() != "zstd":
+        raise RuntimeError(
+            "Cache-Control quoted no-transform parameter was treated as a "
+            f"directive: Content-Encoding={quoted_encoding!r}"
+        )
+    if quoted_body == expected:
+        raise RuntimeError(
+            "Cache-Control quoted no-transform negative control was not transformed"
         )
 
     for path in (
