@@ -204,6 +204,16 @@ http {{
             zstd_types application/javascript;
             proxy_pass http://127.0.0.1:{backend_port}/cache-control-quoted-no-transform.js;
         }}
+        location = /cache-control-quoted-comma.js {{
+            types {{
+                application/javascript js;
+            }}
+            default_type application/javascript;
+            zstd on;
+            zstd_min_length 1;
+            zstd_types application/javascript;
+            proxy_pass http://127.0.0.1:{backend_port}/cache-control-quoted-comma.js;
+        }}
         location = /cache-control-no-transform-comma.js {{
             types {{
                 application/javascript js;
@@ -256,6 +266,7 @@ class CacheControlHandler(http.server.BaseHTTPRequestHandler):
     cache_control: ClassVar[dict[str, list[str]]] = {
         "/cache-control-public.js": ["public"],
         "/cache-control-quoted-no-transform.js": ['public, extension="no-transform"'],
+        "/cache-control-quoted-comma.js": ['public, extension="a,no-transform,b"'],
         "/cache-control-no-transform-comma.js": ["public, no-transform"],
         "/cache-control-no-transform-ows.js": [" public ; max-age=60 , No-Transform "],
         "/cache-control-no-transform-repeat.js": ["public", "no-transform"],
@@ -314,6 +325,19 @@ def validate_cache_control_no_transform(port: int, expected: bytes) -> None:
     if quoted_body == expected:
         raise RuntimeError(
             "Cache-Control quoted no-transform negative control was not transformed"
+        )
+
+    quoted_comma_body, quoted_comma_encoding, _ = fetch_path(
+        port, "/cache-control-quoted-comma.js"
+    )
+    if quoted_comma_encoding.lower() != "zstd":
+        raise RuntimeError(
+            "Cache-Control quoted comma extension was split into a directive: "
+            f"Content-Encoding={quoted_comma_encoding!r}"
+        )
+    if quoted_comma_body == expected:
+        raise RuntimeError(
+            "Cache-Control quoted comma negative control was not transformed"
         )
 
     for path in (

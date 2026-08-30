@@ -1408,10 +1408,40 @@ ngx_module_t  ngx_http_zstd_filter_module = {
 };
 
 
+static u_char *
+ngx_http_zstd_cache_control_directive_end(u_char *p, u_char *last)
+{
+    while (p < last) {
+        if (*p == '"') {
+            p++;
+
+            while (p < last && *p != '"') {
+                if (*p == '\\' && p + 1 < last) {
+                    p++;
+                }
+                p++;
+            }
+
+            if (p < last) {
+                p++;
+            }
+
+        } else if (*p == ',') {
+            break;
+
+        } else {
+            p++;
+        }
+    }
+
+    return p;
+}
+
+
 static ngx_int_t
 ngx_http_zstd_cache_control_value_no_transform(ngx_table_elt_t *cc)
 {
-    u_char  *p, *last, *start, *end, *semi;
+    u_char  *p, *last, *start, *end, *directive_end, *semi;
 
     if (cc->value.len == 0) {
         return 0;
@@ -1426,10 +1456,7 @@ ngx_http_zstd_cache_control_value_no_transform(ngx_table_elt_t *cc)
             start++;
         }
 
-        end = start;
-        while (end < last && *end != ',') {
-            end++;
-        }
+        directive_end = ngx_http_zstd_cache_control_directive_end(start, last);
 
         /*
          * Cut at '=' as well as ';': the compared token is then the
@@ -1440,7 +1467,7 @@ ngx_http_zstd_cache_control_value_no_transform(ngx_table_elt_t *cc)
          * cuts to "extension" and still does not match.
          */
         semi = start;
-        while (semi < end && *semi != ';' && *semi != '=') {
+        while (semi < directive_end && *semi != ';' && *semi != '=') {
             semi++;
         }
         end = semi;
@@ -1456,10 +1483,7 @@ ngx_http_zstd_cache_control_value_no_transform(ngx_table_elt_t *cc)
             return 1;
         }
 
-        p = semi;
-        while (p < last && *p != ',') {
-            p++;
-        }
+        p = directive_end;
         if (p < last) {
             p++;
         }
