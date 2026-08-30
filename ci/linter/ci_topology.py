@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Thijs Eilander
 # SPDX-License-Identifier: BSD-2-Clause
-"""Protect the measured four-lane PR/deep workflow topology."""
+"""Protect the measured four-lane PR/deep topology and fan-out eligibility lead."""
 
 from __future__ import annotations
 
@@ -102,7 +102,10 @@ def check_build(build: dict) -> list[str]:
         errors.append("build-test.yml fan-out barrier must stay off the four-lane pool")
     steps = fanout.get("steps", [])
     if len(steps) != 1 or steps[0].get("run") != "sleep 10":
-        errors.append("build-test.yml fan-out barrier must preserve mainline priority")
+        errors.append(
+            "build-test.yml fan-out barrier must preserve the ten-second "
+            "best-effort eligibility lead for the delayed fan-out chains"
+        )
     if "coverage" in jobs:
         errors.append("coverage is a deep report, not a PR job")
     return errors
@@ -200,7 +203,7 @@ def selftest(  # pylint: disable=too-many-statements
     cases.append(("invalid hosted arm64 dependency", ci, changed, deep))
     changed = copy.deepcopy(build)
     changed["jobs"]["release-build-fanout"]["steps"][0]["run"] = "true"
-    cases.append(("lost mainline priority", ci, changed, deep))
+    cases.append(("lost best-effort fan-out eligibility lead", ci, changed, deep))
     changed = copy.deepcopy(deep)
     changed["jobs"]["fuzz"]["strategy"]["max-parallel"] = 3
     cases.append(("five-lane deep fan-out", ci, build, changed))

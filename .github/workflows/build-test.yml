@@ -497,9 +497,10 @@ jobs:
     timeout-minutes: 2
     needs: resolve
     steps:
-      - name: Give mainline first claim on the released lane
-        # GitHub does not promise ready-queue order. Keep mainline as the only
-        # self-hosted candidate briefly, then release the other three chains.
+      - name: Give mainline a best-effort head start before fan-out
+        # GitHub does not promise ready-queue order. This gate delays the three
+        # fan-out chains by ten seconds after resolve, giving build a bounded,
+        # best-effort eligibility lead without guaranteeing scheduler priority.
         run: sleep 10
 
   build:
@@ -892,8 +893,8 @@ jobs:
     name: Build (libzstd 1.4.x — fallback paths)
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 25
-    # Released by the hosted barrier after mainline has first claim on the
-    # resolver's lane, then occupies the next lane to become available.
+    # Released after the barrier's bounded best-effort eligibility lead for
+    # build; it may contend with build and validation once the delay expires.
     needs: [resolve, release-build-fanout]
 
     env:
