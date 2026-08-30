@@ -47,10 +47,11 @@ ROOT="$(cd "$DIR/../../.." && pwd)"
 FUZZ_DIR="$ROOT/ci/fuzz"
 BIN="$DIR/test_accept_encoding"
 LEGACY_BIN="$DIR/test_accept_encoding_legacy"
+CHAIN_BIN="$DIR/test_accept_encoding_chain"
 PROBE_BIN="$DIR/test_static_probe"
 
 if [ "${1:-}" = "clean" ]; then
-	rm -f "$BIN" "$LEGACY_BIN" "$PROBE_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
+	rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$PROBE_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
 	echo "unit test binary removed"
 	exit 0
 fi
@@ -99,6 +100,18 @@ $CC "${LINK_EXTRA[@]}" -o "$LEGACY_BIN" "$DIR/test_accept_encoding_legacy.o"
 
 echo "==> Running nginx 1.22.1-shaped Accept-Encoding checks"
 timeout 60s "$LEGACY_BIN"
+
+echo "==> Building $CHAIN_BIN with ${CC} (nginx 1.23+ chained headers)"
+# This reuses the legacy fixture with the modern shim shape, proving the
+# ordered duplicate-field contract in both nginx storage layouts.
+# shellcheck disable=SC2086
+$CC "${OWN_CFLAGS[@]}" -I"$FUZZ_DIR" \
+	-c "$DIR/test_accept_encoding_legacy.c" -o "$DIR/test_accept_encoding_chain.o"
+# shellcheck disable=SC2086
+$CC "${LINK_EXTRA[@]}" -o "$CHAIN_BIN" "$DIR/test_accept_encoding_chain.o"
+
+echo "==> Running nginx 1.23+-shaped Accept-Encoding checks"
+timeout 60s "$CHAIN_BIN"
 
 # ---------------------------------------------------------------------------
 # The .zst frame-header probe (src/ngx_http_zstd_static_module.c:

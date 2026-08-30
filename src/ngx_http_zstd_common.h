@@ -536,8 +536,8 @@ static ngx_inline ngx_int_t
 ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
     const char *coding, size_t coding_len, ngx_uint_t allow_wildcard)
 {
-    ngx_int_t  coding_q = -1;   /* explicit token, lowest seen, -1 = absent */
-    ngx_int_t  star_q = -1;     /* "*" wildcard,   lowest seen, -1 = absent */
+    ngx_int_t  coding_q = -1;   /* latest explicit token, -1 = absent */
+    ngx_int_t  star_q = -1;     /* latest "*" wildcard, -1 = absent */
 
     for (/* void */; ae != NULL; ae = NGX_HTTP_ZSTD_AE_NEXT(ae)) {
 
@@ -560,10 +560,8 @@ ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
         q = ngx_http_zstd_coding_weight(&ae->value, coding, coding_len, 0);
 
         if (q >= 0) {
-            /* Explicit token on this line: lowest explicit weight wins. */
-            if (coding_q < 0 || q < coding_q) {
-                coding_q = q;
-            }
+            /* Duplicate field lines are comma-joined in received order. */
+            coding_q = q;
             continue;
         }
 
@@ -575,9 +573,7 @@ ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
 
         if (q >= 0) {
             /* Only "*" could have produced an answer here. */
-            if (star_q < 0 || q < star_q) {
-                star_q = q;
-            }
+            star_q = q;
         }
     }
 
@@ -645,9 +641,7 @@ ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
         q = ngx_http_zstd_coding_weight(&headers[i].value, coding,
                                          coding_len, 0);
         if (q >= 0) {
-            if (coding_q < 0 || q < coding_q) {
-                coding_q = q;
-            }
+            coding_q = q;
             continue;
         }
 
@@ -657,7 +651,7 @@ ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
 
         q = ngx_http_zstd_coding_weight(&headers[i].value, coding,
                                          coding_len, 1);
-        if (q >= 0 && (star_q < 0 || q < star_q)) {
+        if (q >= 0) {
             star_q = q;
         }
     }

@@ -40,6 +40,9 @@ request_decide(const char *first, const char *second)
     headers[1].key.len = sizeof("Accept-Encoding") - 1;
     headers[1].value.data = (u_char *) second;
     headers[1].value.len = strlen(second);
+#if !defined(NGX_ZSTD_LEGACY_SHIM)
+    headers[0].next = &headers[1];
+#endif
     r.main = &r;
     r.headers_in.accept_encoding = &headers[0];
     r.headers_in.headers.part.elts = headers;
@@ -55,6 +58,10 @@ main(void)
           "legacy list: gzip then zstd accepts");
     check(request_decide("*", "zstd;q=0") == NGX_DECLINED,
           "legacy list: explicit zstd;q=0 overrides wildcard");
+    check(request_decide("zstd;q=0", "zstd;q=1") == NGX_OK,
+          "later explicit zstd allowance wins");
+    check(request_decide("zstd;q=1", "zstd;q=0") == NGX_DECLINED,
+          "later explicit zstd refusal wins");
 
     printf("\n%d/%d checks passed\n", checks - failures, checks);
     return failures ? 1 : 0;

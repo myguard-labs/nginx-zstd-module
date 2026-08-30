@@ -633,9 +633,8 @@ case_fraction_exhaustive_three_digit(void)
  * request as its line list and asserts the decision the joined value
  * would have produced.
  *
- * The duplicate-coding rule -- an explicit q=0 anywhere is final -- is
- * asserted directly by the mixed-weight cases. See the helper's comment
- * in src/ngx_http_zstd_common.h for why fail-safe rather than last-wins.
+ * Duplicate coding values retain the order of the comma-joined field: the
+ * later explicit value decides, just as it does within one field line.
  * ------------------------------------------------------------------ */
 
 /*
@@ -735,11 +734,10 @@ case_chain_q0_second_line(void)
 }
 
 static void
-case_chain_q0_then_q1_stays_declined(void)
+case_chain_q0_then_q1_accepts(void)
 {
-    check(chain_zstd("zstd;q=0", "zstd;q=1", NULL, NULL) == NGX_DECLINED,
-          "chain: 'zstd;q=0' then 'zstd;q=1' declines "
-          "(explicit q=0 anywhere is final)");
+    check(chain_zstd("zstd;q=0", "zstd;q=1", NULL, NULL) == NGX_OK,
+          "chain: later 'zstd;q=1' overrides an earlier refusal");
 }
 
 static void
@@ -749,13 +747,13 @@ case_chain_q1_then_q0_stays_declined(void)
           "chain: 'zstd;q=1' then 'zstd;q=0' declines");
 }
 
-/* Two non-zero weights: the lowest wins, but both accept, so still OK. */
+/* The later value wins across field lines, as it does within one line. */
 static void
 case_chain_two_nonzero_weights(void)
 {
-    check(chain_weight("zstd", 1, "zstd;q=1", "zstd;q=0.5", NULL, NULL) == 500,
-          "chain: lowest non-zero explicit weight wins (1 vs 0.5 -> 500)");
-    check(chain_zstd("zstd;q=1", "zstd;q=0.5", NULL, NULL) == NGX_OK,
+    check(chain_weight("zstd", 1, "zstd;q=0.5", "zstd;q=1", NULL, NULL) == 1000,
+          "chain: later explicit weight wins (0.5 then 1 -> 1000)");
+    check(chain_zstd("zstd;q=0.5", "zstd;q=1", NULL, NULL) == NGX_OK,
           "chain: two non-zero weights still accept");
 }
 
@@ -854,11 +852,10 @@ case_chain_dcz_q0_first_line(void)
 }
 
 static void
-case_chain_dcz_q0_then_q1_stays_declined(void)
+case_chain_dcz_q0_then_q1_accepts(void)
 {
-    check(chain_dcz("dcz;q=0", "dcz;q=1", NULL, NULL) == NGX_DECLINED,
-          "chain/dcz: 'dcz;q=0' then 'dcz;q=1' declines "
-          "(explicit q=0 anywhere is final)");
+    check(chain_dcz("dcz;q=0", "dcz;q=1", NULL, NULL) == NGX_OK,
+          "chain/dcz: later 'dcz;q=1' overrides an earlier refusal");
 }
 
 /*
@@ -1476,7 +1473,7 @@ main(void)
     case_chain_single_line_unchanged();
     case_chain_q0_first_line();
     case_chain_q0_second_line();
-    case_chain_q0_then_q1_stays_declined();
+    case_chain_q0_then_q1_accepts();
     case_chain_q1_then_q0_stays_declined();
     case_chain_two_nonzero_weights();
     case_chain_wildcard_later_line();
@@ -1490,7 +1487,7 @@ main(void)
     case_chain_dcz_first_line();
     case_chain_dcz_q0_second_line();
     case_chain_dcz_q0_first_line();
-    case_chain_dcz_q0_then_q1_stays_declined();
+    case_chain_dcz_q0_then_q1_accepts();
     case_chain_dcz_wildcard_never_matches();
     case_chain_dcz_three_lines();
 
