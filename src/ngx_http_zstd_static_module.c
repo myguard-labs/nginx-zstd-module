@@ -621,7 +621,7 @@ ngx_http_zstd_static_pread(ngx_fd_t fd, u_char *buf, size_t size,
      *
      * align == 0 selects the buffered path: the round-down is a no-op
      * (see the guard below) and this is a plain accumulate, which is
-     * what the 18-byte hdrbuf read wants.
+     * what the small buffered hdrbuf read wants.
      *
      * Returns the total bytes accumulated (0 at immediate EOF), or -1 on
      * a hard error, matching pread(2)'s convention so the caller's
@@ -1042,24 +1042,46 @@ ngx_http_zstd_static_probe_verdict(const u_char *frame, size_t avail,
 }
 
 
+static ngx_uint_t
+ngx_http_zstd_static_probe_reuse(off_t pos, off_t have_base, ssize_t n,
+    size_t need, size_t *frame_off, off_t *base)
+{
+    uint64_t  offset;
+
+    if (n <= 0 || pos < have_base) {
+        return 0;
+    }
+
+    offset = (uint64_t) (pos - have_base);
+
+    if (offset > (uint64_t) n || (uint64_t) n - offset < need) {
+        return 0;
+    }
+
+    *frame_off = (size_t) offset;
+    *base = have_base;
+
+    return 1;
+}
+
+
 static ngx_int_t
 ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     const ngx_http_core_loc_conf_t *clcf, ngx_open_file_info_t *of,
     ngx_str_t *path, ngx_log_t *log)
 {
     /*
-     * 18 bytes covers the largest possible frame header prefix this
-     * check needs: magic(4) + descriptor(1) + window byte(1) for
-     * streaming frames, or magic(4) + descriptor(1) + dictionary
-     * id(<=4) + content size(<=8) for single-segment frames. Short
-     * files return fewer bytes; each parse path checks it got what
-     * that frame layout requires.
+     * 58 bytes covers a canonical 40-byte dcz skippable prefix plus
+     * the largest possible 18-byte frame header. This lets the common
+     * two-frame shape reuse one read while leaving enough room for the
+     * standalone maximum header. Short files return fewer bytes; each
+     * parse path checks it got what that frame layout requires.
      */
-    u_char       hdrbuf[18];
+    u_char       hdrbuf[58];
     u_char      *hdr, *frame;
-    size_t       want, align, frame_off, avail, got;
+    size_t       want, align, frame_off, avail, got, need;
     ssize_t      n;
-    ngx_uint_t   frames, scratch, have_block;
+    ngx_uint_t   frames, scratch, have_block, reuse;
     off_t        pos, base, have_base;
     ngx_int_t    probe_rc;
 
@@ -1173,6 +1195,13 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
             base = pos;
         }
 
+        need = (size_t) ngx_min((off_t) 18,
+                                ngx_max((off_t) 4, of->size - pos));
+
+        reuse = have_block
+                && ngx_http_zstd_static_probe_reuse(pos, have_base, n, need,
+                                                    &frame_off, &base);
+
         /*
          * Reuse the block already in `hdr` when this iteration
          * reads the SAME aligned offset and the bytes it needs are
@@ -1185,24 +1214,17 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
          * iteration, re-issuing up to 2 * PROBE_MAX of O_DIRECT per
          * skipped frame.
          *
-         * `have_block` is only ever set on the directio path, where
-         * `base` is a rounded-down offset that can repeat. Off that
-         * path `base == pos` and `pos` strictly increases, so the
-         * cache never fires and this is byte-for-byte the previous
-         * behaviour.
-         *
-         * The guard requires the previous read to have reached at
-         * least `frame_off + 4`, the minimum this iteration can
-         * parse; anything short of that still takes a fresh read
-         * and then the `avail < 4` branch below, exactly as before.
+         * The guard above also lets the ordinary 58-byte buffer retain
+         * a canonical 40-byte dcz prefix plus the following maximum
+         * 18-byte frame header. It requires the whole possible header
+         * (or all bytes remaining in a shorter file), so a partial
+         * suffix still takes the established offset-read path.
          */
-        if (!(have_block && base == have_base
-              && n > 0 && (size_t) n >= frame_off + 4))
-        {
+        if (!reuse) {
             n = ngx_http_zstd_static_pread(of->fd, hdr, want, base, align,
                                            log, path);
 
-            if (of->is_directio && n > 0) {
+            if (n > 0) {
                 have_block = 1;
                 have_base = base;
             }

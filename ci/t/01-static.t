@@ -1196,6 +1196,8 @@ eight byte origin
 --- error_code: 200
 --- error_log
 pread
+--- no_error_log
+reusing
 
 
 
@@ -1662,5 +1664,35 @@ Content-Encoding: zstd
 --- error_log
 16384-byte aligned probe on directio file
 reusing 32768-byte block at offset 0 for next frame
+--- no_error_log
+[error]
+
+
+
+=== TEST 57: the ordinary probe retains a canonical dcz prefix
+# The ordinary probe reads the canonical 40-byte skippable prefix and the
+# following maximum 18-byte frame header together. The reuse log proves the
+# second frame came from that request-local read-ahead instead of another
+# offset read; TEST 45 separately pins malformed and truncated skip handling.
+--- config
+    location /skip/ {
+        zstd_static on;
+        root html;
+    }
+--- user_files eval
+">>> skip/read_ahead.js\nordinary read ahead origin\n>>> skip/read_ahead.js.zst\n"
+. pack("C*", 0x50, 0x2A, 0x4D, 0x18, 0x20, 0x00, 0x00, 0x00)
+. ("\0" x 32)
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x19, 0x00, 0x00)
+. "hi\n"
+--- request
+GET /skip/read_ahead.js
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- error_code: 200
+--- error_log
+reusing 58-byte block at offset 0 for next frame
 --- no_error_log
 [error]
