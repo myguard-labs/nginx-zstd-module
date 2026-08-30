@@ -76,13 +76,13 @@ def check_build(build: dict) -> list[str]:
         "resolve": set(),
         "validation": set(),
         "build": {"resolve"},
-        "build-arm64": {"resolve", "validation"},
+        "build-arm64": {"resolve"},
         "tests": {"resolve", "build"},
-        "build-asan": {"resolve", "validation"},
+        "build-asan": {"resolve"},
         "tests-asan": {"build-asan"},
-        "build-old-libzstd": {"resolve", "validation"},
-        "cvary-interop": {"resolve", "validation"},
-        "linkage": {"resolve", "validation", "cvary-interop"},
+        "build-old-libzstd": {"resolve"},
+        "cvary-interop": {"resolve"},
+        "linkage": {"resolve", "cvary-interop"},
     }
     errors.extend(edge_errors("build-test.yml", jobs, build_edges))
     if "coverage" in jobs:
