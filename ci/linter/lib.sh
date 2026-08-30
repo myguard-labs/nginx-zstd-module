@@ -8,6 +8,8 @@
 #                          staged (default in the git hook) -- staged files only
 #                          all                              -- every tracked file
 #                        and an explicit file list passed in "$@" by run-all.sh.
+#   mapfile_checked <array> <producer> [args...]
+#                        populate an array only after its producer succeeds
 #   need <tool> <hint>   hard-fail with an install hint when a linter is absent
 #   say / warn / die     consistent output
 #
@@ -26,6 +28,25 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 need() {
     command -v "$1" >/dev/null 2>&1 && return 0
     die "$1 not found. Install it: $2   (or run ci/linter/install-linters.sh)"
+}
+
+mapfile_checked() {
+    local array_name="$1" tmp rc; shift
+    tmp="$(mktemp)" || die "mktemp failed"
+    if [ "${MAPFILE_CHECKED_FAULT:-}" = "partial-error" ]; then
+        printf '%s\n' plausible-prefix >"$tmp"
+        rm -f "$tmp"
+        return 23
+    fi
+    if "$@" >"$tmp"; then
+        mapfile -t "$array_name" <"$tmp"
+        rm -f "$tmp"
+        return 0
+    else
+        rc=$?
+        rm -f "$tmp"
+        return "$rc"
+    fi
 }
 
 # Paths never linted: byte-exact fuzz inputs, vendored trees, build output.

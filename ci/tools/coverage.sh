@@ -34,7 +34,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULE_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+# shellcheck source=ci/linter/lib.sh
+. "$MODULE_DIR/ci/linter/lib.sh"
 cd "$MODULE_DIR"
+
+collect_module_gcda() {
+    mapfile_checked MODULE_GCDA find "$1" -name 'ngx_http_zstd_*.gcda'
+}
+
+if [ "${1:-}" = "--selftest-work-list" ]; then
+    collect_module_gcda "${2:?usage: coverage.sh --selftest-work-list DIR}"
+    exit 0
+fi
 
 FLAVOR="${1:-nginx}"
 VERSION="${2:-}"
@@ -174,7 +185,7 @@ mkdir -p "$REPORT_DIR"
 # -- NOT flat in objs/ (that directory holds .gcno for a *_modules.c shim
 # that is a compile-time registration stub, never itself executed, so it
 # never gets a matching .gcda).
-mapfile -t MODULE_GCDA < <(find "$SRCDIR/objs/addon" -name 'ngx_http_zstd_*.gcda')
+collect_module_gcda "$SRCDIR/objs/addon"
 if [ "${#MODULE_GCDA[@]}" -eq 0 ]; then
     echo "ERROR: no .gcda for the zstd module under $SRCDIR/objs -- ci/t/ did not" \
         "exercise the coverage-instrumented binary" >&2

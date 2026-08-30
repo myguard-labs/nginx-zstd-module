@@ -23,7 +23,7 @@
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
-mapfile -t FILES < <(lint_files '\.py$' "$@")
+mapfile_checked FILES lint_files '\.py$' "$@"
 [ "${#FILES[@]}" -gt 0 ] || { echo "lint-python: no Python files to check"; exit 0; }
 
 echo "lint-python: ${#FILES[@]} file(s)"

@@ -26,7 +26,7 @@
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
-mapfile -t FILES < <(lint_files '^src/.*\.[ch]$' "$@")
+mapfile_checked FILES lint_files '^src/.*\.[ch]$' "$@"
 [ "${#FILES[@]}" -gt 0 ] || { echo "lint-c: no C files to check"; exit 0; }
 
 echo "lint-c: ${#FILES[@]} file(s)"

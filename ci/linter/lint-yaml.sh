@@ -42,7 +42,7 @@
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
-mapfile -t FILES < <(lint_files '\.ya?ml$' "$@")
+mapfile_checked FILES lint_files '\.ya?ml$' "$@"
 [ "${#FILES[@]}" -gt 0 ] || { echo "lint-yaml: no YAML files to check"; exit 0; }
 
 echo "lint-yaml: ${#FILES[@]} file(s)"
@@ -52,7 +52,10 @@ need yamllint "apt-get install yamllint"
 say "yamllint"
 yamllint "${FILES[@]}" || rc=1
 
-mapfile -t WF < <(printf '%s\n' "${FILES[@]}" | grep -E '^\.github/workflows/' || true)
+WF=()
+for f in "${FILES[@]}"; do
+    [[ "$f" =~ ^\.github/workflows/ ]] && WF+=("$f")
+done
 if [ "${#WF[@]}" -gt 0 ]; then
     need actionlint "go install github.com/rhysd/actionlint/cmd/actionlint@latest  (see install-linters.sh)"
     say "actionlint (${#WF[@]} workflow(s))"

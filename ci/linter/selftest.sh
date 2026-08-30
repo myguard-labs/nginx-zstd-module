@@ -35,7 +35,7 @@ case_() {
         echo "ok   $desc (exit $got)"
     else
         echo "FAIL $desc: expected exit $want, got $got" >&2
-        echo "$out" | sed 's/^/       | /' >&2
+        printf '       | %s\n' "${out//$'\n'/$'\n       | '}" >&2
         rc=1
     fi
 }
@@ -66,6 +66,17 @@ fi
 # Positive control: the selector still selects. --list is used rather than a
 # real run so this stays independent of which linters are installed.
 case_ 0 "--list works" ci/linter/run-all.sh --list
+
+# Work-list consumers used process substitution, whose exit status is not
+# visible to mapfile. Exercise each real consumer with a producer that emits a
+# plausible prefix and then fails; all three must propagate its exact status.
+case_ 23 "lint work list rejects partial output followed by failure" \
+    env MAPFILE_CHECKED_FAULT=partial-error ci/linter/lint-sh.sh ci/linter/lib.sh
+case_ 23 "dictionary work list rejects partial output followed by failure" \
+    env MAPFILE_CHECKED_FAULT=partial-error ci/fuzz/gen_dict.sh --check
+case_ 23 "coverage work list rejects partial output followed by failure" \
+    env MAPFILE_CHECKED_FAULT=partial-error ci/tools/coverage.sh \
+        --selftest-work-list "$ROOT"
 
 # ----------------------------------------------------------------------------
 # workflow_policy.py -- the red path of each policy check.

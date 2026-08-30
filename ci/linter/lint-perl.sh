@@ -18,7 +18,7 @@
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
-mapfile -t FILES < <(lint_files '\.(t|pl|pm)$' "$@")
+mapfile_checked FILES lint_files '\.(t|pl|pm)$' "$@"
 [ "${#FILES[@]}" -gt 0 ] || { echo "lint-perl: no Perl files to check"; exit 0; }
 
 echo "lint-perl: ${#FILES[@]} file(s)"

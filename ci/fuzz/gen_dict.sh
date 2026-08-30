@@ -28,6 +28,8 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
 DICT="$DIR/fuzz.dict"
+# shellcheck source=ci/linter/lib.sh
+. "$ROOT/ci/linter/lib.sh"
 
 START_MARK="# BEGIN generated coding tokens (ci/fuzz/gen_dict.sh)"
 END_MARK="# END generated coding tokens"
@@ -47,12 +49,13 @@ END_MARK="# END generated coding tokens"
 # dictionary, which is a fuzz-coverage loss that no test would have failed
 # on. Matching both keeps a call site's token in the dictionary wherever
 # the negotiation is evaluated from.
-mapfile -t TOKENS < <(
+produce_tokens() {
     grep -hoE 'ngx_http_zstd_(chain_)?coding_weight\([^,]+,[[:space:]]*"[A-Za-z0-9_-]+"' \
         "$ROOT"/src/*.c "$ROOT"/src/*.h \
     | grep -oE '"[A-Za-z0-9_-]+"$' \
     | sort -u
-)
+}
+mapfile_checked TOKENS produce_tokens
 
 if [ "${#TOKENS[@]}" -eq 0 ]; then
     echo "✗ gen_dict: no ngx_http_zstd_coding_weight(...) call sites found" \

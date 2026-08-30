@@ -39,7 +39,7 @@
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
-mapfile -t FILES < <(lint_files '.' "$@")
+mapfile_checked FILES lint_files '.' "$@"
 [ "${#FILES[@]}" -gt 0 ] || { echo "lint-spelling: no files to check"; exit 0; }
 
 echo "lint-spelling: ${#FILES[@]} file(s)"

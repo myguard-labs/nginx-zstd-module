@@ -28,7 +28,7 @@
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
-mapfile -t FILES < <(lint_files '^\.github/workflows/.*\.ya?ml$' "$@")
+mapfile_checked FILES lint_files '^\.github/workflows/.*\.ya?ml$' "$@"
 [ "${#FILES[@]}" -gt 0 ] || { echo "lint-ci-runners: no workflow files to check"; exit 0; }
 
 need python3 "apt-get install python3"

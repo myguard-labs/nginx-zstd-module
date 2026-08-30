@@ -15,7 +15,7 @@
 
 # .githooks/* has no extension but is bash; an unchecked commit hook is the
 # one script whose bug silently disables every other check here.
-mapfile -t FILES < <(lint_files '\.(sh|bash)$|^\.githooks/' "$@")
+mapfile_checked FILES lint_files '\.(sh|bash)$|^\.githooks/' "$@"
 [ "${#FILES[@]}" -gt 0 ] || { echo "lint-sh: no shell files to check"; exit 0; }
 
 echo "lint-sh: ${#FILES[@]} file(s)"
