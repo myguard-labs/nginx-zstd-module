@@ -20,38 +20,36 @@
 # THE ORDINAL -> SITE MAP. Which wrapped allocation a given nth reaches is
 # a property of this request (200 KB, zstd on, default buffer sizing), not a
 # constant of the module. Measured on nginx 1.31.4 by logging __LINE__ at
-# each wrapper call, the 13 wrapped allocations of one such request are:
+# each wrapper call, the 6 wrapped allocations of one such request are:
 #
 #   nth   site                                           bytes on the wire?
 #    1    ctx pcalloc, header filter                     no
 #    2    Content-Encoding ngx_list_push, header filter  no
 #    3    CCtx cleanup ngx_pool_cleanup_add              no
-#    4    incoming-chain link, body filter               no
-#    5    out_buf combined allocation                    no
-#    6-8  incoming-chain link, body filter               no
-#    9    emit chain link                                no
-#   10-12 incoming-chain link, body filter               YES
-#   13    emit chain link                                YES
+#    4    out_buf combined allocation                    no
+#    5    emit chain link                                no
+#    6    emit chain link                                YES
 #
 # WHERE "COMMITTED" ACTUALLY IS. Note that the boundary is NOT the header
 # filter / body filter split, which is where one would expect it. nginx
 # buffers the response, so ngx_http_send_header() returning does not put
 # bytes on the wire; the status line only reaches the client once enough
 # output has accumulated to flush. Measured on this request that happens
-# between the 9th and 10th wrapped allocation -- so allocations 3..9 are in
-# the body filter yet still fail with nothing delivered, and only 10+ fail
+# between the 5th and 6th wrapped allocation -- so allocations 3..5 are in
+# the body filter yet still fail with nothing delivered, and only 6 fails
 # with a response already committed.
 #
-# That is why the two oracles below are split at 9/10 rather than at 2/3:
+# That is why the two oracles below are split at 5/6 rather than at 2/3:
 # the split has to follow the OBSERVABLE (has the client been promised a
 # zstd stream yet?), because that is what decides which behaviour is
 # correct. Splitting it where the code structure suggests would have made
-# oracle 4 assert "200 was on the wire" for four allocations where it never
+# oracle 4 assert "200 was on the wire" for allocations where it never
 # is, and the oracle would have been red for a reason that is not a defect.
 #
-# The oracles aim at 1, 2, 3, 4, 5, 9 (uncommitted; every distinct site) and
-# 10, 13 (committed; the chain-link and emit sites, the only two reachable
-# after the flush). If the ordering ever changes, the counter assertions
+# The oracles aim at 1..5 (uncommitted; every distinct site) and 6 (committed
+# emit link). Incoming links are intentionally absent: the synchronously
+# drained path now walks caller-owned links and allocates no wrappers. If the
+# ordering ever changes, the counter assertions
 # still hold but an oracle could silently start testing a different site --
 # so each oracle names the site it believes it is hitting, and the mutation
 # testing recorded in the PR is what ties an oracle to its guard.
@@ -100,6 +98,11 @@ palloc_calls() {
         | sed 's/.*"palloc_calls":\([0-9]*\).*/\1/'
 }
 
+chain_links_allocated() {
+    curl -fsS --max-time 5 "http://$HOST:$PORT/__probe" \
+        | sed 's/.*"chain_links_allocated":\([0-9]*\).*/\1/'
+}
+
 # fetch: bounded GET of the compressible body. Headers to $2.hdrs, body to
 # $2, curl's own diagnostic to $2.stderr. Returns curl's exit status --
 # which matters here: the two failure classes this scenario separates are
@@ -118,11 +121,11 @@ fetch() {
 #    change fault_set_global returned NGX_DECLINED for PALLOC, so this
 #    oracle is the one that fails outright on the old module
 # 3  BEFORE anything is committed to the wire (nth=1 ctx pcalloc, 2
-#    Content-Encoding list_push, 3 cleanup_add, 4 chain link, 5 out_buf,
-#    9 emit chain link -- every distinct site on the uncommitted side): the
+#    Content-Encoding list_push, 3 cleanup_add, 4 out_buf, 5 emit chain link
+#    -- every distinct site on the uncommitted side): the
 #    request fails closed with NO response line at all
-# 4  AFTER the response is committed (nth=10 chain link, 13 emit chain
-#    link): the 200 and Content-Encoding: zstd ARE on the wire, and then the
+# 4  AFTER the response is committed (nth=6 emit chain link): the 200 and
+#    Content-Encoding: zstd ARE on the wire, and then the
 #    connection is torn down mid-body rather than completing a truncated or
 #    corrupt zstd stream. Completing the response is the defect this oracle
 #    exists to catch
@@ -140,10 +143,14 @@ WARM="$PROBER_PREFIX/warm.out"
 BASE_CALLS=0
 if fetch /body.bin "$WARM" && grep -q '^HTTP/1.1 200' "$WARM.hdrs"; then
     BASE_CALLS=$(palloc_calls)
-    if [ "${BASE_CALLS:-0}" -gt 0 ]; then
-        echo "ok 1 - warm-up served a clean 200 and made $BASE_CALLS wrapped pool allocations"
-    else
+    BASE_INPUT_LINKS=$(chain_links_allocated)
+    if [ "${BASE_CALLS:-0}" -gt 0 ] && [ "${BASE_INPUT_LINKS:-1}" -eq 0 ]; then
+        echo "ok 1 - warm-up served a clean 200, made $BASE_CALLS wrapped pool allocations, and copied zero fully-drained input links"
+    elif [ "${BASE_CALLS:-0}" -le 0 ]; then
         echo "not ok 1 - warm-up served 200 but the module reported ZERO wrapped allocations (palloc_calls=$BASE_CALLS) -- the wrappers are not on the request path, so every oracle below would assert nothing"
+        FAILED=$((FAILED + 1))
+    else
+        echo "not ok 1 - warm-up copied $BASE_INPUT_LINKS input chain links even though it drained synchronously; expected zero lazy tail copies"
         FAILED=$((FAILED + 1))
     fi
 else
@@ -177,8 +184,8 @@ disarm || true
 #
 # Every distinct site on the uncommitted side of the flush boundary: nth=1
 # ctx pcalloc and nth=2 Content-Encoding ngx_list_push (header filter),
-# nth=3 CCtx cleanup_add, nth=4 incoming-chain link, nth=5 out_buf temp
-# buffer, nth=9 emit chain link (body filter, but still before the response
+# nth=3 CCtx cleanup_add, nth=4 out_buf temp buffer, and nth=5 emit chain
+# link (body filter, but still before the response
 # flushes -- see the map above). In all of these the client has been
 # promised nothing yet, so the correct outcome is fail-closed with nothing
 # on the wire: NGX_ERROR finalizes the request and no status line is ever
@@ -194,7 +201,7 @@ disarm || true
 # anything to do with the arm.
 PRE_FAILED=0
 PRE_DETAIL=""
-for n in 1 2 3 4 5 9; do
+for n in 1 2 3 4 5; do
     OUT="$PROBER_PREFIX/precommit.$n"
     rm -f "$OUT" "$OUT.hdrs"
     armed=0
@@ -224,9 +231,8 @@ fi
 
 # --- 4: allocation failure AFTER the response is committed ----------------
 #
-# The two distinct sites reachable past the flush boundary: nth=10 an
-# incoming-chain link and nth=13 an emit chain link. By this point "200 OK"
-# and "Content-Encoding: zstd" really are on the wire, so it CANNOT be
+# The emit-link site reached past the flush boundary at nth=6. By this point
+# "200 OK" and "Content-Encoding: zstd" really are on the wire, so it CANNOT be
 # retracted
 # -- the client has been promised a zstd stream. The only correct behaviour
 # left is to abort the connection, so the client sees a truncated transfer
@@ -240,30 +246,29 @@ fi
 # regression in either one hide behind the other.
 POST_FAILED=0
 POST_DETAIL=""
-for n in 10 13; do
-    OUT="$PROBER_PREFIX/postcommit.$n"
-    rm -f "$OUT" "$OUT.hdrs"
-    armed=0
-    st=1
-    if arm "$n"; then
-        armed=1
-        fetch /body.bin "$OUT" && st=0 || st=$?
-    fi
-    calls=$(palloc_calls)
-    got200=0
-    gotce=0
-    grep -q '^HTTP/1.1 200' "$OUT.hdrs" 2>/dev/null && got200=1
-    grep -qi '^Content-Encoding: *zstd' "$OUT.hdrs" 2>/dev/null && gotce=1
-    if [ "$armed" -eq 1 ] && [ "${calls:-0}" -ge "$n" ] \
-       && [ "$got200" -eq 1 ] && [ "$gotce" -eq 1 ] && [ "$st" -ne 0 ]
-    then
-        POST_DETAIL="$POST_DETAIL nth=$n(rc=$st,calls=$calls,ok)"
-    else
-        POST_DETAIL="$POST_DETAIL nth=$n(armed=$armed,calls=$calls,200=$got200,ce=$gotce,rc=$st,BAD)"
-        POST_FAILED=1
-    fi
-    disarm || true
-done
+n=6
+OUT="$PROBER_PREFIX/postcommit.$n"
+rm -f "$OUT" "$OUT.hdrs"
+armed=0
+st=1
+if arm "$n"; then
+    armed=1
+    fetch /body.bin "$OUT" && st=0 || st=$?
+fi
+calls=$(palloc_calls)
+got200=0
+gotce=0
+grep -q '^HTTP/1.1 200' "$OUT.hdrs" 2>/dev/null && got200=1
+grep -qi '^Content-Encoding: *zstd' "$OUT.hdrs" 2>/dev/null && gotce=1
+if [ "$armed" -eq 1 ] && [ "${calls:-0}" -ge "$n" ] \
+   && [ "$got200" -eq 1 ] && [ "$gotce" -eq 1 ] && [ "$st" -ne 0 ]
+then
+    POST_DETAIL="$POST_DETAIL nth=$n(rc=$st,calls=$calls,ok)"
+else
+    POST_DETAIL="$POST_DETAIL nth=$n(armed=$armed,calls=$calls,200=$got200,ce=$gotce,rc=$st,BAD)"
+    POST_FAILED=1
+fi
+disarm || true
 if [ "$POST_FAILED" -eq 0 ]; then
     echo "ok 4 - allocation failure after the response is committed aborted the connection mid-body instead of completing a corrupt zstd stream:$POST_DETAIL"
 else

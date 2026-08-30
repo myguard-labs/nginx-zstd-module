@@ -51,7 +51,7 @@ char *ngx_http_zstd_probe_directive(ngx_conf_t *cf, ngx_command_t *cmd,
  * at each call site, not just the bodies here).
  *
  * ngx_http_zstd_probe_note_chain_link() -- called once per ngx_chain_link_t
- * allocated in the body filter's incoming-chain append loop.
+ * allocated when the body filter lazily retains an unconsumed input tail.
  *
  * ngx_http_zstd_probe_note_buf_alloc() -- called once per fresh output
  * buffer created in ngx_http_zstd_filter_get_buf() (the ctx->bufs < ...

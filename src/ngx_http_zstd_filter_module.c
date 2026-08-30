@@ -831,8 +831,10 @@ static ngx_str_t  ngx_http_zstd_default_types[] = {
 static ngx_int_t ngx_http_zstd_header_filter(ngx_http_request_t *r);
 static ngx_int_t ngx_http_zstd_body_filter(ngx_http_request_t *r,
     ngx_chain_t *in);
+static ngx_int_t ngx_http_zstd_filter_copy_input(ngx_http_request_t *r,
+    ngx_http_zstd_ctx_t *ctx, ngx_chain_t *in);
 static ngx_int_t ngx_http_zstd_filter_add_data(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx);
+    ngx_http_zstd_ctx_t *ctx, ngx_chain_t **in);
 static ngx_int_t ngx_http_zstd_filter_get_buf(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx,
     ngx_http_zstd_loc_conf_t *zlcf);
@@ -842,7 +844,7 @@ static ngx_int_t ngx_http_zstd_set_param(ngx_http_request_t *r,
 static ngx_int_t ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
 static ngx_int_t ngx_http_zstd_filter_compress(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx);
+    ngx_http_zstd_ctx_t *ctx, ngx_uint_t no_more_input);
 static ngx_int_t ngx_http_zstd_filter_init(ngx_conf_t *cf);
 static void * ngx_http_zstd_create_main_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf);
@@ -2216,11 +2218,52 @@ ngx_http_zstd_max_length_exceeded(uint64_t bytes_in, ssize_t max_length)
 }
 
 
+/*
+ * Retain only input that this body-filter invocation could not consume.
+ * Incoming chain links belong to the caller and are safe to walk only while
+ * its callback is active.  The buffers themselves have request lifetime, as
+ * with ngx_chain_add_copy(); only the link wrappers need pool-owned copies.
+ *
+ * Append through last_in because an earlier callback's retained links may
+ * still be queued under downstream backpressure.  A partial allocation
+ * failure deliberately leaves any links already copied on ctx->in: the
+ * caller routes the failure through the terminal error path, so those copies
+ * are never resumed and no caller-owned link is retained or reused.
+ */
+static ngx_int_t
+ngx_http_zstd_filter_copy_input(ngx_http_request_t *r,
+    ngx_http_zstd_ctx_t *ctx, ngx_chain_t *in)
+{
+    ngx_chain_t  *link;
+
+    while (in) {
+        link = ngx_http_zstd_alloc_chain_link(r->pool);
+        if (link == NULL) {
+            return NGX_ERROR;
+        }
+
+        link->buf = in->buf;
+        link->next = NULL;
+
+        *ctx->last_in = link;
+        ctx->last_in = &link->next;
+
+#ifdef NGX_TEST_HARNESS
+        ngx_http_zstd_probe_note_chain_link();
+#endif
+
+        in = in->next;
+    }
+
+    return NGX_OK;
+}
+
+
 static ngx_int_t
 ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
     ngx_int_t                  flush, rc;
-    ngx_chain_t               *cl, *link;
+    ngx_chain_t               *cl;
     ngx_http_zstd_ctx_t       *ctx;
     ngx_http_zstd_loc_conf_t  *zlcf;
 
@@ -2277,35 +2320,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     }
 
     if (in) {
-        /*
-         * O(1) append: allocate and link each incoming buffer one-by-one
-         * directly onto the tracked tail, advancing the tail as we go.
-         * This avoids the redundant traversal that ngx_chain_add_copy()
-         * followed by a while loop would incur: ngx_chain_add_copy() walks
-         * the destination chain to find its tail, and then a subsequent
-         * loop walks that same freshly-built chain again. Instead, we walk
-         * and build in the same pass, tracking the tail as we splice.
-         * Consumers of ctx->in (add_data) only ever advance it
-         * link-by-link from the head and never reorder it, so the tracked
-         * tail cannot go stale between calls.
-         */
-        for (cl = in; cl; cl = cl->next) {
-            link = ngx_http_zstd_alloc_chain_link(r->pool);
-            if (link == NULL) {
-                goto failed;
-            }
-
-            link->buf = cl->buf;
-            link->next = NULL;
-
-            *ctx->last_in = link;
-            ctx->last_in = &link->next;
-
-#ifdef NGX_TEST_HARNESS
-            ngx_http_zstd_probe_note_chain_link();
-#endif
-        }
-
+        /* The caller-owned chain is consumed through the local cursor below. */
         r->connection->buffered |= NGX_HTTP_GZIP_BUFFERED;
     }
 
@@ -2346,7 +2361,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
         for ( ;; ) {
 
-            rc = ngx_http_zstd_filter_add_data(r, ctx);
+            rc = ngx_http_zstd_filter_add_data(r, ctx, &in);
 
             if (rc == NGX_DECLINED) {
                 break;
@@ -2391,7 +2406,8 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
                 break;
             }
 
-            rc = ngx_http_zstd_filter_compress(r, ctx);
+            rc = ngx_http_zstd_filter_compress(r, ctx,
+                                               ctx->in == NULL && in == NULL);
 
             if (rc == NGX_ERROR) {
                 goto failed;
@@ -2405,6 +2421,12 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
 
         if (ctx->out == NULL && !flush) {
+            if (in != NULL
+                && ngx_http_zstd_filter_copy_input(r, ctx, in) != NGX_OK)
+            {
+                goto failed;
+            }
+
 #ifdef NGX_TEST_HARNESS
             ngx_http_zstd_probe_snapshot_ctx(ctx);
 #endif
@@ -2447,7 +2469,8 @@ failed:
 
 
 static ngx_int_t
-ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
+ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
+    ngx_uint_t no_more_input)
 {
     size_t            zrc, pos_in, pos_out;  /* zrc: ZSTD_compressStream2
                                               * bytes-remaining hint, not an
@@ -2471,13 +2494,13 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     /* Determine the compression directive. */
     if (ctx->action == NGX_HTTP_ZSTD_FILTER_END
-        || (ctx->last && ctx->in == NULL))
+        || (ctx->last && no_more_input))
     {
         /*
          * END wins, and it is selected as soon as this is provably the
          * final call's input rather than one iteration later.
          *
-         * `ctx->last && ctx->in == NULL` is the state machine's own
+         * `ctx->last && no_more_input` is the state machine's own
          * COMPRESS->END transition predicate (below) minus its
          * "buffer_in fully drained" clause. That clause is what forced a
          * separate ZSTD_e_continue call first: the transition could only
@@ -2493,11 +2516,12 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
          * path (ZSTD_compress2()) when the whole body and enough output
          * space are present.
          *
-         * ctx->in == NULL is load-bearing and stays: it is what proves no
-         * further chain link is queued behind this buffer. Selecting END
-         * with input still queued would close the frame early and
-         * truncate the body -- the 131072-byte truncation PR #49's
-         * transition predicate was written to prevent.
+         * no_more_input is load-bearing: it proves neither a pool-owned link
+         * retained from an earlier callback nor a caller-owned link on this
+         * callback's local cursor is queued behind this buffer. Selecting
+         * END with input still queued would close the frame early and
+         * truncate the body -- the 131072-byte truncation PR #49's transition
+         * predicate was written to prevent.
          *
          * Compressed bytes are allowed to differ from the two-call
          * sequence (a frame is a few bytes smaller when libzstd sees the
@@ -2664,7 +2688,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
          *
          * A call that ran ZSTD_e_end is already in the terminal phase even
          * when ctx->action has not caught up (the directive selection above
-         * picks END directly from `ctx->last && ctx->in == NULL`, one
+         * picks END directly from `ctx->last && no_more_input`, one
          * iteration before this machine would have transitioned). Record
          * that here rather than parking the action in FLUSH: a FLUSH action
          * with ctx->last set would still re-select END on the next
@@ -2685,7 +2709,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     } else if (ctx->last && ctx->action != NGX_HTTP_ZSTD_FILTER_END
                && directive != ZSTD_e_end
                && ctx->buffer_in.pos >= ctx->buffer_in.size
-               && ctx->in == NULL)
+               && no_more_input)
     {
         /*
          * `directive != ZSTD_e_end` is what keeps this arm meaning what
@@ -2897,9 +2921,11 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
 
 static ngx_int_t
-ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
+ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
+    ngx_chain_t **in)
 {
     ngx_chain_t  *cl;
+    ngx_uint_t    retained;
 
     if (ctx->buffer_in.pos < ctx->buffer_in.size
         || ctx->flush
@@ -2912,37 +2938,41 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "zstd in: %p", ctx->in);
 
-    if (ctx->in == NULL) {
+    if (ctx->in == NULL && *in == NULL) {
         return NGX_DECLINED;
     }
 
     /*
-     * The body filter's append loop above allocated a fresh chain link per
-     * incoming link. Once we have taken its buffer, return the consumed
-     * link to the pool's free list with ngx_free_chain(); otherwise the links
-     * accumulate in the request pool for the whole request, so a long-lived
-     * chunked/SSE response grows worker memory linearly with chunk count
-     * even though the output buffers are recycled. The buffer itself stays
-     * valid — only the link wrapper is freed.
+     * Drain links retained by an earlier callback before touching this
+     * callback's chain.  Retained wrappers are pool-owned and must go back to
+     * the pool free list; current-callback wrappers remain caller-owned and
+     * are merely advanced through the local cursor.
      */
-    cl = ctx->in;
-    ctx->in_buf = cl->buf;
-    ctx->in = cl->next;
+    retained = ctx->in != NULL;
 
-    /*
-     * This was the last retained link: ctx->last_in still points at
-     * &cl->next (the O(1)-tail optimization above tracks the tail across
-     * body-filter callbacks). ngx_free_chain() below overwrites cl->next
-     * with the pool's free-chain head, so leaving ctx->last_in aimed at it
-     * would splice the NEXT incoming chain into ngx_pool_t.chain instead of
-     * onto ctx->in -- silently dropping every subsequent body-filter
-     * callback's data. Re-point it at &ctx->in before the free.
-     */
-    if (ctx->in == NULL) {
-        ctx->last_in = &ctx->in;
+    if (retained) {
+        cl = ctx->in;
+        ctx->in = cl->next;
+
+        if (ctx->in == NULL) {
+            ctx->last_in = &ctx->in;
+        }
+
+    } else {
+        cl = *in;
+        *in = cl->next;
     }
 
-    ngx_free_chain(r->pool, cl);
+    ctx->in_buf = cl->buf;
+
+    /*
+     * ngx_free_chain() overwrites cl->next.  Never call it for the local
+     * cursor: that would mutate a caller-owned chain while its callback is
+     * active and could corrupt the upstream filter's bookkeeping.
+     */
+    if (retained) {
+        ngx_free_chain(r->pool, cl);
+    }
 
     /*
      * Test last_buf FIRST, then flush — matching the order used by the
