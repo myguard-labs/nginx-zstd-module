@@ -62,39 +62,69 @@ typedef struct {
 
 /*
  * ngx_table_elt_t, reduced to the two fields the chained-Accept-Encoding
- * walker touches: the field value and the ->next link nginx >= 1.23.0
- * uses to chain duplicate occurrences of the same header. `hash`/`key`
- * are omitted deliberately -- the walker never reads them, and a field
- * this layer does not need is a field that can drift.
+ * walker and legacy request path touch.  The legacy shape deliberately has
+ * no ->next member, matching nginx 1.22.x.
  */
 typedef struct ngx_table_elt_s  ngx_table_elt_t;
 
 struct ngx_table_elt_s {
+    ngx_str_t         key;
     ngx_str_t         value;
+#if !defined(NGX_ZSTD_LEGACY_SHIM)
     ngx_table_elt_t  *next;
+#endif
+};
+
+typedef struct ngx_list_part_s  ngx_list_part_t;
+struct ngx_list_part_s {
+    void             *elts;
+    ngx_uint_t        nelts;
+    ngx_list_part_t  *next;
+};
+
+typedef struct {
+    ngx_list_part_t  part;
+} ngx_list_t;
+
+typedef struct {
+    ngx_table_elt_t  *accept_encoding;
+    ngx_list_t        headers;
+} ngx_http_headers_in_t;
+
+typedef struct ngx_http_request_s  ngx_http_request_t;
+struct ngx_http_request_s {
+    ngx_http_request_t   *main;
+    ngx_http_headers_in_t headers_in;
 };
 
 /*
  * The production header selects between (ae)->next and a NULL stub on
  * `nginx_version >= 1023000`, because ngx_table_elt_t.next does not
  * exist before 1.23.0. This layer has no nginx tree and no
- * nginx_version, so it pins the modern shape -- which is the one the
- * chained-header behaviour exists for, and therefore the one worth
- * testing. The pre-1.23 arm degrades to "no next line", i.e. the
- * single-value behaviour these tests already cover through
- * ngx_http_zstd_accept_encoding().
+ * nginx_version, so the default shim pins the modern chained shape. The
+ * NGX_ZSTD_LEGACY_SHIM variant instead pins nginx 1.22.1: it removes ->next
+ * and lets the request-field helper walk headers_in.headers. The dedicated
+ * legacy unit test populates that list with repeated Accept-Encoding fields.
  */
+#if defined(NGX_ZSTD_LEGACY_SHIM)
+#define nginx_version  1022001
+#else
 #define nginx_version  1023000
+#endif
 
 /*
  * The chain step, mirrored from src/ngx_http_zstd_common.h. The macro is
  * defined OUTSIDE any function body there, so extract_parser.sh -- which
  * slices function bodies -- does not carry it into the .inc and this
  * layer has to supply it. Kept byte-identical to the production
- * nginx_version >= 1023000 arm; the pre-1.23 arm is the NULL stub, whose
- * behaviour is the single-value path these tests already cover.
+ * nginx_version >= 1023000 arm; the pre-1.23 arm is the NULL stub because
+ * ngx_http_zstd_request_coding_weight() walks headers_in.headers instead.
  */
+#if (nginx_version >= 1023000)
 #define NGX_HTTP_ZSTD_AE_NEXT(ae)  ((const ngx_table_elt_t *) (ae)->next)
+#else
+#define NGX_HTTP_ZSTD_AE_NEXT(ae)  ((const ngx_table_elt_t *) NULL)
+#endif
 
 /*
  * src/core/ngx_string.c: ngx_strncasecmp() — faithful upstream copy.

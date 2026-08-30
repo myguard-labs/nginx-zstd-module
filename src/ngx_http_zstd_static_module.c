@@ -875,8 +875,7 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
                                (u_char *) "Available-Dictionary",
                                sizeof("Available-Dictionary") - 1) == 0)
         {
-            return ngx_http_zstd_chain_coding_weight(
-                       r->headers_in.accept_encoding, "dcz",
+            return ngx_http_zstd_request_coding_weight(r, "dcz",
                        sizeof("dcz") - 1, 0) > 0;
         }
     }

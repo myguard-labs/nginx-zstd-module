@@ -2018,7 +2018,7 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     ngx_int_t                  rc;
     ngx_uint_t                 secure;
     ngx_uint_t                 i, avail_dict_count, sec_fetch_site_count;
-    ngx_table_elt_t           *avail_dict_h, *sec_fetch_site_h, *ae;
+    ngx_table_elt_t           *avail_dict_h, *sec_fetch_site_h;
     ngx_http_zstd_dcz_dict_t  *dicts;
 
     if (zlcf->dcz_dicts == NULL || zlcf->dcz_dicts->nelts == 0) {
@@ -2068,14 +2068,15 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     }
 
     /*
-     * Accept-Encoding is in nginx's headers_in table, so duplicate lines
-     * are chained on ae->next rather than rejected. EVERY line is
+     * Accept-Encoding is in nginx's headers_in table. nginx >= 1.23 chains
+     * duplicate lines while older supported nginx leaves them in the list;
+     * EVERY line is
      * evaluated, not just the first: RFC 9110 section 5.3 makes a
      * repeated list-valued field identical to the single comma-joined
      * field, so a client that split "zstd, dcz" across two lines
      * advertises dcz exactly as much as one that sent it on one.
      *
-     * This deliberately shares ngx_http_zstd_chain_coding_weight() with
+     * This deliberately shares ngx_http_zstd_request_coding_weight() with
      * the plain-zstd path in ngx_http_zstd_accepts(). The two used to
      * carry independent copies of the first-line-only assumption, which
      * is how one negotiation contract turned into two -- the shared
@@ -2085,11 +2086,6 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
      * it on. The duplicate-coding rule (an explicit q=0 anywhere is
      * final) is documented on the helper.
      */
-    ae = r->headers_in.accept_encoding;
-    if (ae == NULL) {
-        return NULL;
-    }
-
     /*
      * Cheapest gate first: reject before paying for the header-list walk
      * or the base64 decode below. No client sends "dcz" in Accept-Encoding
@@ -2104,7 +2100,7 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
      * message is emitted instead of theirs. See t/03-dcz.t for a test
      * pinning that order.
      */
-    if (ngx_http_zstd_chain_coding_weight(ae, "dcz",
+    if (ngx_http_zstd_request_coding_weight(r, "dcz",
                                           sizeof("dcz") - 1, 0) <= 0)
     {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,

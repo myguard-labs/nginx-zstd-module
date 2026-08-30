@@ -136,6 +136,52 @@ Content-Length: 59738
 --- no_error_log
 [error]
 
+
+=== TEST 5a: repeated Accept-Encoding accepts zstd on a later field line
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: gzip
+Accept-Encoding: zstd
+--- response_headers
+!Content-Length
+Transfer-Encoding: chunked
+Content-Encoding: zstd
+Content-type: text/plain
+--- no_error_log
+[error]
+
+
+=== TEST 5b: repeated Accept-Encoding keeps explicit zstd;q=0 over wildcard
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: *
+Accept-Encoding: zstd;q=0
+--- response_headers
+Content-Length: 59738
+!Content-Encoding
+--- no_error_log
+[error]
+
 === TEST 6: zstd zstd_min_length (greater than min_length)
 --- config
     location /filter {

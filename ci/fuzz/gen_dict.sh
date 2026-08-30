@@ -41,52 +41,54 @@ END_MARK="# END generated coding tokens"
 # *coding`, no string literal) never match this pattern, so there is
 # nothing to exclude.
 #
-# BOTH entry points are matched: ngx_http_zstd_coding_weight() (one field
-# value) and ngx_http_zstd_chain_coding_weight() (the whole chained
-# header). The optional `chain_` is load-bearing, not defensive tidiness --
-# when the dcz call site moved to the chained walker, a pattern anchored on
+# Every entry point is matched: ngx_http_zstd_coding_weight() (one field
+# value), ngx_http_zstd_chain_coding_weight() (the linked field chain), and
+# ngx_http_zstd_request_coding_weight() (the complete request field).
+# Matching the `chain_` and `request_` forms is load-bearing, not defensive
+# tidiness: when the dcz call site moved to the request-field walker, a pattern
+# anchored on
 # the bare name stopped matching it and silently dropped "dcz" from the
 # dictionary, which is a fuzz-coverage loss that no test would have failed
-# on. Matching both keeps a call site's token in the dictionary wherever
+# on. Matching every form keeps a call site's token in the dictionary wherever
 # the negotiation is evaluated from.
 produce_tokens() {
-    grep -hoE 'ngx_http_zstd_(chain_)?coding_weight\([^,]+,[[:space:]]*"[A-Za-z0-9_-]+"' \
-        "$ROOT"/src/*.c "$ROOT"/src/*.h \
-    | grep -oE '"[A-Za-z0-9_-]+"$' \
-    | sort -u
+	grep -hoE 'ngx_http_zstd_((chain|request)_)?coding_weight\([^,]+,[[:space:]]*"[A-Za-z0-9_-]+"' \
+		"$ROOT"/src/*.c "$ROOT"/src/*.h |
+		grep -oE '"[A-Za-z0-9_-]+"$' |
+		sort -u
 }
 mapfile_checked TOKENS produce_tokens
 
 if [ "${#TOKENS[@]}" -eq 0 ]; then
-    echo "✗ gen_dict: no ngx_http_zstd_coding_weight(...) call sites found" \
-        "in src/*.c or src/*.h -- parser call convention changed? update gen_dict.sh" >&2
-    exit 1
+	echo "✗ gen_dict: no ngx_http_zstd_coding_weight(...) call sites found" \
+		"in src/*.c or src/*.h -- parser call convention changed? update gen_dict.sh" >&2
+	exit 1
 fi
 
 GENERATED="$START_MARK"$'\n'
 for t in "${TOKENS[@]}"; do
-    GENERATED+="$t"$'\n'
+	GENERATED+="$t"$'\n'
 done
 GENERATED+="$END_MARK"
 
 if [ "${1:-}" = "--check" ]; then
-    if [ ! -f "$DICT" ]; then
-        echo "✗ gen_dict --check: $DICT does not exist" >&2
-        exit 1
-    fi
-    CURRENT="$(awk -v start="$START_MARK" -v end="$END_MARK" '
+	if [ ! -f "$DICT" ]; then
+		echo "✗ gen_dict --check: $DICT does not exist" >&2
+		exit 1
+	fi
+	CURRENT="$(awk -v start="$START_MARK" -v end="$END_MARK" '
         $0 == start { f=1 }
         f { print }
         $0 == end { if (f) exit }
     ' "$DICT")"
-    if [ "$CURRENT" != "$GENERATED" ]; then
-        echo "✗ fuzz.dict's generated coding-token block is stale." >&2
-        echo "  Source call sites: ${TOKENS[*]}" >&2
-        echo "  Run: ci/fuzz/gen_dict.sh" >&2
-        exit 1
-    fi
-    echo "✓ fuzz.dict coding tokens match src/*.c + src/*.h call sites: ${TOKENS[*]}"
-    exit 0
+	if [ "$CURRENT" != "$GENERATED" ]; then
+		echo "✗ fuzz.dict's generated coding-token block is stale." >&2
+		echo "  Source call sites: ${TOKENS[*]}" >&2
+		echo "  Run: ci/fuzz/gen_dict.sh" >&2
+		exit 1
+	fi
+	echo "✓ fuzz.dict coding tokens match src/*.c + src/*.h call sites: ${TOKENS[*]}"
+	exit 0
 fi
 
 # BOTH markers, in order. Checking only START is not enough: awk below sets
@@ -94,21 +96,21 @@ fi
 # has every line after START swallowed and the mv writes the truncation back.
 # A later --check can still pass, because the generated block itself matches.
 if [ ! -f "$DICT" ]; then
-    echo "✗ $DICT does not exist" >&2
-    exit 1
+	echo "✗ $DICT does not exist" >&2
+	exit 1
 fi
 start_n="$(grep -cFx "$START_MARK" "$DICT" || true)"
 end_n="$(grep -cFx "$END_MARK" "$DICT" || true)"
 if [ "$start_n" -ne 1 ] || [ "$end_n" -ne 1 ]; then
-    echo "✗ $DICT needs exactly one '$START_MARK' and one '$END_MARK' line" \
-        "(found $start_n and $end_n) -- add the marker block once by hand," \
-        "see the file header" >&2
-    exit 1
+	echo "✗ $DICT needs exactly one '$START_MARK' and one '$END_MARK' line" \
+		"(found $start_n and $end_n) -- add the marker block once by hand," \
+		"see the file header" >&2
+	exit 1
 fi
 if [ "$(grep -nFx "$START_MARK" "$DICT" | cut -d: -f1)" -ge \
-     "$(grep -nFx "$END_MARK" "$DICT" | cut -d: -f1)" ]; then
-    echo "✗ $DICT has '$END_MARK' before '$START_MARK'" >&2
-    exit 1
+	"$(grep -nFx "$END_MARK" "$DICT" | cut -d: -f1)" ]; then
+	echo "✗ $DICT has '$END_MARK' before '$START_MARK'" >&2
+	exit 1
 fi
 
 TMP="$(mktemp)"

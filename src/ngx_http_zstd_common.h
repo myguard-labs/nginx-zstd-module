@@ -457,13 +457,9 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
  * module guards on -- see the `#if (nginx_version >= 1023000)` sites in
  * the filter and in ngx_http_zstd_push_header() below.
  *
- * On an older nginx the field does not exist and duplicate Accept-Encoding
- * lines are not chained at all: r->headers_in.accept_encoding points at
- * the first occurrence and the rest are reachable only by walking
- * r->headers_in.headers. Rather than fork the walker, the macro degrades
- * to "there is no next line", which is exactly the pre-1.23 behaviour this
- * module has always had there -- the fix lands on every nginx that can
- * express the chain, and nothing regresses on the ones that cannot.
+ * On an older nginx the field does not exist. The request-level helper below
+ * walks r->headers_in.headers there; this macro remains a single-field step
+ * so the common chain walker is safe for callers with one field.
  */
 #if (nginx_version >= 1023000)
 #define NGX_HTTP_ZSTD_AE_NEXT(ae)  ((const ngx_table_elt_t *) (ae)->next)
@@ -536,7 +532,7 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
  * fuzzer is entitled to fail on. This function composes those per-line
  * answers; it never reaches inside one.
  */
-static ngx_int_t
+static ngx_inline ngx_int_t
 ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
     const char *coding, size_t coding_len, ngx_uint_t allow_wildcard)
 {
@@ -602,6 +598,82 @@ ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
 
 
 /*
+ * Effective weight across the request's complete Accept-Encoding field.
+ * nginx before 1.23.0 does not link duplicate table elements through ->next:
+ * accept_encoding names the first one and every later occurrence remains in
+ * headers_in.headers. RFC 9110 section 5.3 still requires all occurrences to
+ * be treated as one comma-joined field.
+ */
+static ngx_inline ngx_int_t
+ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
+    size_t coding_len, ngx_uint_t allow_wildcard)
+{
+#if (nginx_version >= 1023000)
+    return ngx_http_zstd_chain_coding_weight(r->headers_in.accept_encoding,
+                                              coding, coding_len,
+                                              allow_wildcard);
+#else
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *headers;
+    ngx_int_t         q, coding_q, star_q;
+
+    coding_q = -1;
+    star_q = -1;
+    part = &r->headers_in.headers.part;
+    headers = part->elts;
+
+    for (i = 0; /* void */; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            headers = part->elts;
+            i = 0;
+        }
+
+        if (headers[i].key.len != sizeof("Accept-Encoding") - 1
+            || ngx_strncasecmp(headers[i].key.data,
+                                (u_char *) "Accept-Encoding",
+                                sizeof("Accept-Encoding") - 1) != 0)
+        {
+            continue;
+        }
+
+        q = ngx_http_zstd_coding_weight(&headers[i].value, coding,
+                                         coding_len, 0);
+        if (q >= 0) {
+            if (coding_q < 0 || q < coding_q) {
+                coding_q = q;
+            }
+            continue;
+        }
+
+        if (!allow_wildcard) {
+            continue;
+        }
+
+        q = ngx_http_zstd_coding_weight(&headers[i].value, coding,
+                                         coding_len, 1);
+        if (q >= 0 && (star_q < 0 || q < star_q)) {
+            star_q = q;
+        }
+    }
+
+    if (coding_q >= 0) {
+        return coding_q;
+    }
+    if (allow_wildcard && star_q >= 0) {
+        return star_q;
+    }
+    return -1;
+#endif
+}
+
+
+/*
  * zstd acceptance predicate over one Accept-Encoding value — the
  * original entry point, now a thin wrapper. Semantics are unchanged:
  * NGX_OK iff the effective weight for "zstd" (explicit token, else "*"
@@ -610,9 +682,9 @@ ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
  * fuzz failure, not just a review nit.
  *
  * SINGLE VALUE ONLY. This evaluates one Accept-Encoding field line. The
- * request path does NOT call it -- ngx_http_zstd_accepts() walks the whole
- * chained field via ngx_http_zstd_chain_coding_weight() -- but the fuzz
- * target (ci/fuzz/fuzz_accept_encoding.c) and the unit suite
+ * request path does NOT call it -- ngx_http_zstd_accepts() evaluates the
+ * complete request field via ngx_http_zstd_request_coding_weight() -- but
+ * the fuzz target (ci/fuzz/fuzz_accept_encoding.c) and the unit suite
  * (ci/tests/unit/test_accept_encoding.c) both link this exact body as the
  * single-value entry point, and its differential oracle is written against
  * it. ngx_inline because no module TU references it any more and a plain
@@ -640,17 +712,10 @@ ngx_http_zstd_accept_encoding(const ngx_str_t *ae)
  * (e.g. the static module, which must not suppress a gzip_static fallback
  * before it even knows whether a .zst file exists) use this.
  */
-static ngx_int_t
+static ngx_inline ngx_int_t
 ngx_http_zstd_accepts(ngx_http_request_t *r)
 {
-    ngx_table_elt_t  *ae;
-
     if (r != r->main) {
-        return NGX_DECLINED;
-    }
-
-    ae = r->headers_in.accept_encoding;
-    if (ae == NULL) {
         return NGX_DECLINED;
     }
 
@@ -659,12 +724,11 @@ ngx_http_zstd_accepts(ngx_http_request_t *r)
      * "shorter than 'zstd'" fast-reject is no longer valid; an empty value
      * is still a decline (the walk below returns -1).
      *
-     * The whole chained field is evaluated, not just ae->value: duplicate
-     * Accept-Encoding lines are one comma-joined list (RFC 9110 section
-     * 5.3). See ngx_http_zstd_chain_coding_weight() for that and for the
-     * duplicate-coding rule it applies.
+     * The whole field is evaluated: linked duplicate lines on nginx >= 1.23,
+     * and the complete headers list on older supported nginx. RFC 9110
+     * section 5.3 makes them one comma-joined list.
      */
-    return ngx_http_zstd_chain_coding_weight(ae, "zstd", sizeof("zstd") - 1, 1)
+    return ngx_http_zstd_request_coding_weight(r, "zstd", sizeof("zstd") - 1, 1)
                > 0
                ? NGX_OK : NGX_DECLINED;
 }

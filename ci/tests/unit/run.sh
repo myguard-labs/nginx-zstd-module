@@ -46,12 +46,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../../.." && pwd)"
 FUZZ_DIR="$ROOT/ci/fuzz"
 BIN="$DIR/test_accept_encoding"
+LEGACY_BIN="$DIR/test_accept_encoding_legacy"
 PROBE_BIN="$DIR/test_static_probe"
 
 if [ "${1:-}" = "clean" ]; then
-    rm -f "$BIN" "$PROBE_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
-    echo "unit test binary removed"
-    exit 0
+	rm -f "$BIN" "$LEGACY_BIN" "$PROBE_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
+	echo "unit test binary removed"
+	exit 0
 fi
 
 # Regenerate the extracted parser slice so this binary always links the
@@ -67,16 +68,16 @@ CC="${CC:-cc}"
 OWN_CFLAGS=(-g -O1 -Wall -Wextra -Wshadow -Werror)
 
 if [ "${COVERAGE:-0}" = 1 ]; then
-    OWN_CFLAGS+=(--coverage)
-    LINK_EXTRA=(--coverage)
+	OWN_CFLAGS+=(--coverage)
+	LINK_EXTRA=(--coverage)
 else
-    LINK_EXTRA=()
+	LINK_EXTRA=()
 fi
 
 echo "==> Building $BIN with ${CC}"
 # shellcheck disable=SC2086  # $CC may legitimately carry flags (e.g. "gcc -m32")
 $CC "${OWN_CFLAGS[@]}" -I"$FUZZ_DIR" -c "$DIR/test_accept_encoding.c" \
-    -o "$DIR/test_accept_encoding.o"
+	-o "$DIR/test_accept_encoding.o"
 # shellcheck disable=SC2086
 $CC "${LINK_EXTRA[@]}" -o "$BIN" "$DIR/test_accept_encoding.o"
 
@@ -86,6 +87,18 @@ echo "==> Running"
 # the job burns its whole 15-minute budget and the log never says which layer
 # failed.
 timeout 60s "$BIN"
+
+echo "==> Building $LEGACY_BIN with ${CC} (nginx 1.22.1 header shape)"
+# The shim omits ngx_table_elt_t.next under this define, so this compilation
+# catches an accidental legacy ->next access as well as exercising the list walk.
+# shellcheck disable=SC2086
+$CC "${OWN_CFLAGS[@]}" -DNGX_ZSTD_LEGACY_SHIM -I"$FUZZ_DIR" \
+	-c "$DIR/test_accept_encoding_legacy.c" -o "$DIR/test_accept_encoding_legacy.o"
+# shellcheck disable=SC2086
+$CC "${LINK_EXTRA[@]}" -o "$LEGACY_BIN" "$DIR/test_accept_encoding_legacy.o"
+
+echo "==> Running nginx 1.22.1-shaped Accept-Encoding checks"
+timeout 60s "$LEGACY_BIN"
 
 # ---------------------------------------------------------------------------
 # The .zst frame-header probe (src/ngx_http_zstd_static_module.c:
@@ -100,7 +113,7 @@ bash "$FUZZ_DIR/extract_static_probe.sh"
 echo "==> Building $PROBE_BIN with ${CC}"
 # shellcheck disable=SC2086
 $CC "${OWN_CFLAGS[@]}" -I"$FUZZ_DIR" -c "$DIR/test_static_probe.c" \
-    -o "$DIR/test_static_probe.o"
+	-o "$DIR/test_static_probe.o"
 # shellcheck disable=SC2086
 $CC "${LINK_EXTRA[@]}" -o "$PROBE_BIN" "$DIR/test_static_probe.o"
 
