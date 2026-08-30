@@ -1,60 +1,25 @@
 ---
 name: Harness Fault Arms
 
-# Runs the TEST_HARNESS-only harness scenarios against a purpose-built
-# harness nginx tree -- BOTH of them, sharing the one build:
+# Fast nginx-module-testkit consumer gate. One harness-enabled nginx build runs
+# all six module-specific scenarios through ci/tools/run-testkit-scenarios.sh:
+# codec and pool-allocation faults, allocation neutrality, codec call counts,
+# and dictionary/no-dictionary setParameter call counts. The shared runner owns
+# expected-log allowances and non-vacuity/property witnesses, so PR, coverage,
+# and deep Memcheck surfaces cannot silently select different scenario sets.
 #
-#   ci/t/harness-scenarios/fault-arms      libzstd failure arms (CODEC,
-#                                          CODEC_END, dcz refPrefix), injected
-#                                          via the probe
-#   ci/t/harness-scenarios/alloc-neutral   per-request allocation neutrality
-#                                          (cycle-pool + fd deltas)
-#   ci/t/harness-scenarios/fault-palloc    pool-allocation failure handling
-#                                          (PALLOC fault site, issues.md m8)
-#   ci/t/harness-scenarios/codec-call-count
-#                                          per-response ZSTD_compressStream2
-#                                          call count, plain/tiny/empty/dcz/
-#                                          flush-last
-#   ci/t/harness-scenarios/setparam-call-count,
-#   ci/t/harness-scenarios/setparam-call-count-nodict
-#                                          per-mode ZSTD_CCtx_setParameter
-#                                          call count -- pins that a CDict
-#                                          compression skips the parameters
-#                                          refCDict supersedes (level,
-#                                          windowLog) while a dcz-negotiated
-#                                          one, which uses refPrefix instead,
-#                                          still sets them (TODO-archive.md
-#                                          2026-08 "skip superseded libzstd
-#                                          parameters per dictionary mode")
+# The upstream testkit's generic consumer-zstd fixture cannot replace these:
+# its consumers/ tree is gitignored, so it SKIPs against this module in testkit
+# CI. This repository builds the real module with TEST_HARNESS=1 plus
+# -DNGX_TEST_HARNESS and rejects a probe-free binary before running anything.
 #
-# See plan-testkit-integration.md Phase 4: this is the "real" gate for the
-# codec fault-injection surface Phase 3 wired up -- the testkit-side
-# consumer-zstd scenario that exercises the SAME .so permanently SKIPs on
-# every CI leg (consumers/ is gitignored there), so this repo's own tree
-# is where these arms actually get exercised. alloc-neutral is re-homed from
-# that same skipping upstream scenario for exactly the same reason: upstream
-# its own requires-gate says "a SKIP reads as a pass", and here the .so is
-# our own build product, so the oracle actually runs.
-#
-# The job NAME stays "Harness Fault Arms" even though it now runs three
-# scenarios: it is a check-name contract (ruleset 16557047 tracking, and the
-# Phase 5 promotion still to come), and renaming a check silently drops
-# whatever was tracking the old name.
-#
-# DELIBERATELY NOT A REQUIRED CHECK. master carries 13 required checks
-# already (ruleset 16557047); a brand-new required check that never reports
-# on an existing PR blocks it forever. This job is called from ci.yml (so
-# it runs on every PR) but is not in that ruleset -- promoting it to
-# required is a separate, later, explicitly reviewed step (plan Phase 5),
-# not something this file does on its own.
-#
-# Job title is fixed (no matrix/version interpolation) so it stays a stable
-# check name across nginx releases, same convention as every other job in
-# this suite -- see build-test.yml's "build" job comment for why a version
-# in the name breaks required-check tracking.
+# The fixed job name is a check-name contract. It remains visible on every PR
+# but is deliberately not required until the separately documented green-week
+# promotion criterion is met.
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HARNESS_NGINX_VERSION: "1.31.4"
 
 on:
   workflow_call: {}
@@ -83,24 +48,12 @@ jobs:
       - name: Cache apt packages
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
-          # User-owned dir, not the system /var/cache/apt/archives: apt runs
-          # under sudo, so the post-step tar (unprivileged runner user) cannot
-          # read the root-owned archives/lock or archives/partial (c2).
-          #
-          # Glob the .deb files rather than the directory: apt recreates
-          # `partial/` (0700 _apt:root) and `lock` (root:root) INSIDE whatever
-          # Dir::Cache::archives points at, so caching the dir itself still
-          # gives tar two unreadable entries and it exits 2 -> "Failed to
-          # save" (a warning, so CI stays green while nothing is ever cached).
-          # Only the .deb files are worth caching anyway.
           path: ${{ runner.temp }}/apt-archives/*.deb
-          key: apt-harness-${{ runner.os }}-build-essential-libzstd-libpcre2-zlib-openssl
+          key: apt-harness-${{ runner.os }}-build-essential-libzstd-libpcre2-zlib-openssl-nghttp2
           restore-keys: apt-harness-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
-          # builder02 apt profile: loose timeouts -- the box runs jobs
-          # concurrently and never talks to the Azure mirror (PR #121)
           mkdir -p "$RUNNER_TEMP/apt-archives"
           printf '%s\n' \
             'DPkg::Lock::Timeout "120";' \
@@ -111,41 +64,16 @@ jobs:
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            libzstd-dev \
-            libpcre2-dev \
-            zlib1g-dev \
-            libssl-dev \
-            curl \
-            wget
+            build-essential curl libnghttp2-dev libpcre2-dev libssl-dev \
+            libzstd-dev pkg-config wget zlib1g-dev
 
-      # Pin matches the mainline this module's other jobs build against
-      # today (see build-test.yml's resolve job for the general case). The
-      # harness scenario does not need to track the newest mainline the way
-      # the functional-test matrix does -- it only needs A build with the
-      # probe compiled in -- so a fixed known-good version keeps this job's
-      # cache stable and avoids coupling it to nginx.org's release cadence.
       - name: Fetch verified nginx source
         run: |
           set -euo pipefail
-          bash ci/tools/fetch-verified-nginx.sh 1.31.4
-          echo "NGINX_SRC_DIR=$GITHUB_WORKSPACE/nginx-1.31.4" >> "$GITHUB_ENV"
+          bash ci/tools/fetch-verified-nginx.sh "$HARNESS_NGINX_VERSION"
+          echo "NGINX_SRC_DIR=$GITHUB_WORKSPACE/nginx-$HARNESS_NGINX_VERSION" >> "$GITHUB_ENV"
 
-      # Both switches are mandatory (see plan-testkit-integration.md Ground
-      # truth): TEST_HARNESS=1 pulls the harness sources into the build,
-      # -DNGX_TEST_HARNESS gates the probe/fault code inside the module's
-      # own sources. ngx_module_cflags has no cflags hook, so the define
-      # MUST ride on CFLAGS, not a configure --with-cc-opt alone.
-      #
-      # Real nginx warning flags, explicit: the harness build's own CFLAGS
-      # from `./configure` alone is bare (no -Wextra -Werror) -- see the
-      # Phase 4 carried-forward finding. Passing them here means a genuine
-      # -Wextra/-Werror regression in this module's harness-only code
-      # (probe hooks, fault-injection block) is caught by THIS job, not
-      # silently skipped the way the harness's own default configure line
-      # would skip it.
-      - name: Configure + build harness nginx
+      - name: Configure and build harness nginx
         run: |
           set -euo pipefail
           cd "$NGINX_SRC_DIR"
@@ -157,328 +85,33 @@ jobs:
             --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY" \
             --add-dynamic-module="$GITHUB_WORKSPACE"
           make -j"$(nproc)"
-          echo "✓ harness nginx built"
 
-      - name: Prove this is a harness build, not a packaged one
+      - name: Prove the module carries testkit probes
         run: |
           set -euo pipefail
           SO="$NGINX_SRC_DIR/objs/ngx_http_zstd_filter_module.so"
           COUNT=$(nm "$SO" | grep -c ' ngx_test_probe_' || true)
           echo "ngx_test_probe_* symbols: $COUNT"
           if [ "$COUNT" -eq 0 ]; then
-            echo "::error::built .so carries zero ngx_test_probe_* symbols" \
-              "-- the harness switches did not take effect, every" \
-              "fault-injection oracle below would pass by testing nothing" \
-              "(see plan-testkit-integration.md Ground truth)"
+            echo "::error::harness module carries zero ngx_test_probe_* symbols"
             exit 1
           fi
 
-      - name: Build harness C tools (prober, fakesrv, etc.)
-        run: |
-          set -euo pipefail
-          bash ci/t/harness/ci/prober/build.sh
+      - name: Build nginx-module-testkit tools
+        run: bash ci/t/harness/ci/prober/build.sh
 
-      - name: Run fault-arms scenario
-        env:
-          PROBER_ROOT: ${{ github.workspace }}
-          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
-          PROBER_MODULE: ngx_http_zstd_filter_module.so
-          PROBER_DIRECTIVE: zstd_probe
-          PROBER_PROBE: "zstd_probe;"
-          # Fault paths log at [crit]/[alert]; without this the prober's log
-          # scrape treats every deliberately-injected failure as a red,
-          # for the wrong reason (Phase 4 carried-forward finding).
-          PROBER_ALLOW_LOG: 'zstd: ZSTD_(compressStream2|CCtx_refPrefix)\(\) failed'
-        run: |
-          set -euo pipefail
-          cd ci/t/harness/ci/prober
-          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/fault-arms" nginx 1.31.4 \
-            | tee "$GITHUB_WORKSPACE/fault-arms-tap.log"
+      - name: Run all module testkit scenarios
+        run: >-
+          ci/tools/run-testkit-scenarios.sh
+          --build "$NGINX_SRC_DIR"
+          --version "$HARNESS_NGINX_VERSION"
+          --log-dir "$GITHUB_WORKSPACE"
 
-          # TAP's own "not ok" lines ARE the verdict; run-scenario.sh's exit
-          # status already reflects them (see its own combine-with-log-scrape
-          # step), but re-derive from the log too as a second, independent
-          # check -- a runner that captured a false 0 despite a "not ok" line
-          # would otherwise report green. Belt and braces for a check this
-          # module has never gated on before.
-          if grep -q '^not ok' "$GITHUB_WORKSPACE/fault-arms-tap.log"; then
-            echo "::error::fault-arms scenario reported at least one 'not ok' line"
-            exit 1
-          fi
-
-          # Non-vacuity, mirrored from consumer-zstd/driver.sh: if every
-          # oracle SKIPped, the run banks a green having asserted nothing
-          # about the fault-injection surface, which is exactly the false
-          # green this whole job exists to prevent (Phase 4 task list).
-          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/fault-arms-tap.log" || true)
-          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/fault-arms-tap.log" || true)
-          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
-            echo "::error::every oracle in fault-arms SKIPped -- the" \
-              "scenario asserted nothing about the fault-injection" \
-              "surface; failing rather than banking a vacuous green"
-            exit 1
-          fi
-
-      - name: Run alloc-neutral scenario
-        env:
-          PROBER_ROOT: ${{ github.workspace }}
-          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
-          PROBER_MODULE: ngx_http_zstd_filter_module.so
-          PROBER_DIRECTIVE: zstd_probe
-          PROBER_PROBE: "zstd_probe;"
-          # No PROBER_ALLOW_LOG here, deliberately: this scenario injects no
-          # faults, so a [crit]/[alert] line during it is a real defect and
-          # must red the job. Exempting one would blind the run for the sake
-          # of symmetry with the step above.
-        run: |
-          set -euo pipefail
-          cd ci/t/harness/ci/prober
-          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/alloc-neutral" nginx 1.31.4 \
-            | tee "$GITHUB_WORKSPACE/alloc-neutral-tap.log"
-
-          # Same belt-and-braces verdict re-derivation as the fault-arms step:
-          # TAP's "not ok" lines are the verdict, independent of exit status.
-          if grep -q '^not ok' "$GITHUB_WORKSPACE/alloc-neutral-tap.log"; then
-            echo "::error::alloc-neutral scenario reported at least one 'not ok' line"
-            exit 1
-          fi
-
-          # Non-vacuity: oracles 3-6 are the only ones measuring allocation
-          # neutrality. If every oracle SKIPped, the run banks a green having
-          # asserted nothing about the property in the scenario's own title.
-          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/alloc-neutral-tap.log" || true)
-          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/alloc-neutral-tap.log" || true)
-          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
-            echo "::error::every oracle in alloc-neutral SKIPped -- the" \
-              "scenario asserted nothing about per-request allocation" \
-              "neutrality; failing rather than banking a vacuous green"
-            exit 1
-          fi
-
-          # The allocation oracles specifically. Oracle 6 has a LEGITIMATE
-          # environmental skip (/proc/<master>/fd unreadable), but 3, 4 and 5
-          # do not -- they read the probe document, which this tree is gated
-          # to carry. If all three skipped, the delta surface went unmeasured
-          # while oracles 1, 2 and 7 (readiness, signature, health) still
-          # printed ok, which reads as a pass for a property nothing checked.
-          ALLOC_SKIPS=$(grep -cE '^ok [345] .*# SKIP' "$GITHUB_WORKSPACE/alloc-neutral-tap.log" || true)
-          if [ "$ALLOC_SKIPS" -eq 3 ]; then
-            echo "::error::oracles 3-5 (cycle_used, cycle_blocks/large," \
-              "worker fds) all SKIPped -- no allocation delta was measured"
-            exit 1
-          fi
-
-      - name: Run fault-palloc scenario
-        env:
-          PROBER_ROOT: ${{ github.workspace }}
-          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
-          PROBER_MODULE: ngx_http_zstd_filter_module.so
-          PROBER_DIRECTIVE: zstd_probe
-          PROBER_PROBE: "zstd_probe;"
-          # Every oracle in this scenario deliberately fails a pool
-          # allocation, and the module logs those at [crit]/[alert] on its
-          # way to failing the request closed. Without the exemption the
-          # prober's log scrape reds the job for the faults it was asked to
-          # inject -- same reasoning as the fault-arms step above. The
-          # pattern stays narrow: only this module's own allocation
-          # diagnostics, so an unrelated alert still reds the run.
-          PROBER_ALLOW_LOG: 'zstd: |ngx_(palloc|pcalloc|pnalloc)'
-        run: |
-          set -euo pipefail
-          cd ci/t/harness/ci/prober
-          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/fault-palloc" nginx 1.31.4 \
-            | tee "$GITHUB_WORKSPACE/fault-palloc-tap.log"
-
-          # Same belt-and-braces verdict re-derivation as the steps above.
-          if grep -q '^not ok' "$GITHUB_WORKSPACE/fault-palloc-tap.log"; then
-            echo "::error::fault-palloc scenario reported at least one 'not ok' line"
-            exit 1
-          fi
-
-          # Non-vacuity: if every oracle SKIPped, the run banks a green
-          # having asserted nothing about the allocation-failure surface.
-          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/fault-palloc-tap.log" || true)
-          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/fault-palloc-tap.log" || true)
-          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
-            echo "::error::every oracle in fault-palloc SKIPped -- the" \
-              "scenario asserted nothing about pool-allocation failure" \
-              "handling; failing rather than banking a vacuous green"
-            exit 1
-          fi
-
-          # Oracle 2 is the one that proves the PALLOC site is ARMABLE. If it
-          # is missing or skipped, oracles 3 and 4 could both be passing
-          # because the arm was silently declined and the requests failed for
-          # unrelated reasons -- exactly the false green this scenario was
-          # written to close (issues.md m8). Require it to have really run.
-          if ! grep -q '^ok 2 - PALLOC site accepted the arm' "$GITHUB_WORKSPACE/fault-palloc-tap.log"; then
-            echo "::error::oracle 2 (PALLOC site armable, counter advances)" \
-              "did not pass -- without it the fault oracles below cannot be" \
-              "distinguished from a silently-declined arm"
-            exit 1
-          fi
-
-      - name: Run codec-call-count scenario
-        env:
-          PROBER_ROOT: ${{ github.workspace }}
-          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
-          PROBER_MODULE: ngx_http_zstd_filter_module.so
-          PROBER_DIRECTIVE: zstd_probe
-          PROBER_PROBE: "zstd_probe;"
-          # No PROBER_ALLOW_LOG, deliberately: this scenario injects no
-          # faults, so a [crit]/[alert] during it is a real defect. The
-          # terminal-frame bug class it guards announces itself exactly there
-          # ("zero size buf in writer"), so exempting anything would blind the
-          # one signal the scenario most needs.
-        run: |
-          set -euo pipefail
-          cd ci/t/harness/ci/prober
-          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/codec-call-count" nginx 1.31.4 \
-            | tee "$GITHUB_WORKSPACE/codec-call-count-tap.log"
-
-          # Same belt-and-braces verdict re-derivation as the steps above.
-          if grep -q '^not ok' "$GITHUB_WORKSPACE/codec-call-count-tap.log"; then
-            echo "::error::codec-call-count scenario reported at least one 'not ok' line"
-            exit 1
-          fi
-
-          # Non-vacuity: if every oracle SKIPped, the run banks a green having
-          # asserted nothing about the per-response codec call count.
-          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/codec-call-count-tap.log" || true)
-          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/codec-call-count-tap.log" || true)
-          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
-            echo "::error::every oracle in codec-call-count SKIPped -- the" \
-              "scenario asserted nothing about the per-response" \
-              "ZSTD_compressStream2 call count; failing rather than banking" \
-              "a vacuous green"
-            exit 1
-          fi
-
-          # The COUNT oracles specifically. Every arm here is a PAIR: a decode
-          # check and a call-count check. The decode halves pass on both the
-          # optimized and the un-optimized filter, so a run where only they
-          # survived would look green while measuring nothing about the
-          # property in the scenario's title. Require the count halves to have
-          # really run -- they are the even-numbered oracles 2, 4, 6, 8 and 10.
-          # The `[^#]*$` tail is load-bearing: without it a SKIP line
-          # ("ok 8 - dcz: total codec calls is 7 # SKIP ...") matches, and this
-          # gate would bank a green for an oracle that asserted nothing --
-          # precisely the false green it exists to prevent. TAP puts the
-          # directive after the description, so requiring no '#' to the end of
-          # the line is what distinguishes a real pass from a SKIP or a TODO.
-          for n in 2 4 6 8 10; do
-            if ! grep -qE "^ok $n - [^#]*total codec calls is [^#]*$" \
-                 "$GITHUB_WORKSPACE/codec-call-count-tap.log"; then
-              echo "::error::oracle $n (a total-codec-calls assertion) did" \
-                "not pass -- without the count halves this scenario cannot" \
-                "distinguish the one-call END path from the two-call one"
-              exit 1
-            fi
-          done
-
-      - name: Run setparam-call-count scenario
-        env:
-          PROBER_ROOT: ${{ github.workspace }}
-          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
-          PROBER_MODULE: ngx_http_zstd_filter_module.so
-          PROBER_DIRECTIVE: zstd_probe
-          PROBER_PROBE: "zstd_probe;"
-          # No PROBER_ALLOW_LOG, deliberately: this scenario injects no
-          # faults either, same reasoning as codec-call-count above.
-        run: |
-          set -euo pipefail
-          cd ci/t/harness/ci/prober
-          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/setparam-call-count" nginx 1.31.4 \
-            | tee "$GITHUB_WORKSPACE/setparam-call-count-tap.log"
-
-          if grep -q '^not ok' "$GITHUB_WORKSPACE/setparam-call-count-tap.log"; then
-            echo "::error::setparam-call-count scenario reported at least one 'not ok' line"
-            exit 1
-          fi
-
-          TOTAL_OK=$(grep -c '^ok ' "$GITHUB_WORKSPACE/setparam-call-count-tap.log" || true)
-          SKIPPED=$(grep -c '^ok .*# SKIP' "$GITHUB_WORKSPACE/setparam-call-count-tap.log" || true)
-          if [ "$TOTAL_OK" -gt 0 ] && [ "$TOTAL_OK" -eq "$SKIPPED" ]; then
-            echo "::error::every oracle in setparam-call-count SKIPped -- the" \
-              "scenario asserted nothing about the per-mode" \
-              "ZSTD_CCtx_setParameter call count; failing rather than" \
-              "banking a vacuous green"
-            exit 1
-          fi
-
-          # The count oracles specifically -- oracle 3 (cdict) and oracle 7
-          # (dcz). Same "[^#]*$" reasoning as codec-call-count's tail above:
-          # without it a SKIP line would still match and bank a green that
-          # asserted nothing.
-          for n in 3 7; do
-            if ! grep -qE "^ok $n - [^#]*setParameter call count is [^#]*$" \
-                 "$GITHUB_WORKSPACE/setparam-call-count-tap.log"; then
-              echo "::error::oracle $n (a setParameter-call-count assertion)" \
-                "did not pass -- without it this scenario cannot show a" \
-                "superseded-by-cdict parameter was actually skipped"
-              exit 1
-            fi
-          done
-
-          # Oracle 4: the frame's own Window_Descriptor actually carries the
-          # operator's zstd_window_log cap under a CDict -- the direct check
-          # for the windowLog-not-superseded finding, independent of the
-          # call-count oracle above (a call count can coincidentally match
-          # while the frame itself still carries an uncapped, level-derived
-          # window).
-          if ! grep -qE '^ok 4 - [^#]*frame window size is [^#]*$' \
-               "$GITHUB_WORKSPACE/setparam-call-count-tap.log"; then
-            echo "::error::oracle 4 (the cdict frame window-cap assertion)" \
-              "did not pass -- without it a dropped windowLog set on the" \
-              "CDict path is invisible to this scenario"
-            exit 1
-          fi
-
-      - name: Run setparam-call-count-nodict scenario
-        env:
-          PROBER_ROOT: ${{ github.workspace }}
-          PROBER_BUILD: ${{ github.workspace }}/nginx-1.31.4
-          PROBER_MODULE: ngx_http_zstd_filter_module.so
-          PROBER_DIRECTIVE: zstd_probe
-          PROBER_PROBE: "zstd_probe;"
-        run: |
-          set -euo pipefail
-          cd ci/t/harness/ci/prober
-          ./run-scenario.sh "$GITHUB_WORKSPACE/ci/t/harness-scenarios/setparam-call-count-nodict" nginx 1.31.4 \
-            | tee "$GITHUB_WORKSPACE/setparam-call-count-nodict-tap.log"
-
-          if grep -q '^not ok' "$GITHUB_WORKSPACE/setparam-call-count-nodict-tap.log"; then
-            echo "::error::setparam-call-count-nodict scenario reported at least one 'not ok' line"
-            exit 1
-          fi
-
-          if ! grep -qE '^ok 3 - [^#]*setParameter call count is [^#]*$' \
-               "$GITHUB_WORKSPACE/setparam-call-count-nodict-tap.log"; then
-            echo "::error::oracle 3 (the no-dict setParameter-call-count" \
-              "assertion) did not pass -- without it there is no reference" \
-              "count the dictionary-mode oracles above are measured against"
-            exit 1
-          fi
-
-          if ! grep -qE '^ok 4 - [^#]*frame window size is [^#]*$' \
-               "$GITHUB_WORKSPACE/setparam-call-count-nodict-tap.log"; then
-            echo "::error::oracle 4 (the no-dict frame window-cap" \
-              "assertion) did not pass -- without it there is no reference" \
-              "frame window the cdict oracle above is measured against"
-            exit 1
-          fi
-
-      - name: Upload TAP log
+      - name: Upload TAP logs
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: harness-scenario-tap-logs
-          path: |
-            fault-arms-tap.log
-            alloc-neutral-tap.log
-            fault-palloc-tap.log
-            codec-call-count-tap.log
-            setparam-call-count-tap.log
-            setparam-call-count-nodict-tap.log
+          path: "*-tap.log"
           retention-days: 7
           if-no-files-found: ignore

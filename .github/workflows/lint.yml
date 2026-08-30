@@ -76,7 +76,9 @@ jobs:
           # that is not really a gate. This module has no lint-sync-stamp.sh
           # or lint-prompt-steps.* (those track the skeleton's own adoption
           # prompt, not this module), so they are not listed.
-          LINT_ONLY: nginx sh python perl yaml spelling ci-runners ci-ports ci-cadence ci-secrets ci-provenance docs-drift
+          LINT_ONLY: >-
+            nginx sh python perl yaml spelling ci-runners ci-ports ci-cadence
+            ci-topology ci-secrets ci-provenance docs-drift
         run: ci/linter/run-all.sh
 
       # ast-grep and gitleaks live in .pre-commit-config.yaml rather than in a

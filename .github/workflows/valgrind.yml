@@ -1,8 +1,8 @@
 name: Valgrind
 
-# Valgrind memcheck-lite soak on every PR/push — 60s soak against a debug
+# Targeted manual Valgrind memcheck-lite soak — 60s against a debug
 # nginx build so PR feedback stays quick. The full memcheck + helgrind soak
-# lives in ci-deep.yml (monthly cron + workflow_dispatch).
+# lives in ci-deep.yml (weekly cron + workflow_dispatch).
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5.1.0        -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09

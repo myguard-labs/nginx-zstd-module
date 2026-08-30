@@ -66,6 +66,8 @@ fi
 # Positive control: the selector still selects. --list is used rather than a
 # real run so this stays independent of which linters are installed.
 case_ 0 "--list works" ci/linter/run-all.sh --list
+case_ 0 "CI topology negative controls hold" \
+    python3 ci/linter/ci_topology.py --selftest
 
 # Work-list consumers used process substitution, whose exit status is not
 # visible to mapfile. Exercise each real consumer with a producer that emits a

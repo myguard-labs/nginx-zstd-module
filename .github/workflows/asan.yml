@@ -5,7 +5,7 @@ name: A/UBSan
 # soak.sh's sustained mixed-load traffic instead of the Test::Nginx suite, the
 # same way valgrind.yml's memcheck-lite job soaks the debug build. Two
 # independent dynamic-analysis lenses on the same binary shape catch different
-# things: ASan/UBSan is fast enough to run a real request storm on every PR
+# things: ASan/UBSan is fast enough to run a real request storm in CI Deep
 # and catches heap overflow / UAF outside nginx's pool blocks; Valgrind (20x
 # slower) still catches the uninitialised reads and intra-pool UAF that ASan
 # cannot see. Complementary, not redundant -- keep both.

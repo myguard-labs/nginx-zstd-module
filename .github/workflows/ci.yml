@@ -1,86 +1,26 @@
 ---
 name: CI
 
-# The single gate entry point. Every gate that runs on a PR is reached through
-# this file and nowhere else, so "what does a PR run?" is answered by reading
-# one job list rather than by grepping eight trigger blocks.
+# Single PR gate entry point. Extended CodeQL, fuzz, soak, and coverage work is
+# scheduled by ci-deep.yml; running it here made the merge decision wait on
+# safety-net jobs and duplicated the already-tested tree after every merge.
 #
-# It also runs on push: master, i.e. once per merge. That leg is NOT a
-# duplicate of the PR leg -- it is the only thing that produces a master-branch
-# result for these jobs at all. Before it existed, `gh run list --branch master`
-# showed only the weekly build-test.yml/bump.yml schedule runs plus stale push
-# runs from a windows-build.yml trigger since removed; no merge commit ever got
-# a CI result on master. That is the classic PR-only-CI-goes-stale-on-master
-# shape: the default branch can be broken by a merge (semantic conflict between
-# two independently-green PRs, or a runner toolchain upgrade) and nothing
-# reports it until the next innocent PR goes red and gets the blame.
+# Four self-hosted Linux lanes are budgeted explicitly:
+#   1. Build & Test: resolve/validation, then four dependency chains inside
+#      build-test.yml (mainline, sanitizer, old-libzstd, vary -> linkage).
+#   2. Security scanners.
+#   3. Harness Fault Arms (all six nginx-module-testkit consumer scenarios).
+#   4. The second initial Build & Test job (resolve and validation run together).
 #
-# The concrete consumer is plan-testkit-integration.md Phase 5, which gates
-# promoting "Harness Fault Arms" to a required check on ">=1 week green on
-# master". That gate was unsatisfiable while nothing ran the job on master --
-# it was waiting on a signal no trigger produced. This leg produces it.
-#
-# Cost is one gate run per merge, and concurrency: below is keyed on
-# github.ref, so the master leg has its own group and never cancels a PR leg.
-#
-# Members keep their own workflow_dispatch: so each can still be run alone from
-# the Actions tab, and build-test.yml and codeql.yml keep their schedule: for
-# the cron sweeps that must fire whether or not anyone opens a PR.
-#
-# NOT called from here, on purpose:
-#   ci-deep.yml  the unbounded monthly campaign (600-minute fuzz, 240-minute
-#                valgrind/helgrind). Its verdict lands long after the merge
-#                decision it would inform -- schedule + dispatch only.
-#   bump.yml     the version-bump bot; opens PRs, is not a gate on one.
-#
-# The long-runners that ARE members are bounded and stay bounded:
-#   fuzzing.yml   -max_total_time=120   (2 minutes)
-#   valgrind.yml  soak.sh <nginx> 60 4  (60 seconds at concurrency 4)
-#   asan.yml      soak.sh <nginx> 60 4  (60 seconds at concurrency 4)
-# If any grows an open-ended budget it belongs in ci-deep.yml instead.
-#
-# ── LANES ───────────────────────────────────────────────────────────
-# Pool: vars.POOL = ["self-hosted","builder02","lxc"]. A runner must carry ALL
-# THREE labels to match, which as of 2026-08-22 is 12 online runners --
-# builder02-runner-01..04 plus builder03-runner-01..08. Re-derive, never assume:
-#   gh api orgs/myguard-labs/actions/runners --jq '[.runners[]
-#     | select((.labels|map(.name)) as $l
-#       | (["self-hosted","builder02","lxc"]|all(. as $r|$l|index($r))))] | length'
-#
-# THERE IS NO SLOT CONTENTION IN THIS GATE. Peak demand is 11 self-hosted jobs
-# against 12 slots. Measured on run 32599668884 (2026-08-22, PR #140): six jobs
-# started together at 21:28:08-09 and six more at 21:28:59, and NOTHING queued
-# for a slot. Re-derive with:
-#   gh run view <id> -R myguard-labs/nginx-zstd-module --json jobs \
-#     -q '.jobs[] | [.name, .startedAt, .completedAt] | @tsv'
-#
-# HISTORY, so the superseded analysis is not rediscovered as news: this comment
-# previously described a 6-slot builder02-only pool and a "peak 11 against 6"
-# contention problem, and TODO.md carried a row calling the fix platform-blocked
-# on GitHub Actions having no job-level needs: across a reusable-workflow-call
-# boundary. That platform limitation is REAL and still true -- but it stopped
-# mattering when builder03's 8 runners joined the pool. The contention it was
-# working around no longer exists. Do not re-litigate lane assignment on the
-# basis of slot scarcity without re-measuring the pool first.
-#
-# What the budget actually is now: the critical path is CodeQL at 425s wall
-# (204s analysis + 141s module build + 51s init), and every other job in the
-# gate finishes before it. Nothing is gained by re-laning work that already
-# fits; the only lever on total gate time is CodeQL itself.
-#
-# The one ordering constraint worth keeping is inside build-test.yml, where
-# real needs: lanes DO apply: build-old-libzstd runs needs: [resolve,
-# validation] with an explicit needs.resolve.result == 'success' term, because
-# its if: ${{ !cancelled() }} would otherwise override the default skip for
-# every dependency and build against an empty nginx_version.
-#
-# Any lane change rewrites this comment in the same commit.
+# Resolve normally frees its lane in seconds and starts the mainline build while
+# validation/scanners/testkit finish. Once validation releases the remaining
+# lanes, build-test.yml's four chains keep the pool full without allowing an
+# unbounded ready queue. Lint, Windows, and arm64 use GitHub-hosted runners and
+# do not consume these four lanes.
 
 on:
   pull_request:
     branches: [master, main]
-  push:
-    branches: [master]
   workflow_dispatch: {}
 
 concurrency:
@@ -104,62 +44,22 @@ jobs:
       contents: read
 
   security-scanners:
-    # Lower-case "scanners" deliberately: this string is half of the check
-    # context ("Security scanners / Security scanners") that ruleset 16557047
-    # requires on master. Step 20's Security Scanners spelling governs the
-    # README badge and CI table, not this job name -- the reference sets no
-    # name: here at all. Renaming it orphans the required context, and the PR
-    # then waits forever on a check that will never report again.
+    # This exact case is part of the existing status-check context.
     name: Security scanners
     uses: ./.github/workflows/security-scanners.yml
     permissions:
       contents: read
 
-  codeql:
-    name: CodeQL
-    uses: ./.github/workflows/codeql.yml
-    # A called workflow cannot widen the caller's grant, so security-events
-    # must be handed down here or the SARIF upload fails with a 403 that reads
-    # like a CodeQL fault.
-    permissions:
-      contents: read
-      security-events: write # required to upload CodeQL's SARIF results
-
-  fuzzing:
-    name: Fuzzing
-    uses: ./.github/workflows/fuzzing.yml
-    permissions:
-      contents: read
-
-  valgrind:
-    name: Valgrind
-    uses: ./.github/workflows/valgrind.yml
-    permissions:
-      contents: read
-
-  asan:
-    name: A/UBSan
-    uses: ./.github/workflows/asan.yml
+  harness-fault-arms:
+    # Kept in the fast gate because it reaches module-internal fault/resource
+    # paths that Test::Nginx and ordinary sanitizers cannot observe.
+    name: Harness Fault Arms
+    uses: ./.github/workflows/harness-fault-arms.yml
     permissions:
       contents: read
 
   windows-build:
     name: Windows build
     uses: ./.github/workflows/windows-build.yml
-    permissions:
-      contents: read
-
-  harness-fault-arms:
-    # NOT in master's required-checks set (ruleset 16557047) -- deliberately.
-    # See harness-fault-arms.yml's own header for why: this job builds a
-    # SEPARATE, harness-instrumented nginx tree (TEST_HARNESS=1 +
-    # -DNGX_TEST_HARNESS) and runs the codec fault-injection scenario
-    # against it, exercising ~5 error/edge arms Phase 3's fault sites made
-    # reachable but that no other job in this suite reaches (plan-testkit-
-    # integration.md Phase 4). Visible on every PR; promoting it to required
-    # is a separate, later, explicitly reviewed step (Phase 5), not a
-    # side effect of adding the row.
-    name: Harness Fault Arms
-    uses: ./.github/workflows/harness-fault-arms.yml
     permissions:
       contents: read

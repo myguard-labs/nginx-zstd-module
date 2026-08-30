@@ -77,13 +77,10 @@ A crash drops a `crash-*` reproducer. Replay it with:
 
 ## CI
 
-[`.github/workflows/fuzzing.yml`](../.github/workflows/fuzzing.yml) runs
-both targets, kept separate from the build/test pipeline so it never slows
-PR feedback:
-
-- **Nightly** — 15-min discovery run, merges + uploads the grown corpus
-- **PR** — 2-min bounded regression run
-- **Manual** — `workflow_dispatch` with a custom duration
+[`fuzzing.yml`](../../.github/workflows/fuzzing.yml) provides a targeted manual
+run for both targets. The weekly [`ci-deep.yml`](../../.github/workflows/ci-deep.yml)
+campaign runs the two targets concurrently in separate lanes for the selected
+long duration. Fuzzing stays out of the bounded PR gate.
 
 ASAN+UBSAN are compiled in, so memory and undefined-behaviour bugs abort the
 run and fail the job. Each harness also traps if the function under test

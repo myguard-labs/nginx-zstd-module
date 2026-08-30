@@ -1,8 +1,8 @@
 name: CodeQL
 
-# Standalone CodeQL workflow (split out of build-test.yml so security analysis
-# evolves independently of the build/test pipeline and shows as its own
-# PR check). Third-party actions pinned to commit SHAs — see build-test.yml header.
+# Reusable CodeQL workflow. CI Deep owns the weekly schedule; this file keeps a
+# manual entry point for focused reruns. Third-party actions are pinned to
+# commit SHAs; see the build-test.yml header.
 
 # nginx version is resolved at run time (see "Resolve latest mainline nginx"
 # step) rather than pinned, so this analysis tracks current mainline.
@@ -12,11 +12,8 @@ env:
   NGINX_VERSION: ""
 
 on:
-  schedule:
-    # Monthly, day 1 @ 04:47 UTC (staggered per repo like ci-deep).
-    - cron: "47 4 1 * *"
   workflow_dispatch: {}
-  # Called by ci.yml, the single PR entry point (step 15).
+  # Called by ci-deep.yml.
   workflow_call: {}
 
 concurrency:

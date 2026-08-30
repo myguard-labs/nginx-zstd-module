@@ -94,9 +94,11 @@ nothing. `git add -N` the file first.
 
 ## How CI works here
 
-Every push and every PR runs four short gates. They exist to catch the
-classes of bugs that C code in a web server cannot afford:
+Every PR runs bounded merge gates without monopolising the four self-hosted
+runner lanes:
 
+- **Lint** — runs the repository's deterministic source, workflow, security,
+  documentation-drift, and four-lane topology checks.
 - **Build & Test** — builds the module against current nginx (and, where
   applicable, Angie) and runs the unit tests under **ASan/UBSan**.
   AddressSanitizer and UndefinedBehaviorSanitizer are compiler
@@ -108,18 +110,16 @@ classes of bugs that C code in a web server cannot afford:
   (`cert-*`, `clang-analyzer-security.*`) and semgrep over the module
   sources. Static analysis: it reads the code without running it and
   flags dangerous patterns.
-- **Fuzzing** (`fuzzing.yml`) — a ~120-second libFuzzer regression run over
-  the module's input parsers. Fuzzing feeds a parser millions of mutated
-  inputs and watches for crashes. Short on PRs so feedback stays fast.
-- **Valgrind** (`valgrind.yml`) — a short Memcheck soak. Valgrind executes
-  the code in an emulated CPU and reports every invalid read/write and
-  every leaked byte.
+- **Harness fault arms** (`harness-fault-arms.yml`) — runs all six shared
+  nginx-module-testkit scenarios against an instrumented module build.
+  Visible on every PR but not yet a required check.
+- **Windows build** (`windows-build.yml`) — compiles the Win32 paths with
+  MSVC and MinGW, which the Linux lanes cannot cover.
 
-The expensive versions of these — hours-long fuzzing per target, full
-Memcheck **and** Helgrind (thread-race detection) soaks — run monthly and
-on manual dispatch in `ci-deep.yml`, not on your PR. Some modules also run
-an extra runtime test suite; check the repo's `.github/workflows/` and the
-badges at the top of the README for the exact set.
+Long work — two fuzz targets, full coverage, CodeQL, native sanitizer soak,
+compatibility builds, full Memcheck and Helgrind — runs weekly and on manual
+dispatch in `ci-deep.yml`. Its dependency chains keep exactly four
+self-hosted lanes busy without an uncontrolled ready-job burst.
 
 Your PR merges when **all** checks are green. If a gate fails and you
 believe the gate is wrong, say so in the PR — with evidence, not vibes.

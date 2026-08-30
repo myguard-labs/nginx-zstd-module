@@ -27,7 +27,8 @@ if [ ! -f "$SO" ]; then
     exit 1
 fi
 
-if ! nm "$SO" 2>/dev/null | grep -q ' ngx_test_probe_'; then
+PROBE_SYMBOLS="$(nm "$SO" 2>/dev/null | grep -c ' ngx_test_probe_' || true)"
+if [ "$PROBE_SYMBOLS" -eq 0 ]; then
     echo "$SO carries no ngx_test_probe_* symbols -- this is a packaged (non-harness) build; configure with TEST_HARNESS=1 CFLAGS=\"\$CFLAGS -DNGX_TEST_HARNESS\" first"
     exit 1
 fi

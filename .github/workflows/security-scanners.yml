@@ -1,8 +1,8 @@
 name: Security scanners
 
-# Static/security scanners gate on every PR/push — flawfinder, clang-tidy
-# (cert-* / clang-analyzer-security.*) and semgrep over the module sources,
-# with the reports uploaded as build artifacts.
+# Static/security scanners gate on PRs and run again in the weekly deep chain:
+# flawfinder, clang-tidy (cert-* / clang-analyzer-security.*), and semgrep over
+# the module sources, with reports uploaded as build artifacts.
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5.1.0      -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
