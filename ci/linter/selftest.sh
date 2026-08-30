@@ -269,6 +269,8 @@ policy_ 1 provenance-exec-downloaded-binary provenance
 policy_ 1 provenance-unverified-unzip provenance
 policy_ 1 provenance-chained-unzip provenance
 policy_ 1 provenance-mixed-codeql-unzip provenance
+policy_ 1 provenance-pipe-unzip provenance
+policy_ 1 provenance-subshell-unzip provenance
 
 # A mistyped pool label in a schedule-only workflow. The trust half of the
 # runners check does not apply to a workflow no fork can reach, and skipping it

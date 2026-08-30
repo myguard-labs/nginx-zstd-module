@@ -627,7 +627,7 @@ def check_cadence() -> int:
 # check): a `tar -xzf` or a direct `./configure`/binary invocation is the
 # actual privilege boundary, not the download line above it.
 EXTRACT_OR_EXEC_RE = re.compile(
-    r"(?<![\w-])tar\s+-?x|(?m:(?:^[ \t]*|&&[ \t]*|\|\|[ \t]*|;[ \t]*|\bthen[ \t]+)unzip\b)|"
+    r"(?<![\w-])tar\s+-?x|(?<![\w-])unzip\b|"
     r"(?<![\w-])/tmp/actionlint\b"
     # Direct execution of a fetched artifact, without any unpacking step in
     # between: `chmod +x tool && ./tool`, or a bare `./tool` / `./tool/x`
@@ -643,9 +643,24 @@ EXTRACT_OR_EXEC_RE = re.compile(
 # CodeQL's pinned analyze action produces this database archive locally. It is
 # not restored by cache or downloaded by the job's wget/curl steps.
 LOCAL_CODEQL_DATABASE_UNZIP_RE = re.compile(
-    r"(?m)(?:^[ \t]*|&&[ \t]*|\|\|[ \t]*|;[ \t]*|\bthen[ \t]+)"
     r'unzip(?:\s+-\S+)*\s+["\']?\$db/src\.zip["\']?\s+-d\s+'
 )
+
+
+def is_package_or_comment_token(run: str, token_start: int) -> bool:
+    """Return whether an extract-token spelling is not a shell invocation."""
+    line_start = run.rfind("\n", 0, token_start) + 1
+    while line_start:
+        previous_end = line_start - 1
+        previous_start = run.rfind("\n", 0, previous_end) + 1
+        if not run[previous_start:previous_end].rstrip().endswith("\\"):
+            break
+        line_start = previous_start
+    prefix = run[line_start:token_start]
+    if prefix.lstrip().startswith("#"):
+        return True
+    return bool(re.search(r"\bapt(?:-get)?\s+install\b[^;]*$", prefix))
+
 
 # What counts as a trust-anchor assertion having been made ON THIS PATH
 # before the extract/exec point. Any one of:
@@ -734,12 +749,11 @@ def check_provenance() -> int:
             for i, run in enumerate(runs):
                 # Same-step trust anchors count only before extraction, in
                 # the same order the shell consumes the commands.
-                local_extract_starts = {
-                    match.start()
-                    for match in LOCAL_CODEQL_DATABASE_UNZIP_RE.finditer(run)
-                }
                 for extract in EXTRACT_OR_EXEC_RE.finditer(run):
-                    if extract.start() in local_extract_starts:
+                    if is_package_or_comment_token(run, extract.start()):
+                        continue
+                    local = LOCAL_CODEQL_DATABASE_UNZIP_RE.search(run, extract.start())
+                    if local is not None and local.start() == extract.start():
                         continue
                     if not anchored and not TRUST_ANCHOR_RE.search(
                         run[: extract.start()]
