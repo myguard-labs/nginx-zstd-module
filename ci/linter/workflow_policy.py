@@ -659,7 +659,8 @@ def is_package_or_comment_token(run: str, token_start: int) -> bool:
     prefix = run[line_start:token_start]
     if prefix.lstrip().startswith("#"):
         return True
-    return bool(re.search(r"\bapt(?:-get)?\s+install\b[^;]*$", prefix))
+    logical_prefix = prefix.replace("\\\n", " ")
+    return bool(re.search(r"\bapt(?:-get)?\s+install\b[^;&|\n]*$", logical_prefix))
 
 
 # What counts as a trust-anchor assertion having been made ON THIS PATH
