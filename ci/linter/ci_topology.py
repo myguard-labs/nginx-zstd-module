@@ -71,6 +71,7 @@ def check_build(build: dict) -> list[str]:
     allowed_build = {
         "resolve",
         "validation",
+        "release-build-fanout",
         "build",
         "build-arm64",
         "build-old-libzstd",
@@ -85,16 +86,23 @@ def check_build(build: dict) -> list[str]:
     build_edges = {
         "resolve": set(),
         "validation": set(),
+        "release-build-fanout": {"resolve"},
         "build": {"resolve"},
         "build-arm64": {"resolve"},
         "tests": {"resolve", "build"},
-        "build-asan": {"resolve"},
+        "build-asan": {"resolve", "release-build-fanout"},
         "tests-asan": {"build-asan"},
-        "build-old-libzstd": {"resolve"},
-        "cvary-interop": {"resolve"},
+        "build-old-libzstd": {"resolve", "release-build-fanout"},
+        "cvary-interop": {"resolve", "release-build-fanout"},
         "linkage": {"resolve", "cvary-interop"},
     }
     errors.extend(edge_errors("build-test.yml", jobs, build_edges))
+    fanout = jobs.get("release-build-fanout", {})
+    if fanout.get("runs-on") != "ubuntu-24.04":
+        errors.append("build-test.yml fan-out barrier must stay off the four-lane pool")
+    steps = fanout.get("steps", [])
+    if len(steps) != 1 or steps[0].get("run") != "sleep 10":
+        errors.append("build-test.yml fan-out barrier must preserve mainline priority")
     if "coverage" in jobs:
         errors.append("coverage is a deep report, not a PR job")
     return errors
@@ -157,7 +165,9 @@ def findings(ci: dict, build: dict, deep: dict) -> list[str]:
     return check_ci(ci) + check_build(build) + check_deep(deep)
 
 
-def selftest(ci: dict, build: dict, deep: dict) -> int:
+def selftest(  # pylint: disable=too-many-statements
+    ci: dict, build: dict, deep: dict
+) -> int:
     baseline = findings(ci, build, deep)
     if baseline:
         for error in baseline:
@@ -188,6 +198,9 @@ def selftest(ci: dict, build: dict, deep: dict) -> int:
     changed = copy.deepcopy(build)
     changed["jobs"]["build-arm64"]["needs"] = "build-arm64"
     cases.append(("invalid hosted arm64 dependency", ci, changed, deep))
+    changed = copy.deepcopy(build)
+    changed["jobs"]["release-build-fanout"]["steps"][0]["run"] = "true"
+    cases.append(("lost mainline priority", ci, changed, deep))
     changed = copy.deepcopy(deep)
     changed["jobs"]["fuzz"]["strategy"]["max-parallel"] = 3
     cases.append(("five-lane deep fan-out", ci, build, changed))

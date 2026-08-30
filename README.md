@@ -1324,7 +1324,9 @@ build, lint, scanner, or Windows jobs.
 
 Long jobs are deliberately not called from it. **CI Deep** runs them weekly in
 four explicit self-hosted dependency chains; **Bump** opens version-bump PRs
-rather than gating them.
+rather than gating them. The four-lane model applies when repository variable
+`POOL` selects the shared self-hosted pool; an unset variable uses each job's
+documented `ubuntu-latest` fallback instead.
 
 | Workflow | Cadence | What it does |
 |---|---|---|

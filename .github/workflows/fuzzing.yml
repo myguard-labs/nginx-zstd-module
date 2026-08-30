@@ -14,8 +14,6 @@ env:
 
 on:
   workflow_dispatch: {}
-  # Called by ci.yml, the single PR entry point (step 15).
-  workflow_call: {}
 
 concurrency:
   group: fuzzing-${{ github.workflow }}-${{ github.ref }}

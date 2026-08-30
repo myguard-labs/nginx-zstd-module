@@ -491,6 +491,17 @@ jobs:
           retention-days: 7
 
   # ── Build the module against nginx mainline (amd64) ─────────────────────
+  release-build-fanout:
+    name: Release build fan-out
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    needs: resolve
+    steps:
+      - name: Give mainline first claim on the released lane
+        # GitHub does not promise ready-queue order. Keep mainline as the only
+        # self-hosted candidate briefly, then release the other three chains.
+        run: sleep 10
+
   build:
     # Job name must stay VERSION-FREE. It was
     # `Build (${{ matrix.flavor }} ${{ matrix.version }})`, which renamed the
@@ -881,9 +892,9 @@ jobs:
     name: Build (libzstd 1.4.x — fallback paths)
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 25
-    # Ready after the resolver so it can occupy the first lane released by an
-    # independent validation, scanner, or testkit job.
-    needs: resolve
+    # Released by the hosted barrier after mainline has first claim on the
+    # resolver's lane, then occupies the next lane to become available.
+    needs: [resolve, release-build-fanout]
 
     env:
       # Resolved mainline nginx (used by the cache keys + download/build steps
@@ -1321,7 +1332,7 @@ jobs:
     name: compression_vary interop (real module)
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 15
-    needs: resolve
+    needs: [resolve, release-build-fanout]
     env:
       NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
       # HanadaLee/ngx_http_compression_vary_filter_module, pinned by
@@ -1480,7 +1491,7 @@ jobs:
     name: Build ASAN+UBSAN
     runs-on: ${{ fromJSON(vars.POOL || '["ubuntu-latest"]') }}
     timeout-minutes: 30
-    needs: resolve
+    needs: [resolve, release-build-fanout]
 
     env:
       # Resolved mainline nginx — feeds the cache keys, download and the

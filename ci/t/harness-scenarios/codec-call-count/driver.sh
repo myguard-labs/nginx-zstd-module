@@ -221,7 +221,11 @@ measure() {
     elif [[ ",$expect," == *",$got,"* ]] && [ "$ends" -eq 1 ]; then
         ok "$label: total codec calls is ${expect//,/ or } (got $got; one END call)"
     else
-        diag "$label: codec_calls+codec_end_calls=$got expected=$expect; codec_end_calls=$ends expected=1 for a list"
+        if [[ "$expect" == *,* ]]; then
+            diag "$label: codec_calls+codec_end_calls=$got expected=$expect; codec_end_calls=$ends expected=1"
+        else
+            diag "$label: codec_calls+codec_end_calls=$got expected=$expect"
+        fi
         notok "$label: total codec calls is ${expect//,/ or } (got $got)"
     fi
 }

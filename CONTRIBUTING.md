@@ -121,7 +121,9 @@ Long work — two fuzz targets, full coverage, CodeQL, native sanitizer soak,
 compatibility builds, full Memcheck and Helgrind — runs weekly and on manual
 dispatch in `ci-deep.yml`. Its dependency chains keep exactly four
 self-hosted lanes busy without an uncontrolled ready-job burst. The expanded
-coverage report enforces an 85% line floor.
+coverage report enforces an 85% line floor. That capacity model assumes the
+repository `POOL` variable selects the shared pool; if unset, jobs use their
+declared GitHub-hosted fallback.
 
 Your PR merges when **all** checks are green. If a gate fails and you
 believe the gate is wrong, say so in the PR — with evidence, not vibes.

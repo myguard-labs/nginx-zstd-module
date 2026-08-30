@@ -13,10 +13,11 @@ name: CI
 #   3. Harness Fault Arms (all six nginx-module-testkit consumer scenarios).
 #   4. The second initial Build & Test job (resolve and validation run together).
 #
-# Resolve normally frees its lane in seconds and makes all four build chains
-# ready. The mainline build starts immediately; the other chains fill lanes as
-# validation, scanners, and testkit finish. Lint, Windows, and arm64 use
-# GitHub-hosted runners and do not consume these four lanes.
+# Resolve normally frees its lane in seconds and makes only mainline ready. A
+# short hosted barrier then releases the other three chains after mainline has
+# first claim on that lane; they fill lanes as validation, scanners, and
+# testkit finish. Lint, Windows, and arm64 use GitHub-hosted runners and do not
+# consume these four lanes.
 
 on:
   pull_request:
