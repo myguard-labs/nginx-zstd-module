@@ -1173,19 +1173,6 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
      */
     for (frames = 0; ; frames++) {
 
-        if (frames >= NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES) {
-            ngx_log_error(NGX_LOG_ERR, log, 0,
-                          "zstd static: \"%s\" has at least %ui "
-                          "leading skippable frames -- declining "
-                          "rather than searching further for the "
-                          "first regular frame",
-                          path->data,
-                          (ngx_uint_t)
-                              NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES);
-            probe_rc = NGX_DECLINED;
-            goto probe_done;
-        }
-
         if (of->is_directio) {
             frame_off = (size_t) ((uint64_t) pos % (uint64_t) align);
             base = pos - (off_t) frame_off;
@@ -1290,6 +1277,25 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
         probe_rc = ngx_http_zstd_static_probe_verdict(frame, avail, of->size,
                                                       &pos, path, log);
         if (probe_rc == NGX_AGAIN) {
+            /*
+             * The first four skips are permitted, so probe the frame
+             * following the fourth one.  Decline only after observing a
+             * fifth skip; rejecting at the top of this loop would reject
+             * the regular frame after exactly four skips without probing it.
+             */
+            if (frames >= NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES) {
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "zstd static: \"%s\" has at least %ui "
+                              "leading skippable frames -- declining "
+                              "rather than searching further for the "
+                              "first regular frame",
+                              path->data,
+                              (ngx_uint_t)
+                                  NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES + 1);
+                probe_rc = NGX_DECLINED;
+                goto probe_done;
+            }
+
             continue;
         }
 

@@ -1284,11 +1284,35 @@ Content-Encoding: zstd
 
 
 
-=== TEST 44: a chain of skippable frames longer than the bound is declined
-# NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES caps the walk at 4 leading
-# skippable frames. Five zero-length skippable frames ahead of an
-# otherwise-good regular frame must be declined — the handler gives up
-# rather than searching indefinitely.
+=== TEST 44: exactly four leading skippable frames followed by a regular frame are served
+# NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES permits four leading skippable
+# frames.  The handler must still probe the following regular frame,
+# rather than declining before it reads that frame.
+--- config
+    location /skip/ {
+        zstd_static on;
+        root html;
+    }
+--- user_files eval
+">>> skip/four.js\nfour skips origin\n>>> skip/four.js.zst\n"
+. (pack("C*", 0x50, 0x2A, 0x4D, 0x18, 0x00, 0x00, 0x00, 0x00) x 4)
+. pack("C*", 0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x19, 0x00, 0x00)
+. "hi\n"
+--- request
+GET /skip/four.js
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- error_code: 200
+--- no_error_log
+[error]
+
+
+
+=== TEST 44b: a fifth leading skippable frame is declined
+# The cap is enforced only after the fifth skippable frame is observed.
+# This keeps the walk bounded while allowing the regular frame after four.
 --- config
     location /skip/ {
         zstd_static on;
@@ -1309,7 +1333,7 @@ Accept-Encoding: zstd
 too long origin
 --- error_code: 200
 --- error_log
-has at least 4 leading skippable frames
+has at least 5 leading skippable frames
 
 
 
