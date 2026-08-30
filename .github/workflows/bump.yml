@@ -47,6 +47,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # This scheduled workflow also falls back to ubuntu-latest for forks.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gh git gnupg python3
+
       - name: Run bump script
         id: bump
         env:

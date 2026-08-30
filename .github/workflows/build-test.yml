@@ -69,6 +69,13 @@ jobs:
       nginx_version: ${{ steps.v.outputs.nginx_version }}
       matrix: ${{ steps.v.outputs.matrix }}
     steps:
+      # `vars.POOL` is unavailable in forks; curl is needed by the very next
+      # step, before any job-specific package installation can run.
+      - name: Install bootstrap dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+
       - name: Resolve latest mainline nginx
         id: v
         run: |
@@ -99,6 +106,12 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+
+      # actionlint is downloaded in the next step, so install curl before it.
+      - name: Install bootstrap dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
 
       # Lint the workflow files themselves. actionlint validates GitHub
       # Actions expression contexts (e.g. "env is not allowed in a job
@@ -164,6 +177,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            curl \
+            git \
             gcc-multilib \
             libpcre2-dev \
             zlib1g-dev \
@@ -212,6 +227,9 @@ jobs:
 
       - name: README/SECURITY/CONTRIBUTING vs live workflows (F7 regression)
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_docs_ci_drift.sh
+
+      - name: Fork-runner dependency bootstrap regression
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_ci_dependency_bootstrap.sh
 
       # Audit sha e289021 F2/F3 regression coverage: exercises ci-build.sh's
       # mv-guard and provenance checks directly (offline cases + one live
@@ -596,6 +614,7 @@ jobs:
             build-essential \
             pkg-config \
             libzstd-dev \
+            gnupg \
             libpcre2-dev \
             zlib1g-dev \
             ccache \
@@ -763,6 +782,7 @@ jobs:
             zlib1g-dev \
             python3 \
             python3-requests \
+            gnupg \
             wget \
             zstd
 
@@ -934,7 +954,7 @@ jobs:
             'Acquire::https::Timeout "20";' \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config \
+          sudo apt-get install -y build-essential gnupg pkg-config \
             libpcre2-dev zlib1g-dev wget cmake python3 \
             python3-requests zstd
 
@@ -1140,7 +1160,7 @@ jobs:
             'Acquire::https::Timeout "20";' \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+          sudo apt-get install -y build-essential gnupg pkg-config libzstd-dev \
             libpcre2-dev zlib1g-dev wget binutils
 
       - name: Cache nginx source tarball
@@ -1374,7 +1394,7 @@ jobs:
             'Acquire::https::Timeout "10";' \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
-          sudo apt-get install -y build-essential libzstd-dev \
+          sudo apt-get install -y build-essential git gnupg libzstd-dev \
             libpcre2-dev zlib1g-dev wget curl
 
       - name: Cache nginx source tarball
@@ -1524,7 +1544,7 @@ jobs:
             'Acquire::https::Timeout "20";' \
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libzstd-dev \
+          sudo apt-get install -y build-essential gnupg pkg-config libzstd-dev \
             libpcre2-dev zlib1g-dev wget
 
       - name: Cache nginx source tarball

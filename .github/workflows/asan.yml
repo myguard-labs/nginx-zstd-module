@@ -44,6 +44,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # `vars.POOL` is absent in forks, so do not rely on the hosted image
+      # carrying curl before the full dependency installation below.
+      - name: Install bootstrap dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+
       - name: Resolve latest mainline nginx
         run: |
           set -euo pipefail
@@ -65,7 +72,8 @@ jobs:
             | sudo tee /etc/apt/apt.conf.d/99-ci-net > /dev/null
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential curl libpcre2-dev libzstd-dev pkg-config wget zstd
+            build-essential curl gnupg libpcre2-dev libzstd-dev openssl pkg-config \
+            wget zlib1g-dev zstd
 
       - name: Cache nginx source tarball
         id: nginx-tarball
