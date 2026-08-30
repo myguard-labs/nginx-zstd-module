@@ -17,8 +17,8 @@
  * (and so nginx -t and every reload) hashes each registered file, which
  * at hundreds of entries turns into seconds of pure CPU with the
  * portable code. The portable implementation stays compiled in as the
- * runtime fallback: EVP_Digest() allocates internally and may fail
- * under memory pressure, and falling back keeps this a total function.
+ * runtime fallback: context allocation or any incremental EVP stage may fail,
+ * and falling back keeps this a total function.
  *
  * Only the filter TU uses these today. The one-shot entry point
  * ngx_http_zstd_sha256() is static ngx_inline; the four helpers it drives
@@ -239,7 +239,7 @@ ngx_http_zstd_sha256_final(ngx_http_zstd_sha256_t *c,
 /* One-shot convenience for the config-load call site. */
 static ngx_inline void
 ngx_http_zstd_sha256(const u_char *data, size_t len,
-    u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN])
+    u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN], void *evp_md_ctx)
 {
     ngx_http_zstd_sha256_t  c;
 
@@ -248,15 +248,19 @@ ngx_http_zstd_sha256(const u_char *data, size_t len,
 
     mdlen = NGX_HTTP_ZSTD_SHA256_DIGEST_LEN;
 
-    if (EVP_Digest(data, len, digest, &mdlen, EVP_sha256(), NULL) == 1
+    if (evp_md_ctx != NULL
+        && EVP_DigestInit_ex(evp_md_ctx, EVP_sha256(), NULL) == 1
+        && EVP_DigestUpdate(evp_md_ctx, data, len) == 1
+        && EVP_DigestFinal_ex(evp_md_ctx, digest, &mdlen) == 1
         && mdlen == NGX_HTTP_ZSTD_SHA256_DIGEST_LEN)
     {
         return;
     }
 
-    /* EVP_Digest() allocates a context internally and can fail under
-       memory pressure; fall through to the portable implementation. */
+    /* Fall through when the cycle context is unavailable or a stage fails. */
 #endif
+
+    (void) evp_md_ctx;
 
     ngx_http_zstd_sha256_init(&c);
     ngx_http_zstd_sha256_update(&c, data, len);

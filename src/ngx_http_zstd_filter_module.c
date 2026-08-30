@@ -171,9 +171,10 @@ ngx_http_zstd_hex_nibble(u_char c)
  */
 static ngx_inline void
 ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
-    u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN], ngx_uint_t *hashed)
+    u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN], ngx_uint_t *hashed,
+    void *evp_md_ctx)
 {
-    ngx_http_zstd_sha256(data, len, digest);
+    ngx_http_zstd_sha256(data, len, digest, evp_md_ctx);
     (*hashed)++;
 }
 
@@ -452,6 +453,10 @@ typedef struct {
      * active cycle's conf. pcalloc zeroes it — no reset hook needed.
      */
     ngx_uint_t                   dcz_dicts_hashed;
+
+    /* Reused only while this candidate configuration is parsed. */
+    void                        *dcz_evp_md_ctx;
+    ngx_flag_t                   dcz_evp_md_ctx_attempted;
 
     /*
      * Preformatted decimal representation of dcz_dicts_hashed,
@@ -876,6 +881,11 @@ static char *ngx_http_zstd_set_enable_slot(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static void ngx_http_zstd_cleanup_dict(void *data);
 static void ngx_http_zstd_cleanup_cctx(void *data);
+#if (NGX_HTTP_ZSTD_HAVE_LIBCRYPTO)
+static void ngx_http_zstd_cleanup_evp_md_ctx(void *data);
+static void ngx_http_zstd_init_evp_md_ctx(ngx_conf_t *cf,
+    ngx_http_zstd_main_conf_t *zmcf);
+#endif
 static void ngx_http_zstd_release_cctx(void *data);
 static ngx_int_t ngx_http_zstd_acquire_cctx(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx, ngx_http_zstd_loc_conf_t *zlcf);
@@ -5783,6 +5793,39 @@ ngx_http_zstd_cleanup_cctx(void *data)
 }
 
 
+#if (NGX_HTTP_ZSTD_HAVE_LIBCRYPTO)
+static void
+ngx_http_zstd_cleanup_evp_md_ctx(void *data)
+{
+    EVP_MD_CTX_free(data);
+}
+
+
+static void
+ngx_http_zstd_init_evp_md_ctx(ngx_conf_t *cf,
+    ngx_http_zstd_main_conf_t *zmcf)
+{
+    ngx_pool_cleanup_t  *cln;
+
+    zmcf->dcz_evp_md_ctx_attempted = 1;
+    zmcf->dcz_evp_md_ctx = EVP_MD_CTX_new();
+    if (zmcf->dcz_evp_md_ctx == NULL) {
+        return;
+    }
+
+    cln = ngx_http_zstd_pool_cleanup_add(cf->pool, 0);
+    if (cln == NULL) {
+        EVP_MD_CTX_free(zmcf->dcz_evp_md_ctx);
+        zmcf->dcz_evp_md_ctx = NULL;
+        return;
+    }
+
+    cln->handler = ngx_http_zstd_cleanup_evp_md_ctx;
+    cln->data = zmcf->dcz_evp_md_ctx;
+}
+#endif
+
+
 /*
  * Return a borrowed worker context to the cache at request end.
  *
@@ -6117,8 +6160,14 @@ ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
          * Default: the negotiation key is the hash of the bytes this
          * load actually read. See the have_hash note above.
          */
+#if (NGX_HTTP_ZSTD_HAVE_LIBCRYPTO)
+        if (!zmcf->dcz_evp_md_ctx_attempted) {
+            ngx_http_zstd_init_evp_md_ctx(cf, zmcf);
+        }
+#endif
         ngx_http_zstd_dcz_dict_hash(bytes.data, size, hash,
-                                    &zmcf->dcz_dicts_hashed);
+                                    &zmcf->dcz_dicts_hashed,
+                                    zmcf->dcz_evp_md_ctx);
 
         if (have_hash
             && ngx_memcmp(supplied, hash,

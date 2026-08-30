@@ -61,16 +61,12 @@ to_hex(const u_char digest[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN], char out[65])
 #if (NGX_HTTP_ZSTD_HAVE_LIBCRYPTO)
 
 /*
- * Scripted fake EVP. Modes:
- *   0 — scribble a partial digest, return failure: the wrapper must
- *       fall back and the portable finaliser must overwrite every byte.
- *   1 — fill the digest, report a WRONG length, return success: the
- *       wrapper's mdlen guard must reject and fall back.
- *   2 — fill the digest with a marker, report the right length, return
- *       success: the wrapper must hand the marker back untouched.
+ * Scripted fake EVP. Modes 0/1/2 fail init/update/final, mode 3 reports a
+ * wrong digest length, and mode 4 succeeds.
  */
 static int  fake_evp_mode;
 static int  fake_evp_calls;
+static unsigned char fake_evp_ctx;
 
 /* Fake EVP_sha256(): an opaque non-NULL token — the wrapper under test
    only passes it through, never dereferences it. */
@@ -80,35 +76,43 @@ EVP_sha256(void)
     return (const EVP_MD *) "fake-sha256";
 }
 
-/* Fake EVP_Digest(): behaves per fake_evp_mode (see above) and counts
-   invocations so the tests can assert the wrapper consulted EVP. */
 int
-EVP_Digest(const void *data, size_t count, unsigned char *md,
-    unsigned int *size, const EVP_MD *type, void *impl)
+EVP_DigestInit_ex(EVP_MD_CTX *ctx, const EVP_MD *type, ENGINE *impl)
 {
-    (void) data;
-    (void) count;
+    (void) ctx;
     (void) type;
     (void) impl;
-
     fake_evp_calls++;
+    return fake_evp_mode != 0;
+}
 
-    switch (fake_evp_mode) {
+int
+EVP_DigestUpdate(EVP_MD_CTX *ctx, const void *data, size_t count)
+{
+    (void) ctx;
+    (void) data;
+    (void) count;
+    fake_evp_calls++;
+    return fake_evp_mode != 1;
+}
 
-    case 0:
-        memset(md, 0x5a, 17);           /* partial scribble, then fail */
+int
+EVP_DigestFinal_ex(EVP_MD_CTX *ctx, unsigned char *md, unsigned int *size)
+{
+    (void) ctx;
+    fake_evp_calls++;
+    if (fake_evp_mode == 2) {
+        memset(md, 0x5a, 17);
         return 0;
-
-    case 1:
+    }
+    if (fake_evp_mode == 3) {
         memset(md, 0x5a, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
-        *size = 16;                     /* "success" with a wrong length */
-        return 1;
-
-    default:
-        memset(md, 0xaa, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
-        *size = NGX_HTTP_ZSTD_SHA256_DIGEST_LEN;
+        *size = 16;
         return 1;
     }
+    memset(md, 0xaa, NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+    *size = NGX_HTTP_ZSTD_SHA256_DIGEST_LEN;
+    return 1;
 }
 
 /* EVP-fallback build: drive the wrapper through the three scripted EVP
@@ -125,30 +129,34 @@ main(void)
         "ba7816bf8f01cfea414140de5dae2223"
         "b00361a396177a9cb410ff61f20015ad";
 
-    /* Mode 0: failure after a partial write -> portable result. */
-    fake_evp_mode = 0;
     fake_evp_calls = 0;
     memset(digest, 0, sizeof(digest));
-    ngx_http_zstd_sha256((const u_char *) abc, 3, digest);
+    ngx_http_zstd_sha256((const u_char *) abc, 3, digest, NULL);
     to_hex(digest, hexdigest);
-    check("EVP failure falls back to the portable implementation",
+    check("missing cycle EVP context falls back to portable SHA-256",
           strcmp(hexdigest, abc_hex) == 0, hexdigest);
-    check("fallback path consulted EVP exactly once",
-          fake_evp_calls == 1, NULL);
+    check("missing cycle EVP context makes no EVP calls",
+          fake_evp_calls == 0, NULL);
 
-    /* Mode 1: success with a wrong mdlen -> guard rejects, fallback. */
-    fake_evp_mode = 1;
-    memset(digest, 0, sizeof(digest));
-    ngx_http_zstd_sha256((const u_char *) abc, 3, digest);
-    to_hex(digest, hexdigest);
-    check("wrong EVP output length is rejected and falls back",
-          strcmp(hexdigest, abc_hex) == 0, hexdigest);
+    for (fake_evp_mode = 0; fake_evp_mode < 4; fake_evp_mode++) {
+        fake_evp_calls = 0;
+        memset(digest, 0, sizeof(digest));
+        ngx_http_zstd_sha256((const u_char *) abc, 3, digest,
+                             (EVP_MD_CTX *) &fake_evp_ctx);
+        to_hex(digest, hexdigest);
+        check("EVP failure falls back to the portable implementation",
+              strcmp(hexdigest, abc_hex) == 0, hexdigest);
+        check("fallback consulted the expected EVP stages",
+              fake_evp_calls == (fake_evp_mode < 3 ? fake_evp_mode + 1 : 3),
+              NULL);
+    }
 
     /* Mode 2: scripted success -> the EVP digest is used verbatim,
        proving the accelerated path is actually taken on success. */
-    fake_evp_mode = 2;
+    fake_evp_mode = 4;
     memset(digest, 0, sizeof(digest));
-    ngx_http_zstd_sha256((const u_char *) abc, 3, digest);
+    ngx_http_zstd_sha256((const u_char *) abc, 3, digest,
+                         (EVP_MD_CTX *) &fake_evp_ctx);
     all_aa = 1;
     for (i = 0; i < NGX_HTTP_ZSTD_SHA256_DIGEST_LEN; i++) {
         if (digest[i] != 0xaa) {
@@ -207,7 +215,7 @@ main(void)
     /* One-shot API against the published vectors. */
     for (i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
         ngx_http_zstd_sha256((const u_char *) vectors[i].input,
-                             vectors[i].len, digest);
+                             vectors[i].len, digest, NULL);
         to_hex(digest, hexdigest);
         snprintf(name, sizeof(name), "NIST vector (%zu bytes)",
                  vectors[i].len);
@@ -230,7 +238,7 @@ main(void)
             "e9b0a925a5258e241c9f1e910f734318";
 
         memset(a55, 'a', sizeof(a55));
-        ngx_http_zstd_sha256(a55, sizeof(a55), digest);
+        ngx_http_zstd_sha256(a55, sizeof(a55), digest, NULL);
         to_hex(digest, hexdigest);
         check("padding-boundary vector (55 x 'a', remainder 55 mod 64)",
               strcmp(hexdigest, a55_hex) == 0, hexdigest);
@@ -271,7 +279,7 @@ main(void)
         buf[i] = (u_char) (lcg >> 24);
     }
 
-    ngx_http_zstd_sha256(buf, buf_len, ref);
+    ngx_http_zstd_sha256(buf, buf_len, ref, NULL);
 
     for (i = 0; i < sizeof(splits) / sizeof(splits[0]); i++) {
         ngx_http_zstd_sha256_init(&c);
