@@ -627,7 +627,8 @@ def check_cadence() -> int:
 # check): a `tar -xzf` or a direct `./configure`/binary invocation is the
 # actual privilege boundary, not the download line above it.
 EXTRACT_OR_EXEC_RE = re.compile(
-    r"(?<![\w-])tar\s+-?x|(?<![\w-])unzip\b|(?<![\w-])/tmp/actionlint\b"
+    r"(?<![\w-])tar\s+-?x|(?<![\w-])unzip(?:\s+-\S+)*\s+\S+\.zip\b|"
+    r"(?<![\w-])/tmp/actionlint\b"
     # Direct execution of a fetched artifact, without any unpacking step in
     # between: `chmod +x tool && ./tool`, or a bare `./tool` / `./tool/x`
     # invocation. A standalone downloaded executable is the same privilege

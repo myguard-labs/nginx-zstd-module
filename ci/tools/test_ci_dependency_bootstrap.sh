@@ -93,4 +93,9 @@ require .github/workflows/valgrind.yml 'openssl'
 require .github/workflows/ci-deep.yml 'openssl'
 require .github/workflows/ci-deep.yml 'sudo apt-get install -y clang curl python3'
 
+# CodeQL inspects its database through Python and unpacks src.zip when the
+# action stores extracted sources as an archive.
+require .github/workflows/codeql.yml 'python3'
+require .github/workflows/codeql.yml 'unzip'
+
 echo 'OK: fork fallback dependencies are explicitly bootstrapped'
