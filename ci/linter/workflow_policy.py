@@ -627,7 +627,7 @@ def check_cadence() -> int:
 # check): a `tar -xzf` or a direct `./configure`/binary invocation is the
 # actual privilege boundary, not the download line above it.
 EXTRACT_OR_EXEC_RE = re.compile(
-    r"(?<![\w-])tar\s+-?x|(?<![\w-])unzip(?:\s+-\S+)*\s+\S+\.zip\b|"
+    r"(?<![\w-])tar\s+-?x|(?m:^[ \t]*unzip(?:\s+-\S+)*\s+\S+)|"
     r"(?<![\w-])/tmp/actionlint\b"
     # Direct execution of a fetched artifact, without any unpacking step in
     # between: `chmod +x tool && ./tool`, or a bare `./tool` / `./tool/x`
@@ -638,6 +638,12 @@ EXTRACT_OR_EXEC_RE = re.compile(
     # the network, which is safe here because the whole check is already
     # scoped to jobs that DO fetch something (see DOWNLOAD_RE).
     r"|(?<![\w./-])\./[\w.-]+"
+)
+
+# CodeQL's pinned analyze action produces this database archive locally. It is
+# not restored by cache or downloaded by the job's wget/curl steps.
+LOCAL_CODEQL_DATABASE_UNZIP_RE = re.compile(
+    r'(?m)^[ \t]*unzip(?:\s+-\S+)*\s+["\']?\$db/src\.zip["\']?\s+-d\s+'
 )
 
 # What counts as a trust-anchor assertion having been made ON THIS PATH
@@ -730,6 +736,7 @@ def check_provenance() -> int:
                 # the same order the shell consumes the commands.
                 if (
                     extract is not None
+                    and not LOCAL_CODEQL_DATABASE_UNZIP_RE.search(run)
                     and not anchored
                     and not TRUST_ANCHOR_RE.search(run[: extract.start()])
                 ):

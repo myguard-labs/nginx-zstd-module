@@ -264,6 +264,9 @@ policy_ 1 provenance-noncomparing-sha256 provenance
 # tar/unzip patterns miss this entirely, yet it is the same privilege
 # boundary one step shorter.
 policy_ 1 provenance-exec-downloaded-binary provenance
+# ZIP files need not retain a .zip extension. The detector must still reject
+# an unverified archive passed to unzip under an extensionless local name.
+policy_ 1 provenance-unverified-unzip provenance
 
 # A mistyped pool label in a schedule-only workflow. The trust half of the
 # runners check does not apply to a workflow no fork can reach, and skipping it
