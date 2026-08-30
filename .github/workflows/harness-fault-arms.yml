@@ -14,8 +14,9 @@ name: Harness Fault Arms
 # -DNGX_TEST_HARNESS and rejects a probe-free binary before running anything.
 #
 # The fixed job name is a check-name contract. It remains visible on every PR
-# but is deliberately not required until the separately documented green-week
-# promotion criterion is met.
+# and is selected by ci.yml on merged master so the separately documented
+# green-week promotion criterion has a stable branch signal. It is not
+# required yet.
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

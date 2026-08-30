@@ -733,9 +733,10 @@ jobs:
         # Before the first `prove` inside coverage.sh -- see ci/tools/max-port.sh.
         run: ci/tools/max-port.sh "$TEST_BASE_PORT"
       - name: Coverage build + report
-        # No COVERAGE_FAIL_UNDER: this job never fails the workflow on a
-        # coverage number, only on the build/test/gcovr steps themselves
-        # failing outright (a real regression, not a metric).
+        env:
+          # Preserve the pre-expansion line-coverage floor while the broader
+          # 86.6% baseline leaves headroom for compiler/version drift.
+          COVERAGE_FAIL_UNDER: "85"
         run: bash ci/tools/coverage.sh nginx
       - name: Upload coverage report
         if: always()

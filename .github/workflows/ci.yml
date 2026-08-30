@@ -1,9 +1,10 @@
 ---
 name: CI
 
-# Single PR gate entry point. Extended CodeQL, fuzz, soak, and coverage work is
-# scheduled by ci-deep.yml; running it here made the merge decision wait on
-# safety-net jobs and duplicated the already-tested tree after every merge.
+# Single PR gate entry point. On merged master, only the testkit harness runs
+# to retain its required-check promotion signal; the already-tested build,
+# lint, scanner, and Windows jobs do not run twice. Extended CodeQL, fuzz,
+# soak, and coverage work is scheduled by ci-deep.yml.
 #
 # Four self-hosted Linux lanes are budgeted explicitly:
 #   1. Build & Test: resolve/validation, then four dependency chains inside
@@ -20,6 +21,8 @@ name: CI
 on:
   pull_request:
     branches: [master, main]
+  push:
+    branches: [master]
   workflow_dispatch: {}
 
 concurrency:
@@ -32,12 +35,14 @@ permissions:
 jobs:
   lint:
     name: Lint
+    if: github.event_name != 'push'
     uses: ./.github/workflows/lint.yml
     permissions:
       contents: read
 
   build-test:
     name: Build & Test
+    if: github.event_name != 'push'
     uses: ./.github/workflows/build-test.yml
     permissions:
       contents: read
@@ -45,6 +50,7 @@ jobs:
   security-scanners:
     # This exact case is part of the existing status-check context.
     name: Security scanners
+    if: github.event_name != 'push'
     uses: ./.github/workflows/security-scanners.yml
     permissions:
       contents: read
@@ -59,6 +65,7 @@ jobs:
 
   windows-build:
     name: Windows build
+    if: github.event_name != 'push'
     uses: ./.github/workflows/windows-build.yml
     permissions:
       contents: read

@@ -112,14 +112,16 @@ runner lanes:
   flags dangerous patterns.
 - **Harness fault arms** (`harness-fault-arms.yml`) — runs all six shared
   nginx-module-testkit scenarios against an instrumented module build.
-  Visible on every PR but not yet a required check.
+  Visible on every PR and rerun on merged `master`, but not yet a required
+  check.
 - **Windows build** (`windows-build.yml`) — compiles the Win32 paths with
   MSVC and MinGW, which the Linux lanes cannot cover.
 
 Long work — two fuzz targets, full coverage, CodeQL, native sanitizer soak,
 compatibility builds, full Memcheck and Helgrind — runs weekly and on manual
 dispatch in `ci-deep.yml`. Its dependency chains keep exactly four
-self-hosted lanes busy without an uncontrolled ready-job burst.
+self-hosted lanes busy without an uncontrolled ready-job burst. The expanded
+coverage report enforces an 85% line floor.
 
 Your PR merges when **all** checks are green. If a gate fails and you
 believe the gate is wrong, say so in the PR — with evidence, not vibes.

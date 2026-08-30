@@ -49,8 +49,18 @@ def check_ci(ci: dict) -> list[str]:
             errors.append(f"ci.yml:{job} must remain an independent call to {target}")
     trigger = ci.get("on", ci.get(True, {}))
     trigger_names = set(trigger) if isinstance(trigger, dict) else set(trigger or [])
-    if trigger_names != {"pull_request", "workflow_dispatch"}:
-        errors.append("ci.yml must remain PR-only plus manual dispatch")
+    if trigger_names != {"pull_request", "push", "workflow_dispatch"}:
+        errors.append("ci.yml must remain PR/manual plus the focused master signal")
+    elif not isinstance(trigger["push"], dict) or trigger["push"].get("branches") != [
+        "master"
+    ]:
+        errors.append("ci.yml push must remain limited to master")
+    push_guard = "github.event_name != 'push'"
+    for job in ("lint", "build-test", "security-scanners", "windows-build"):
+        if jobs.get(job, {}).get("if") != push_guard:
+            errors.append(f"ci.yml:{job} must skip the focused master signal")
+    if jobs.get("harness-fault-arms", {}).get("if") is not None:
+        errors.append("ci.yml:harness-fault-arms must run on the master signal")
 
     return errors
 
@@ -163,6 +173,12 @@ def selftest(ci: dict, build: dict, deep: dict) -> int:
     changed = copy.deepcopy(ci)
     changed["jobs"]["security-scanners"]["uses"] = "./.github/workflows/valgrind.yml"
     cases.append(("rewired PR workflow call", changed, build, deep))
+    changed = copy.deepcopy(ci)
+    del changed["jobs"]["build-test"]["if"]
+    cases.append(("duplicate master build", changed, build, deep))
+    changed = copy.deepcopy(ci)
+    changed[True]["push"] = None
+    cases.append(("unbounded master signal", changed, build, deep))
     changed = copy.deepcopy(build)
     changed["jobs"]["build"]["needs"] = ["resolve", "validation"]
     cases.append(("lost PR lane overlap", ci, changed, deep))

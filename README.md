@@ -1318,8 +1318,9 @@ skip is otherwise unobservable when a supplied hash matches the file.
 
 [`ci.yml`](.github/workflows/ci.yml) is the single PR gate entry point. It calls
 the bounded merge checks below; each member also keeps `workflow_dispatch:` so
-it can be run alone from the Actions tab. The duplicate post-merge `push` run
-is intentionally absent.
+it can be run alone from the Actions tab. On merged `master`, CI selects only
+the testkit harness to preserve its promotion signal without duplicating the
+build, lint, scanner, or Windows jobs.
 
 Long jobs are deliberately not called from it. **CI Deep** runs them weekly in
 four explicit self-hosted dependency chains; **Bump** opens version-bump PRs
@@ -1327,13 +1328,13 @@ rather than gating them.
 
 | Workflow | Cadence | What it does |
 |---|---|---|
-| **CI** ([`ci.yml`](.github/workflows/ci.yml)) | every PR + manual | Calls only Lint, Build&Test, Security Scanners, Harness Fault Arms, and the hosted Windows build. Four Linux jobs are initially runnable; dependency chains refill each lane as it becomes free. |
+| **CI** ([`ci.yml`](.github/workflows/ci.yml)) | every PR + focused merged `master` signal + manual | Calls only Lint, Build&Test, Security Scanners, Harness Fault Arms, and the hosted Windows build. Four Linux jobs are initially runnable; dependency chains refill each lane as it becomes free. Only Harness Fault Arms runs on merged `master`. |
 | **Lint** ([`lint.yml`](.github/workflows/lint.yml)) | PR via CI + manual | Runs local deterministic checks, including runner trust, port bands, cadence, provenance, and the enforced four-lane topology. |
 | **Build&Test** ([`build-test.yml`](.github/workflows/build-test.yml)) | PR via CI + manual | Builds nginx mainline with strict warnings, runs the full Test::Nginx and runtime regression suites, tests libzstd 1.4.x fallbacks, linkage variants, arm64, and the full suite under ASAN/UBSAN. Its dependency graph forms four self-hosted lane chains. |
 | **Security Scanners** ([`security-scanners.yml`](.github/workflows/security-scanners.yml)) | PR via CI, weekly deep + manual | Runs flawfinder, clang-tidy, and semgrep over the module sources. |
-| **Harness Fault Arms** ([`harness-fault-arms.yml`](.github/workflows/harness-fault-arms.yml)) | PR via CI + manual, not required | Builds with the shared [`nginx-module-testkit`](https://github.com/myguard-labs/nginx-module-testkit) and runs all six fault, allocation, codec-count, and parameter-count scenarios through one non-vacuous scenario runner. |
+| **Harness Fault Arms** ([`harness-fault-arms.yml`](.github/workflows/harness-fault-arms.yml)) | PR and merged `master` via CI + manual, not required | Builds with the shared [`nginx-module-testkit`](https://github.com/myguard-labs/nginx-module-testkit) and runs all six fault, allocation, codec-count, and parameter-count scenarios through one non-vacuous scenario runner. |
 | **Windows build** ([`windows-build.yml`](.github/workflows/windows-build.yml)) | PR via CI + manual | Builds and smoke-checks MSVC x64 static and MinGW-w64 x64 dynamic modules. |
-| **CI Deep** ([`ci-deep.yml`](.github/workflows/ci-deep.yml)) | weekly + manual | Runs four explicit chains: two long fuzz targets; Memcheck then coverage, CodeQL, serialized nginx/stable/Angie builds, scanners, and native A/UBSan; and all six testkit scenarios under Memcheck followed by Helgrind. Coverage includes all Test::Nginx suites, broad assertion-bearing runtime drivers, and all testkit scenarios. |
+| **CI Deep** ([`ci-deep.yml`](.github/workflows/ci-deep.yml)) | weekly + manual | Runs four explicit chains: two long fuzz targets; Memcheck then coverage, CodeQL, serialized nginx/stable/Angie builds, scanners, and native A/UBSan; and all six testkit scenarios under Memcheck followed by Helgrind. Coverage includes all Test::Nginx suites, broad assertion-bearing runtime drivers, and all testkit scenarios, with an 85% line floor. |
 | **Fuzzing** ([`fuzzing.yml`](.github/workflows/fuzzing.yml)) | manual | Provides targeted short runs. CI Deep runs its own long jobs for both parser targets. See [`ci/fuzz/README.md`](ci/fuzz/README.md). |
 | **Valgrind** ([`valgrind.yml`](.github/workflows/valgrind.yml)) | manual | Provides a targeted Memcheck-lite run. CI Deep runs its own full Memcheck and Helgrind soaks. |
 | **CodeQL** ([`codeql.yml`](.github/workflows/codeql.yml)) | manual/reusable; weekly via CI Deep | Runs GitHub's semantic C/C++ `security-extended` analysis. |
