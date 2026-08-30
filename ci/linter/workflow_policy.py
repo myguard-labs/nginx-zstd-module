@@ -645,7 +645,8 @@ EXTRACT_OR_EXEC_RE = re.compile(
 #   - a checksum COMPARISON -- `sha256sum -c`, or a digest captured into a
 #     variable that is then tested against a pinned `*_SHA256`
 #   - delegating to a helper this repo already verified for the SAME
-#     property (ci-build.sh, fetch-verified-nginx.sh)
+#     property (ci-build.sh, fetch-verified-nginx.sh,
+#     verify-nginx-tarball.sh)
 #
 # A bare `sha256sum tool.tgz` PRINTS a digest and compares nothing, and a
 # lone `FOO_SHA256:` env declaration is a pinned value nothing tests. Both
@@ -667,7 +668,7 @@ TRUST_ANCHOR_RE = re.compile(
     r"|(?:\bif\b|\btest\b|\[|!=|==)[^\n]*_SHA256\b"
     r"|_SHA256\b[^\n]*(?:!=|==|\|\||&&)"
     # helpers whose own verification this repo already reviewed
-    r"|ci-build\.sh|fetch-verified-nginx\.sh"
+    r"|ci-build\.sh|fetch-verified-nginx\.sh|verify-nginx-tarball\.sh"
 )
 
 # A step that only DOWNLOADS and does not itself extract or execute is not a
@@ -723,21 +724,25 @@ def check_provenance() -> int:
                 continue
             anchored = False
             for i, run in enumerate(runs):
-                if TRUST_ANCHOR_RE.search(run):
-                    anchored = True
                 extract = EXTRACT_OR_EXEC_RE.search(run)
-                if extract is not None:
-                    # Same-step trust anchor still counts: a script/step
-                    # written as one shell block can verify then extract in
-                    # sequence, same as the ordering check's same-step case.
-                    if anchored or TRUST_ANCHOR_RE.search(run[: extract.start()]):
-                        continue
+                # Same-step trust anchors count only before extraction, in
+                # the same order the shell consumes the commands.
+                if (
+                    extract is not None
+                    and not anchored
+                    and not TRUST_ANCHOR_RE.search(run[: extract.start()])
+                ):
                     errors.append(
                         f"{path.name}:{job} step {i + 1} extracts or executes "
                         "a downloaded artifact with no gpg/sha256 trust-anchor "
                         "assertion earlier in the job -- verify before "
                         "extraction/execution, cache-hit path included"
                     )
+                # A same-step anchor only protects later commands. Recording
+                # it before the extraction check lets `tar ...; verify ...`
+                # satisfy the gate after untrusted bytes already executed.
+                if TRUST_ANCHOR_RE.search(run):
+                    anchored = True
     return report(
         "lint-ci-provenance",
         errors,

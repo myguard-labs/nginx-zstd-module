@@ -219,6 +219,9 @@ jobs:
       - name: ci-build.sh clean-root + provenance regressions (F2/F3)
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_ci_build_provenance.sh
 
+      - name: nginx tarball PGP verifier controls
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_verify_nginx_tarball.sh
+
       - name: Shell script linting (shellcheck)
         run: |
           # Gate on error-severity findings (real bugs); style/info noise does
@@ -610,17 +613,7 @@ jobs:
         env:
           MATRIX_DIR: ${{ matrix.dir }}
           MATRIX_URL: ${{ matrix.url }}
-        run: |
-          set -euo pipefail
-          wget -q -O "$MATRIX_DIR.tar.gz.asc" "$MATRIX_URL.asc"
-          gnupghome="$(mktemp -d)"
-          export GNUPGHOME="$gnupghome"
-          chmod 700 "$gnupghome"
-          for keyfile in ci/tools/keys/*.key; do
-            gpg --quiet --import "$keyfile" 2>/dev/null
-          done
-          gpg --quiet --verify "$MATRIX_DIR.tar.gz.asc" "$MATRIX_DIR.tar.gz"
-          rm -rf "$gnupghome"
+        run: ci/tools/verify-nginx-tarball.sh "$MATRIX_DIR.tar.gz" "$MATRIX_URL.asc"
 
       - name: Configure (full debug build)
         env:
@@ -760,18 +753,7 @@ jobs:
         run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Verify nginx tarball PGP signature
-        run: |
-          set -euo pipefail
-          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
-            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
-          gnupghome="$(mktemp -d)"
-          export GNUPGHOME="$gnupghome"
-          chmod 700 "$gnupghome"
-          for keyfile in ci/tools/keys/*.key; do
-            gpg --quiet --import "$keyfile" 2>/dev/null
-          done
-          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
-          rm -rf "$gnupghome"
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Configure arm64 build
         run: |
@@ -1006,18 +988,7 @@ jobs:
         run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Verify nginx tarball PGP signature
-        run: |
-          set -euo pipefail
-          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
-            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
-          gnupghome="$(mktemp -d)"
-          export GNUPGHOME="$gnupghome"
-          chmod 700 "$gnupghome"
-          for keyfile in ci/tools/keys/*.key; do
-            gpg --quiet --import "$keyfile" 2>/dev/null
-          done
-          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
-          rm -rf "$gnupghome"
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Configure & build nginx with module against libzstd 1.4.x
         run: |
@@ -1164,18 +1135,7 @@ jobs:
         run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Verify nginx tarball PGP signature
-        run: |
-          set -euo pipefail
-          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
-            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
-          gnupghome="$(mktemp -d)"
-          export GNUPGHOME="$gnupghome"
-          chmod 700 "$gnupghome"
-          for keyfile in ci/tools/keys/*.key; do
-            gpg --quiet --import "$keyfile" 2>/dev/null
-          done
-          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
-          rm -rf "$gnupghome"
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Configure with zstd + stubs as dynamic modules, build
         # Full build (not just `make modules`): the vary-suppression
@@ -1409,18 +1369,7 @@ jobs:
         run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Verify nginx tarball PGP signature
-        run: |
-          set -euo pipefail
-          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
-            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
-          gnupghome="$(mktemp -d)"
-          export GNUPGHOME="$gnupghome"
-          chmod 700 "$gnupghome"
-          for keyfile in ci/tools/keys/*.key; do
-            gpg --quiet --import "$keyfile" 2>/dev/null
-          done
-          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
-          rm -rf "$gnupghome"
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Clone compression_vary module at the pin
         run: |
@@ -1570,18 +1519,7 @@ jobs:
         run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Verify nginx tarball PGP signature
-        run: |
-          set -euo pipefail
-          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
-            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
-          gnupghome="$(mktemp -d)"
-          export GNUPGHOME="$gnupghome"
-          chmod 700 "$gnupghome"
-          for keyfile in ci/tools/keys/*.key; do
-            gpg --quiet --import "$keyfile" 2>/dev/null
-          done
-          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
-          rm -rf "$gnupghome"
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Configure & build nginx with ASAN + UBSAN
         env:
@@ -2323,18 +2261,7 @@ jobs:
         run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Verify nginx tarball PGP signature
-        run: |
-          set -euo pipefail
-          wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc" \
-            -O "nginx-${NGINX_VERSION}.tar.gz.asc"
-          gnupghome="$(mktemp -d)"
-          export GNUPGHOME="$gnupghome"
-          chmod 700 "$gnupghome"
-          for keyfile in ci/tools/keys/*.key; do
-            gpg --quiet --import "$keyfile" 2>/dev/null
-          done
-          gpg --quiet --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz"
-          rm -rf "$gnupghome"
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
 
       - name: Configure & build nginx with --coverage instrumentation
         env:

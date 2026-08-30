@@ -20,32 +20,18 @@ set -euo pipefail
 
 VERSION="${1:?usage: fetch-verified-nginx.sh <version>}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KEYRING_DIR="$SCRIPT_DIR/keys"
 
 DIR="nginx-${VERSION}"
 TARBALL="${DIR}.tar.gz"
 URL="https://nginx.org/download/${TARBALL}"
 
 if [ ! -f "$TARBALL" ]; then
-    wget -q -O "$TARBALL" "$URL"
+	wget -q -O "$TARBALL" "$URL"
 fi
-wget -q -O "${TARBALL}.asc" "${URL}.asc"
-
-gnupghome="$(mktemp -d)"
-export GNUPGHOME="$gnupghome"
-chmod 700 "$gnupghome"
-for keyfile in "$KEYRING_DIR"/*.key; do
-    gpg --quiet --import "$keyfile" 2>/dev/null
-done
-
-if gpg --quiet --verify "${TARBALL}.asc" "$TARBALL"; then
-    echo "✓ PGP signature verified for ${TARBALL}"
-else
-    echo "✗ PGP signature verification FAILED for ${TARBALL}" >&2
-    rm -rf "$gnupghome" "$TARBALL" "${TARBALL}.asc"
-    exit 1
+if ! "$SCRIPT_DIR/verify-nginx-tarball.sh" "$TARBALL" "${URL}.asc"; then
+	echo "PGP signature verification failed for ${TARBALL}" >&2
+	rm -f "$TARBALL" "${TARBALL}.asc"
+	exit 1
 fi
-rm -rf "$gnupghome"
-unset GNUPGHOME
 
 tar -xzf "$TARBALL"

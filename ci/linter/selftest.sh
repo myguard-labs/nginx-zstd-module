@@ -234,6 +234,9 @@ policy_ 0 secrets-typed-ok secrets
 # not equally consistent with "any download in a job is flagged".
 policy_ 1 provenance-unverified-extract provenance
 policy_ 0 provenance-verified-ok provenance
+# A reviewed verification helper named later in the SAME run block cannot
+# retroactively protect extraction that occurred earlier in that block.
+policy_ 1 provenance-verify-helper-after-extract provenance
 # The trap this check exists to close: the download step is gated
 # `cache-hit != 'true'`, so a cache HIT skips it entirely and a checker that
 # only looks for a download step present would read the job as having
