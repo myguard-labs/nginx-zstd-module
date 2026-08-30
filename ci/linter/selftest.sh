@@ -77,6 +77,12 @@ case_ 23 "dictionary work list rejects partial output followed by failure" \
 case_ 23 "coverage work list rejects partial output followed by failure" \
     env MAPFILE_CHECKED_FAULT=partial-error ci/tools/coverage.sh \
         --selftest-work-list "$ROOT"
+case_ 23 "docs directive list rejects partial output followed by failure" \
+    env MAPFILE_CHECKED_FAULT=partial-error ci/tools/test_docs_ci_drift.sh \
+        --selftest-directive-list
+case_ 23 "docs workflow list rejects partial output followed by failure" \
+    env MAPFILE_CHECKED_FAULT=partial-error ci/tools/test_docs_ci_drift.sh \
+        --selftest-workflow-list
 
 # ----------------------------------------------------------------------------
 # workflow_policy.py -- the red path of each policy check.

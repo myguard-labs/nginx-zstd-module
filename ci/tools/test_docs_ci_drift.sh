@@ -30,6 +30,34 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # below would then report every workflow undocumented.
 MODULE_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 cd "$MODULE_DIR" || exit 1
+# shellcheck source=ci/linter/lib.sh
+. "$MODULE_DIR/ci/linter/lib.sh"
+
+collect_directives() {
+    mapfile_checked DIRECTIVES sed -n \
+        's/^### \(zstd[_a-z]*\)$/\1/p' README.md
+}
+
+produce_readme_workflows() {
+    grep -oE 'workflows/[A-Za-z0-9_-]+\.yml' README.md \
+        | sed 's#workflows/##' \
+        | sort -u
+}
+
+collect_readme_workflows() {
+    mapfile_checked README_WORKFLOWS produce_readme_workflows
+}
+
+case "${1:-}" in
+    --selftest-directive-list)
+        collect_directives || exit $?
+        exit 0
+        ;;
+    --selftest-workflow-list)
+        collect_readme_workflows || exit $?
+        exit 0
+        ;;
+esac
 
 fail=0
 toc="$(sed -n '/^# Table of Contents$/,/^# Status$/p' README.md)"
@@ -37,12 +65,13 @@ local_suites="$(sed -n '/^Run the suites locally:/,/^# Unit tests/p' README.md)"
 deep_suite_step="$(sed -n '/name: Run ci\/t\//,/^  fuzz:/p' .github/workflows/ci-deep.yml)"
 
 # Every public directive heading must be reachable from the README index.
-while IFS= read -r directive; do
+collect_directives || exit $?
+for directive in "${DIRECTIVES[@]}"; do
     if ! grep -Fq -- "[$directive](#$directive)" <<<"$toc"; then
         echo "FAIL: README directive section $directive is missing from the table of contents"
         fail=1
     fi
-done < <(sed -n 's/^### \(zstd[_a-z]*\)$/\1/p' README.md)
+done
 
 # Commands advertised as the local/deep full suite must include every Perl suite.
 for suite in ci/t/*.t; do
@@ -68,12 +97,13 @@ for wf in .github/workflows/*.yml; do
 done
 
 # --- every workflow filename README.md references actually exists ---
-while IFS= read -r name; do
+collect_readme_workflows || exit $?
+for name in "${README_WORKFLOWS[@]}"; do
     [ -f ".github/workflows/$name" ] || {
         echo "FAIL: README.md references .github/workflows/$name, which does not exist (stale/dead link or badge)"
         fail=1
     }
-done < <(grep -oE 'workflows/[A-Za-z0-9_-]+\.yml' README.md | sed 's#workflows/##' | sort -u)
+done
 
 # --- SECURITY.md must not link the removed AGENTS.md ---
 if [ -f SECURITY.md ] && grep -q 'AGENTS\.md' SECURITY.md; then
