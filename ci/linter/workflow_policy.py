@@ -627,7 +627,7 @@ def check_cadence() -> int:
 # check): a `tar -xzf` or a direct `./configure`/binary invocation is the
 # actual privilege boundary, not the download line above it.
 EXTRACT_OR_EXEC_RE = re.compile(
-    r"(?<![\w-])tar\s+-?x|(?m:^[ \t]*unzip(?:\s+-\S+)*\s+\S+)|"
+    r"(?<![\w-])tar\s+-?x|(?m:(?:^[ \t]*|&&[ \t]*|\|\|[ \t]*|;[ \t]*|\bthen[ \t]+)unzip\b)|"
     r"(?<![\w-])/tmp/actionlint\b"
     # Direct execution of a fetched artifact, without any unpacking step in
     # between: `chmod +x tool && ./tool`, or a bare `./tool` / `./tool/x`
@@ -643,7 +643,8 @@ EXTRACT_OR_EXEC_RE = re.compile(
 # CodeQL's pinned analyze action produces this database archive locally. It is
 # not restored by cache or downloaded by the job's wget/curl steps.
 LOCAL_CODEQL_DATABASE_UNZIP_RE = re.compile(
-    r'(?m)^[ \t]*unzip(?:\s+-\S+)*\s+["\']?\$db/src\.zip["\']?\s+-d\s+'
+    r"(?m)(?:^[ \t]*|&&[ \t]*|\|\|[ \t]*|;[ \t]*|\bthen[ \t]+)"
+    r'unzip(?:\s+-\S+)*\s+["\']?\$db/src\.zip["\']?\s+-d\s+'
 )
 
 # What counts as a trust-anchor assertion having been made ON THIS PATH
@@ -731,21 +732,24 @@ def check_provenance() -> int:
                 continue
             anchored = False
             for i, run in enumerate(runs):
-                extract = EXTRACT_OR_EXEC_RE.search(run)
                 # Same-step trust anchors count only before extraction, in
                 # the same order the shell consumes the commands.
-                if (
-                    extract is not None
-                    and not LOCAL_CODEQL_DATABASE_UNZIP_RE.search(run)
-                    and not anchored
-                    and not TRUST_ANCHOR_RE.search(run[: extract.start()])
-                ):
-                    errors.append(
-                        f"{path.name}:{job} step {i + 1} extracts or executes "
-                        "a downloaded artifact with no gpg/sha256 trust-anchor "
-                        "assertion earlier in the job -- verify before "
-                        "extraction/execution, cache-hit path included"
-                    )
+                local_extract_starts = {
+                    match.start()
+                    for match in LOCAL_CODEQL_DATABASE_UNZIP_RE.finditer(run)
+                }
+                for extract in EXTRACT_OR_EXEC_RE.finditer(run):
+                    if extract.start() in local_extract_starts:
+                        continue
+                    if not anchored and not TRUST_ANCHOR_RE.search(
+                        run[: extract.start()]
+                    ):
+                        errors.append(
+                            f"{path.name}:{job} step {i + 1} extracts or executes "
+                            "a downloaded artifact with no gpg/sha256 trust-anchor "
+                            "assertion earlier in the job -- verify before "
+                            "extraction/execution, cache-hit path included"
+                        )
                 # A same-step anchor only protects later commands. Recording
                 # it before the extraction check lets `tar ...; verify ...`
                 # satisfy the gate after untrusted bytes already executed.
