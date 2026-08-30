@@ -301,6 +301,14 @@ jobs:
           # coverage. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_max_length_cap_unit.sh
 
+          # The normal body-filter path walks caller-owned chain links through
+          # a local cursor and allocates wrappers only for a tail retained
+          # across callbacks. Extracts the shipped cursor/copy helpers and
+          # pins fully drained zero-allocation, partial/backpressured input,
+          # retained-before-new ordering, many links, flush/last carriers and
+          # lazy-copy allocation failure without mutating caller links.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_input_chain_cursor_unit.sh
+
       - name: compressBound skip gate unit fixture (size_t-width correctness)
         run: |
           # A27-F4: get_buf()'s ZSTD_compressBound() skip is gated on a
