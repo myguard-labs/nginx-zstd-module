@@ -21,11 +21,25 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODULE_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 CI_BUILD="$SCRIPT_DIR/ci-build.sh"
 
 fail=0
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+copy_build_fixture() {
+    local destination="$1"
+    local input
+
+    while IFS= read -r input || [ -n "$input" ]; do
+        case "$input" in
+            '' | \#*) continue ;;
+        esac
+        mkdir -p "$destination/$(dirname "$input")" || return 1
+        cp -a "$MODULE_DIR/$input" "$destination/$input" || return 1
+    done < "$MODULE_DIR/ci/build-inputs.manifest"
+}
 
 # ---------------------------------------------------------------------
 # F3a: wrong sha256 pin must be rejected for a statically-pinned version,
@@ -39,8 +53,17 @@ test_wrong_sha256_rejected() {
     # angie path is simpler to fake: sha256-only, no PGP.
     echo "not a real tarball" >"$root/angie-9.9.9.tar.gz"
 
-    local copy="$WORK/ci-build-badpin.sh"
-    cp "$CI_BUILD" "$copy"
+    local fixture="$WORK/f3-module"
+    if ! copy_build_fixture "$fixture"; then
+        echo "FAIL: could not stage the hermetic ci-build fixture"
+        return 1
+    fi
+    local copy="$fixture/ci/tools/ci-build.sh"
+    if [ ! -f "$fixture/ci/tools/build-input-hash.sh" ] || \
+        [ ! -f "$fixture/ci/build-inputs.manifest" ]; then
+        echo "FAIL: hermetic ci-build fixture is missing canonical hash inputs"
+        return 1
+    fi
     # Force a pin that cannot possibly match the fake tarball's digest.
     sed -i 's/\["1\.11\.5"\]=.*/["9.9.9"]="0000000000000000000000000000000000000000000000000000000000000"/' "$copy"
 

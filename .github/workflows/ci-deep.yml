@@ -161,11 +161,15 @@ jobs:
             build-essential curl libpcre2-dev libzstd-dev pkg-config \
             wget zstd libperl-dev cpanminus ccache mold
 
+      - name: Hash module build inputs
+        id: build-inputs
+        run: echo "hash=$(bash ci/tools/build-input-hash.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Cache ccache objects
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/.ccache
-          key: ccache-ci-deep-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('ci/tools/ci-build.sh', 'config', 'src/**') }}
+          key: ccache-ci-deep-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ steps.build-inputs.outputs.hash }}
           restore-keys: |
             ccache-ci-deep-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-
             ccache-ci-deep-${{ runner.os }}-
@@ -182,7 +186,7 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: .build/${{ matrix.flavor }}-${{ matrix.version }}
-          key: build-tree-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('ci/tools/ci-build.sh', 'config', 'src/**') }}
+          key: build-tree-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ steps.build-inputs.outputs.hash }}
 
       - name: Build server and dynamic modules
         # No CCACHE_DIR override: ccache's own default (~/.ccache) already

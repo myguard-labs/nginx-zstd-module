@@ -219,6 +219,9 @@ jobs:
       - name: ci-build.sh clean-root + provenance regressions (F2/F3)
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_ci_build_provenance.sh
 
+      - name: Persistent build-input invalidation regressions
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_build_input_manifest.sh
+
       - name: nginx tarball PGP verifier controls
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_verify_nginx_tarball.sh
 
@@ -603,11 +606,15 @@ jobs:
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
+      - name: Hash module build inputs
+        id: build-inputs
+        run: echo "hash=$(bash ci/tools/build-input-hash.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Cache ccache objects
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ hashFiles('filter/*.c', 'static/*.c', '*.h', 'config') }}
+          key: ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-${{ steps.build-inputs.outputs.hash }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.flavor }}-${{ matrix.version }}-
             ccache-${{ runner.os }}-
