@@ -37,14 +37,16 @@ jobs:
   lint:
     name: Lint
     if: github.event_name != 'push'
-    uses: ./.github/workflows/lint.yml
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/lint.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 
   build-test:
     name: Build & Test
     if: github.event_name != 'push'
-    uses: ./.github/workflows/build-test.yml
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/build-test.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 
@@ -52,7 +54,8 @@ jobs:
     # This exact case is part of the existing status-check context.
     name: Security scanners
     if: github.event_name != 'push'
-    uses: ./.github/workflows/security-scanners.yml
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/security-scanners.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 
@@ -60,13 +63,15 @@ jobs:
     # Kept in the fast gate because it reaches module-internal fault/resource
     # paths that Test::Nginx and ordinary sanitizers cannot observe.
     name: Harness Fault Arms
-    uses: ./.github/workflows/harness-fault-arms.yml
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/harness-fault-arms.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 
   windows-build:
     name: Windows build
     if: github.event_name != 'push'
-    uses: ./.github/workflows/windows-build.yml
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/windows-build.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read

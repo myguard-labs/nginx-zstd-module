@@ -666,7 +666,8 @@ jobs:
         !cancelled()
         && contains(fromJSON('["all","scanners"]'), inputs.jobs || 'all')
       }}
-    uses: ./.github/workflows/security-scanners.yml
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/security-scanners.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 
@@ -754,7 +755,8 @@ jobs:
     name: CodeQL
     needs: coverage
     if: ${{ !cancelled() && (inputs.jobs || 'all') == 'all' }}
-    uses: ./.github/workflows/codeql.yml
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/codeql.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
       security-events: write # upload CodeQL SARIF to code scanning
@@ -763,6 +765,7 @@ jobs:
     name: A/UBSan soak
     needs: scanners
     if: ${{ !cancelled() && (inputs.jobs || 'all') == 'all' }}
-    uses: ./.github/workflows/asan.yml
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/asan.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
