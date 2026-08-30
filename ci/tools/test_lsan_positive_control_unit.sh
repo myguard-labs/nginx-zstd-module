@@ -84,6 +84,22 @@ run_case 0 "clean marker with passing canary passes" 0 "$WORK/clean.log"
 run_case 2 "every process log must contain the exit-hook marker" 0 \
     "$WORK/clean.log" "$WORK/preflight-without-check.log"
 
+MAPFILE_CHECKED_FAULT=partial-error
+export MAPFILE_CHECKED_FAULT
+if lsan_check_log_glob "$WORK/*.log" >/dev/null 2>&1
+then
+    list_rc=0
+else
+    list_rc=$?
+fi
+unset MAPFILE_CHECKED_FAULT
+if [ "$list_rc" -eq 23 ]; then
+    echo "OK: partial log-list producer failure is propagated (rc=23)"
+else
+    echo "FAIL: partial log-list producer failure -- rc=$list_rc, want 23" >&2
+    fail=1
+fi
+
 # Negative control: the old gate failed solely on LLVM's heuristic warning,
 # even when the same log proved the real leak check started and the deliberate
 # leak control passed. Reproduce that exact false-red decision.

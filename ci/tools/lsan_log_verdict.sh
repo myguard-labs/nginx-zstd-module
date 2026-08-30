@@ -16,6 +16,8 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/linter/lib.sh
+. "$SCRIPT_DIR/../linter/lib.sh"
 # shellcheck source=ci/tools/lsan_positive_control.sh
 . "$SCRIPT_DIR/lsan_positive_control.sh"
 
@@ -78,7 +80,10 @@ lsan_check_log_glob() {
     local pattern="$1" control_rc
     local -a logs=()
 
-    mapfile -t logs < <(compgen -G "$pattern" | sort)
+    # The quoted program executes in the child.
+    # shellcheck disable=SC2016
+    mapfile_checked logs env LC_ALL=C bash -c \
+        'compgen -G "$1" || [ $? -eq 1 ]' _ "$pattern" || return $?
     if lsan_positive_control; then
         control_rc=0
     else
