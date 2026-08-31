@@ -10,13 +10,31 @@ assert_contract() {
   grep -Fq "'^(src|ci)/.*\.[ch]$'" "$base/ci/linter/lint-c.sh" || return 1
   [ "$(grep -Fc "files: '^(src|ci)/.*\.[ch]$'" "$base/.pre-commit-config.yaml")" -ge 3 ] \
     || return 1
-  # The workflow expression is intentionally literal.
-  # shellcheck disable=SC2016
-  grep -Fq '"$GITHUB_WORKSPACE/ci/"' \
-    "$base/.github/workflows/security-scanners.yml" || return 1
-  # shellcheck disable=SC2016
-  grep -Fq 'find "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/ci"' \
-    "$base/.github/workflows/security-scanners.yml" || return 1
+  # Check each owning step independently: both must use checked discovery and
+  # pass the explicit C-file array rather than a directory to the scanner.
+  python3 - "$base/.github/workflows/security-scanners.yml" <<'PY' || return 1
+import pathlib, re, sys, yaml
+
+doc = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+steps = doc["jobs"]["scanners"]["steps"]
+for name, command in (("flawfinder", "flawfinder"), ("semgrep", "semgrep scan")):
+    run = next(step["run"] for step in steps if step.get("name") == name)
+    required = (
+        'mapfile_checked files find',
+        '"$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/ci"',
+        "-name '*.c'", "-name '*.h'",
+        '[ "${#files[@]}" -gt 0 ]',
+    )
+    if not all(token in run for token in required):
+        raise SystemExit(f"{name} does not discover checked src+ci C/H targets")
+    invocation = rf'^\s*{re.escape(command)}\b.*?"\$\{{files\[@\]\}}".*?\|\s*tee'
+    if re.search(invocation, run, re.MULTILINE | re.DOTALL) is None:
+        raise SystemExit(f"{name} command does not consume the C target array")
+    if name == "flawfinder" and "--error-level=4" not in run:
+        raise SystemExit("flawfinder findings are not blocking at level 4")
+    if name == "semgrep" and re.search(r'(?<![-\w])--error(?![-\w])', run) is None:
+        raise SystemExit("Semgrep findings are not blocking")
+PY
   [ "$(grep -Fc -- '-max_len=65536' "$base/.github/workflows/fuzzing.yml")" -ge 2 ] \
     || return 1
   grep -Fq -- '-max_len=65536' "$base/.github/workflows/ci-deep.yml" \
@@ -42,4 +60,23 @@ if assert_contract "$work" >/dev/null 2>&1; then
   exit 1
 fi
 assert_contract
+
+# The exact CI Semgrep profiles must still block a real C finding. Keep the
+# source under a non-C suffix so the repository's normal widened scan stays
+# clean; copy it to the temporary C target only for this negative control.
+if command -v semgrep >/dev/null 2>&1; then
+	cp ci/linter/fixtures/semgrep-blocking.c.fixture "$work/blocking.c"
+	set +e
+	semgrep scan --config p/c --config p/security-audit \
+		--severity=WARNING --severity=ERROR --error --jobs=1 --metrics=off \
+		"$work/blocking.c" >"$work/semgrep-negative.log" 2>&1
+	semgrep_rc=$?
+	set -e
+	if [ "$semgrep_rc" -ne 1 ]; then
+		echo "FAIL: Semgrep negative control returned $semgrep_rc, want finding status 1" >&2
+		cat "$work/semgrep-negative.log" >&2
+		exit 1
+	fi
+  echo 'OK: Semgrep C finding remains blocking'
+fi
 echo 'OK: CI C scanner selectors and >4096 fuzz boundaries are enforced'

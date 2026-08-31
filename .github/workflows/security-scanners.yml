@@ -86,8 +86,10 @@ jobs:
         # lint-c.sh in the SAME commit.
         run: |
           set -o pipefail
-          mapfile -d '' files < <(find "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/ci" \
-            -type f \( -name '*.c' -o -name '*.h' \) -print0)
+          source "$GITHUB_WORKSPACE/ci/linter/lib.sh"
+          mapfile_checked files find "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/ci" \
+            -type f \( -name '*.c' -o -name '*.h' \) -print
+          [ "${#files[@]}" -gt 0 ] || { echo 'no C scanner targets found' >&2; exit 1; }
           flawfinder --minlevel=4 --error-level=4 "${files[@]}" \
             2>&1 | tee flawfinder.log
       - name: clang-tidy (cert-*, security.*)
@@ -118,10 +120,14 @@ jobs:
         # this step could never fail on a real finding.
         run: |
           set -o pipefail
+          source "$GITHUB_WORKSPACE/ci/linter/lib.sh"
+          mapfile_checked files find "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/ci" \
+            -type f \( -name '*.c' -o -name '*.h' \) -print
+          [ "${#files[@]}" -gt 0 ] || { echo 'no C scanner targets found' >&2; exit 1; }
           semgrep scan --config p/c --config p/security-audit \
             --severity=WARNING --severity=ERROR --error \
             --jobs=1 --metrics=off \
-            "$GITHUB_WORKSPACE/src/" "$GITHUB_WORKSPACE/ci/" 2>&1 | tee semgrep.log
+            "${files[@]}" 2>&1 | tee semgrep.log
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
