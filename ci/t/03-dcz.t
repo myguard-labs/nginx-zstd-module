@@ -1347,3 +1347,32 @@ qr/zstd: dcz window log computed once: \d+/
 qr/^zstd: dcz window log computed once: \d+\n?$/
 --- no_error_log
 [error]
+
+
+
+=== TEST 50: missing Available-Dictionary emits its dcz fallback trace
+# The response contract matches TEST 2 (ordinary zstd fallback), but that
+# outcome alone cannot distinguish a missing header from any other dcz
+# negotiation rejection.  The debug line is the operator-facing witness for
+# this specific branch.  A valid dcz coding is required here: without it the
+# earlier Accept-Encoding gate correctly wins and this assertion would be
+# vacuous.
+--- log_level: debug
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz missing Available-Dictionary trace body\n";
+    }
+--- request
+GET /t
+--- more_headers
+Accept-Encoding: zstd, dcz
+--- response_headers
+Content-Encoding: zstd
+--- error_log
+zstd dcz: skip, no Available-Dictionary header
+--- no_error_log
+[error]

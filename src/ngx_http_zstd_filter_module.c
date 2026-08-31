@@ -723,6 +723,8 @@ typedef struct {
     unsigned                     redo:1;
     unsigned                     flush:1;
     unsigned                     done:1;
+    /* A failed stream is terminal but must not look complete to log vars. */
+    unsigned                     aborted:1;
     unsigned                     nomem:1;
 
     /* the 40-byte dcz frame header has been queued on the out chain.
@@ -2133,6 +2135,8 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
                                        &sec_fetch_site_count);
 
     if (avail_dict_h == NULL) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: skip, no Available-Dictionary header");
         return NULL;
     }
 
@@ -2519,6 +2523,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
 failed:
 
+    ctx->aborted = 1;
     ctx->done = 1;
 
     return NGX_ERROR;
@@ -5744,7 +5749,7 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     (void) data;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_zstd_filter_module);
-    if (ctx == NULL || !ctx->done || ctx->bytes_out == 0) {
+    if (ctx == NULL || ctx->aborted || !ctx->done || ctx->bytes_out == 0) {
         vv->not_found = 1;
         vv->no_cacheable = 1;
         return NGX_OK;
@@ -5785,10 +5790,11 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
  * $zstd_bytes_in / $zstd_bytes_out — absolute byte counts for the
  * compressed response, complementing $zstd_ratio (which only gives the
  * ratio). `data` is the offsetof() of the ctx field to report, so one
- * handler serves both. Only set once the filter has finished compressing
- * this response (log phase), like $zstd_ratio. no_cacheable tracks that
- * same transition (see ngx_http_zstd_add_variables()'s comment): 1 for
- * a pre-completion not_found result, 0 for the final formatted value.
+ * handler serves both. Only set once the filter has successfully finished
+ * compressing this response (log phase), like $zstd_ratio. no_cacheable
+ * tracks that same transition (see ngx_http_zstd_add_variables()'s comment):
+ * 1 for a pre-completion or aborted not_found result, 0 for the final
+ * formatted value.
  */
 static ngx_int_t
 ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
@@ -5798,7 +5804,7 @@ ngx_http_zstd_bytes_variable(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t  *ctx;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_zstd_filter_module);
-    if (ctx == NULL || !ctx->done) {
+    if (ctx == NULL || ctx->aborted || !ctx->done) {
         vv->not_found = 1;
         vv->no_cacheable = 1;
         return NGX_OK;

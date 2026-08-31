@@ -29,6 +29,7 @@ set -euo pipefail
 HOST=127.0.0.1
 PORT="$PROBER_RESOLVED_PORT"
 ELOG="$PROBER_PREFIX/logs/error.log"
+VLOG="$PROBER_PREFIX/logs/zstd-vars.log"
 
 FAILED=0
 
@@ -75,6 +76,26 @@ fetch() {
         "http://$HOST:$PORT$path" 2>"$out.stderr"
 }
 
+# Wait for the last /body.bin log record to change.  The completed warm-up is
+# the negative control: it must expose all three values.  The faulted request
+# then has to append a distinct all-not-found record; reading a stale warm-up
+# line would otherwise let an unreachable fault path pass.
+wait_body_var_line() {
+    local previous="$1" line deadline
+
+    deadline=$((SECONDS + 5))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        line="$(awk '$1 == "/body.bin" { value = $0 } END { print value }' "$VLOG" 2>/dev/null || true)"
+        if [ -n "$line" ] && [ "$line" != "$previous" ]; then
+            printf '%s\n' "$line"
+            return 0
+        fi
+        sleep 0.05
+    done
+
+    return 1
+}
+
 read_probe_field() {
     local field="$1"
     local body
@@ -91,11 +112,12 @@ DCZ_HEADERS=(
 )
 
 # --- oracle plan --------------------------------------------------------
-# 1  warm-up: plain request serves 200 (readiness)
+# 1  warm-up: plain request serves 200 and emits completed log variables
 # 2  CODEC ERROR (fault_codec=1) on a plain compressing request: the request
 #    fails closed (no 200, connection torn down) rather than serving
-#    corrupt/truncated compressed bytes -- proves the central ZSTD_isError
-#    arm at filter_module.c:2244 is reachable and fails safely
+#    corrupt/truncated compressed bytes and emits no completed log variables
+#    -- proves the central ZSTD_isError arm is reachable, fails safely, and
+#    cannot fabricate a final ratio from its partial counters
 # 3  CODEC_END ERROR (fault_codec_end=1) on the SAME plain request: same
 #    fail-closed assertion at the end-of-frame site specifically
 # 4  CODEC_END ZERO on the 2nd END call (fault_codec_end=1002): forces the
@@ -142,10 +164,15 @@ echo "1..14"
 
 # --- 1: warm-up -----------------------------------------------------------
 WARMUP="$PROBER_PREFIX/warmup.out"
-if fetch /body.bin "$WARMUP" && grep -q '^HTTP/1.1 200' "$WARMUP.hdrs"; then
-    echo "ok 1 - warm-up request served a clean 200"
+WARMUP_VARS=""
+if fetch /body.bin "$WARMUP" \
+    && grep -q '^HTTP/1.1 200' "$WARMUP.hdrs" \
+    && WARMUP_VARS="$(wait_body_var_line '')" \
+    && [[ "$WARMUP_VARS" =~ ^/body.bin\ [0-9]+\.[0-9]{3}\ [1-9][0-9]*\ [1-9][0-9]*$ ]]
+then
+    echo "ok 1 - warm-up request served a clean 200 with completed zstd log variables"
 else
-    echo "not ok 1 - warm-up request did not serve a clean 200"
+    echo "not ok 1 - warm-up request did not serve a clean 200 with completed zstd log variables (vars=${WARMUP_VARS:-missing})"
     FAILED=$((FAILED + 1))
 fi
 
@@ -159,16 +186,20 @@ fi
 ERR_OUT="$PROBER_PREFIX/codec-err.out"
 ARM2_OK=0
 GOT200_2=0
+FAULT_VARS=""
 if arm codec 1; then
     ARM2_OK=1
     if fetch /body.bin "$ERR_OUT" && grep -q '^HTTP/1.1 200' "$ERR_OUT.hdrs" 2>/dev/null; then
         GOT200_2=1
     fi
+    FAULT_VARS="$(wait_body_var_line "$WARMUP_VARS" || true)"
 fi
-if [ "$ARM2_OK" -eq 1 ] && [ "$GOT200_2" -eq 0 ]; then
-    echo "ok 2 - CODEC ERROR (fault_codec=1) made a compressing request fail closed, not serve corrupt output"
+if [ "$ARM2_OK" -eq 1 ] && [ "$GOT200_2" -eq 0 ] \
+    && [ "$FAULT_VARS" = '/body.bin - - -' ]
+then
+    echo "ok 2 - CODEC ERROR (fault_codec=1) failed closed and exposed no completed zstd log variables"
 else
-    echo "not ok 2 - CODEC ERROR did not fail the request (arm_ok=$ARM2_OK; isError arm at ~filter_module.c:2244 not reached, or not fail-closed)"
+    echo "not ok 2 - CODEC ERROR did not fail closed without fabricated log variables (arm_ok=$ARM2_OK; vars=${FAULT_VARS:-missing})"
     FAILED=$((FAILED + 1))
 fi
 disarm codec || true

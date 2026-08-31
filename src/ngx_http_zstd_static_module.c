@@ -824,8 +824,8 @@ ngx_http_zstd_static_probe_verdict(const u_char *frame, size_t avail,
                       "zstd static: \"%s\" is not a zstd frame "
                       "(leading bytes 0x%02xd%02xd%02xd%02xd)",
                       path->data,
-                      (ngx_uint_t) frame[0], (ngx_uint_t) frame[1],
-                      (ngx_uint_t) frame[2], (ngx_uint_t) frame[3]);
+                      (unsigned) frame[0], (unsigned) frame[1],
+                      (unsigned) frame[2], (unsigned) frame[3]);
         return NGX_DECLINED;
 
     case NGX_HTTP_ZSTD_STATIC_FRAME_TRUNCATED:
