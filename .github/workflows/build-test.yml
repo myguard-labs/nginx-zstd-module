@@ -249,6 +249,9 @@ jobs:
       - name: Persistent build-input invalidation regressions
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_build_input_manifest.sh
 
+      - name: Build configuration policy regressions
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_build_config_policy.sh
+
       - name: nginx tarball PGP verifier controls
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_verify_nginx_tarball.sh
 

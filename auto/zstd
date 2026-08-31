@@ -217,7 +217,8 @@ fi
 # version-gated directive is zstd_target_cblock_size (libzstd >= 1.5.6).
 #
 # Ask the compiler rather than trying to parse preprocessor output.  The
-# latter is compiler-specific (and cl does not implement gcc's -x c -E -),
+# latter is compiler-specific (MSVC does not accept GCC's language-selection
+# and preprocessing flags),
 # while auto/feature already knows how to invoke the configured toolchain.
 ngx_feature="libzstd 1.5.6 or newer"
 ngx_feature_name=

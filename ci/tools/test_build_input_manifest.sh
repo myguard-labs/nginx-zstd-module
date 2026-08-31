@@ -18,6 +18,7 @@ required_inputs=(
     config
     auto/zstd
     filter/config
+    filter/reorder-static.sh
     static/config
     src
 )

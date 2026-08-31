@@ -71,8 +71,9 @@ if [ "${NGX_ZSTD_NO_LIBCRYPTO:-0}" != 1 ]; then
         ngx_feature_incs="#include <openssl/evp.h>"
         ngx_feature_path="$CORE_INCS"
         if [ -n "${OPENSSL:-}" ]; then
-            # auto/lib/openssl adds this generated include directory only
-            # after addon configuration, so make it explicit for the probe.
+            # Use a prepared source tree when its generated headers already
+            # exist. A clean, not-yet-built tree fails this optional probe and
+            # deliberately selects the portable SHA-256 fallback.
             ngx_feature_path="$ngx_feature_path $OPENSSL/.openssl/include"
         fi
         ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
@@ -144,21 +145,6 @@ if [ "$ngx_module_link" != DYNAMIC ]; then
     # contains $ngx_module_name (or $next) as a substring. Pad the list
     # with surrounding spaces so every entry has space delimiters on
     # both sides, then match " token " exactly.
-    if ! echo " $HTTP_FILTER_MODULES " | grep " $next " >/dev/null; then
-        echo "$0: error: cannot order $ngx_module_name before absent $next" >&2
-        exit 1
-    fi
-
-    HTTP_FILTER_MODULES=`echo " $HTTP_FILTER_MODULES " \
-                         | sed "s/ $ngx_module_name / /" \
-                         | sed "s/ $next / $next $ngx_module_name /" \
-                         | sed "s/^ *//;s/ *\$//"`
-
-    case " $HTTP_FILTER_MODULES " in
-        *" $next $ngx_module_name "*) ;;
-        *)
-            echo "$0: error: failed to order $ngx_module_name after $next" >&2
-            exit 1
-        ;;
-    esac
+    . "$_ngx_zstd_root/filter/reorder-static.sh"
+    ngx_http_zstd_reorder_static_filter || exit 1
 fi
