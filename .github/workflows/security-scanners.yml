@@ -86,9 +86,10 @@ jobs:
         # lint-c.sh in the SAME commit.
         run: |
           set -o pipefail
-          flawfinder --minlevel=4 --error-level=4 \
-            "$GITHUB_WORKSPACE/src/ngx_http_zstd_filter_module.c" \
-            "$GITHUB_WORKSPACE/src/ngx_http_zstd_static_module.c" 2>&1 | tee flawfinder.log
+          mapfile -d '' files < <(find "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/ci" \
+            -type f \( -name '*.c' -o -name '*.h' \) -print0)
+          flawfinder --minlevel=4 --error-level=4 "${files[@]}" \
+            2>&1 | tee flawfinder.log
       - name: clang-tidy (cert-*, security.*)
         run: |
           set -euo pipefail
@@ -120,7 +121,7 @@ jobs:
           semgrep scan --config p/c --config p/security-audit \
             --severity=WARNING --severity=ERROR --error \
             --jobs=1 --metrics=off \
-            "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log
+            "$GITHUB_WORKSPACE/src/" "$GITHUB_WORKSPACE/ci/" 2>&1 | tee semgrep.log
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

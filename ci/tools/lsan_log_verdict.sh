@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=ci/tools/lsan_positive_control.sh
 . "$SCRIPT_DIR/lsan_positive_control.sh"
 
-LSAN_FINDING_RE='ERROR: (Address|Leak)Sanitizer|SUMMARY: (Address|Leak)Sanitizer'
+LSAN_FINDING_RE='ERROR: (Address|Leak|UndefinedBehavior)Sanitizer|SUMMARY: (Address|Leak|UndefinedBehavior)Sanitizer|runtime error:'
 LSAN_FAILURE_RE='Failed suspending threads|Failed spawning a tracer thread|Waiting on the tracer thread failed|LeakSanitizer has encountered a fatal error'
 LSAN_PREFLIGHT_RE='ptrace appears to be blocked|LeakSanitizer may hang|Child exited with signal'
 

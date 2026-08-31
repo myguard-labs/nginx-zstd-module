@@ -127,9 +127,13 @@ jobs:
         run: |
           set -euo pipefail
           cd ci/fuzz
+          for size in 4095 4096 4097 65535 65536; do
+            head -c "$size" /dev/zero >"corpus/boundary-$size"
+          done
           set +e
           ./fuzz_accept_encoding \
             -max_total_time=120 \
+            -max_len=65536 \
             -dict=fuzz.dict \
             -print_final_stats=1 \
             -artifact_prefix=crash- \
@@ -143,9 +147,13 @@ jobs:
         run: |
           set -euo pipefail
           cd ci/fuzz
+          for size in 4095 4096 4097 65535 65536; do
+            head -c "$size" /dev/zero >"corpus_dcz/boundary-$size"
+          done
           set +e
           ./fuzz_dcz \
             -max_total_time=120 \
+            -max_len=65536 \
             -print_final_stats=1 \
             -artifact_prefix=crash-dcz- \
             corpus_dcz/

@@ -92,7 +92,7 @@ EOF
 
 export DICT_B64
 
-ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:abort_on_error=1:exitcode=42:log_path=$WORK/logs/asan"
+ASAN_OPTIONS="${ASAN_OPTIONS:-}:detect_leaks=1:verbosity=1:abort_on_error=1:exitcode=42:log_path=$WORK/logs/asan"
 export ASAN_OPTIONS
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-}:print_stacktrace=1:halt_on_error=1"
 
@@ -267,16 +267,16 @@ kill -QUIT "$NGINX_PID" 2>/dev/null || true
 wait "$NGINX_PID" 2>/dev/null
 rc=$?
 
-# shellcheck source=ci/tools/soak_asan_verdict.sh
-. "$(cd "$(dirname "$0")" && pwd)/soak_asan_verdict.sh"
+# shellcheck source=ci/tools/lsan_log_verdict.sh
+. "$(cd "$(dirname "$0")" && pwd)/lsan_log_verdict.sh"
 
 problems=0
 indeterminate=0
-if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
+if compgen -G "$WORK/logs/asan*" >/dev/null; then
     echo "ASAN/UBSAN log:"
     cat "$WORK"/logs/asan*
     set +e
-    soak_asan_verdict "$WORK"/logs/asan*
+    lsan_check_log_glob "$WORK/logs/asan*"
     asan_rc=$?
     set -e
     case "$asan_rc" in
@@ -293,6 +293,9 @@ if ls "$WORK"/logs/asan* >/dev/null 2>&1; then
             problems=1
             ;;
     esac
+else
+    echo '::warning::LeakSanitizer produced no verbose exit-hook log; soak leak check INDETERMINATE'
+    indeterminate=1
 fi
 if ls "$WORK"/logs/valgrind.* "$WORK"/logs/helgrind.* >/dev/null 2>&1; then
     if grep -qE 'ERROR SUMMARY: [1-9]|definitely lost: [1-9]' \

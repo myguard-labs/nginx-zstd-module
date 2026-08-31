@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ci/linter/lint-c.sh -- C static analysis for src/*.[ch].
+# ci/linter/lint-c.sh -- C static analysis for src/ and ci/ *.[ch].
 #
 # Mirrors .github/workflows/security-scanners.yml exactly:
 #   flawfinder  gate at >=4   (below 4 is risky-API grep noise; gating on it
@@ -26,7 +26,7 @@
 # shellcheck source=ci/linter/lib.sh
 . "$(git rev-parse --show-toplevel)/ci/linter/lib.sh"
 
-mapfile_checked FILES lint_files '^src/.*\.[ch]$' "$@"
+mapfile_checked FILES lint_files '^(src|ci)/.*\.[ch]$' "$@"
 [ "${#FILES[@]}" -gt 0 ] || { echo "lint-c: no C files to check"; exit 0; }
 
 echo "lint-c: ${#FILES[@]} file(s)"

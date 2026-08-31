@@ -344,6 +344,7 @@ jobs:
           [ -z "$FUZZ_DICT_ARG" ] || extra+=("$FUZZ_DICT_ARG")
           "./$FUZZ_BINARY" \
             -max_total_time="$FUZZ_SECS" \
+            -max_len=65536 \
             "${extra[@]}" \
             -print_final_stats=1 \
             -artifact_prefix="$FUZZ_ARTIFACT_PREFIX" \
