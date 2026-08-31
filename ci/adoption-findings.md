@@ -167,11 +167,12 @@ Reverted both source and binaries after; `diff` against the pre-mutation
 Out of my 21-26 slice, but investigated because it's adjacent to step 24's
 soak evidence and the finding is severe.
 
-**CONFIRMED, not just suspected: `valgrind.suppress` at the repo root is a
+**CONFIRMED, not just suspected: `valgrind.suppress` (then at the repo root;
+now `ci/suppressions/valgrind.suppress`) is a
 copied, generic file, not one derived from this module.** First pass (during
 step 22) searched for `valgrind.supp` (the skeleton's filename) and found
 nothing, and wrongly concluded no suppression file existed at all. It does
-— `ci/tools/soak.sh` lines 71/79 reference `$(repo root)/valgrind.suppress`
+— `ci/tools/soak.sh` then referenced `$(repo root)/valgrind.suppress`
 (note the different name, `.suppress` not `.supp`) — correcting that
 earlier miss here per "a guess phrased like a command result gets acted on as fact" /
 "a grep miss proves the spelling absent, not the gap real" (searched the wrong spelling,
@@ -213,7 +214,8 @@ surviving suppression after the actual nginx-core call chain it matches
 (per the file's own documented convention), delete every block whose
 symbol does not appear in this build's call graph at all (the two
 confirmed above, and any others found the same way), and verify
-`valgrind --suppressions=valgrind.suppress ...`'s `ERROR SUMMARY` line
+`valgrind --suppressions=ci/suppressions/valgrind.suppress ...`'s
+`ERROR SUMMARY` line
 shows nonzero suppressed count per surviving block (a suppression matching
 nothing is dead weight, same standard the skeleton's own header states).
 
@@ -331,7 +333,7 @@ to confirm the corrected comment matches the real log output.
 ## Stopped here
 
 Landed: steps 21, 22, 23, 24 fully, plus a confirmed (not just suspected)
-step 25 finding on `valgrind.suppress` — read and diagnosed, deliberately
+step 25 finding on the then-root `valgrind.suppress` — read and diagnosed, deliberately
 NOT patched (needs a real soak run, a long-runner). codeql.yml and
 ci-deep.yml (the other two of step 25's "three neighbours") were checked in
 the same pass and are already correct, no finding. Step 26 (coverage.sh +
@@ -429,7 +431,9 @@ a ~1% figure would have meant nginx core was in the denominator.
 ### 5. Valgrind / helgrind
 
 **Memcheck: was not trustworthy as a gate — FIXED at step 41 (2026-08-22).**
-`valgrind.suppress` was the generic circulated nginx file: all 28 blocks unedited
+The former root `valgrind.suppress` (now
+`ci/suppressions/valgrind.suppress`) was the generic circulated nginx file:
+all 28 blocks had unedited
 `<insert_a_suppression_name_here>` placeholders, naming `ngx_http_lua_*` and
 `drizzle_state_connect`, symbols this module never links. It is live config, not
 dead — `ci/tools/soak.sh:71,79` passes it to both memcheck and helgrind.

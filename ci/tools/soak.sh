@@ -98,7 +98,7 @@ export UBSAN_OPTIONS="${UBSAN_OPTIONS:-}:print_stacktrace=1:halt_on_error=1"
 
 RUN=("$NGINX" -p "$WORK" -c "$WORK/conf/nginx.conf")
 if [ "${USE_VALGRIND:-0}" = "1" ]; then
-    SUPP="$(cd "$(dirname "$0")/../.." && pwd)/valgrind.suppress"
+    SUPP="$(cd "$(dirname "$0")/../.." && pwd)/ci/suppressions/valgrind.suppress"
     RUN=(valgrind --error-exitcode=99 --leak-check=full
         --errors-for-leak-kinds=definite
         --suppressions="$SUPP" --gen-suppressions=all --log-file="$WORK/logs/valgrind.%p"
@@ -106,7 +106,7 @@ if [ "${USE_VALGRIND:-0}" = "1" ]; then
 elif [ "${USE_HELGRIND:-0}" = "1" ]; then
     # Data-race / lock-order checking under helgrind (thread pool + any
     # shared state). Reuses the same suppression file.
-    SUPP="$(cd "$(dirname "$0")/../.." && pwd)/valgrind.suppress"
+    SUPP="$(cd "$(dirname "$0")/../.." && pwd)/ci/suppressions/valgrind.suppress"
     RUN=(valgrind --tool=helgrind --error-exitcode=99
         --suppressions="$SUPP" --gen-suppressions=all --log-file="$WORK/logs/helgrind.%p"
         "${RUN[@]}")

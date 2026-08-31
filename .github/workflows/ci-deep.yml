@@ -20,7 +20,8 @@ name: CI Deep
 # This is longest-processing-time-first for the measured workloads and caps
 # peak demand at four even if the backing runner pool later grows.
 #   * memcheck AND helgrind run under ci/tools/soak.sh, which already passes
-#     --suppressions=valgrind.suppress and --error-exitcode=99 for BOTH tools
+#     --suppressions=ci/suppressions/valgrind.suppress and --error-exitcode=99
+#     for BOTH tools
 #     (see ci/tools/soak.sh) — the drift-fix baseline for every module.
 #
 # build-flavors exists because build-test.yml (the fast PR gate) only builds

@@ -2163,7 +2163,8 @@ jobs:
           # ptrace preflight is only a heuristic and can false-warn before the
           # real stop-the-world check; ci/tools/lsan_log_verdict.sh separates
           # that warning from an actual attach failure.
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/lsan.suppress:print_suppressions=0:verbosity=1
+          LSAN_OPTIONS: >-
+            suppressions=${{ github.workspace }}/ci/suppressions/lsan.suppress:print_suppressions=0:verbosity=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
           cd "$GITHUB_WORKSPACE"

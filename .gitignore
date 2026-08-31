@@ -17,6 +17,12 @@ objs/
 # binaries, one dir per flavor-version)
 .build/
 
+# Local analysis and task-runner caches
+.grind-wt/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
 # Test runner working directories (nginx test::nginx servroot)
 ci/t/servroot/
 ci/t/servroot-*/
