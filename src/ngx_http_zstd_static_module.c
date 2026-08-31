@@ -20,15 +20,12 @@
 /*
  * The frame probe -- verdicts, window cap, probe_frame(),
  * probe_reuse() -- lives in its own header (#270) so the unit
- * fixtures and the compression branch's static module share ONE
- * authoritative copy instead of synchronized ones. It self-defines
- * the RFC-frozen magic constants, so this file no longer includes
- * <zstd.h>. Note the scope of that independence: the supported
- * configure path still probes libzstd in auto/zstd before any module
- * here builds -- the header makes the PROBE code library-free, and
- * the build-without-libzstd property is realized where a build
- * actually omits the library, in the compression branch's
- * dependency-free static module.
+ * fixtures, the fuzz harness and the compression branch's static
+ * module share ONE authoritative copy instead of synchronized ones.
+ * It self-defines the RFC-frozen magic constants, which also drops
+ * this module's last compile-time libzstd dependency: static sidecar
+ * serving is file serving, and now builds on a box with no libzstd
+ * headers at all.
  */
 #include "ngx_http_zstd_frame_probe.h"
 

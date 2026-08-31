@@ -6,13 +6,13 @@
  * limit, ngx_http_zstd_static_probe_frame() and
  * ngx_http_zstd_static_probe_reuse(). Pure arithmetic -- no I/O, no
  * logging, no allocation, no request state -- so every consumer
- * (the static module, the unit fixtures, and the compression
- * branch's static module) includes THIS file instead of carrying a
- * synchronized copy or sed-extracting the body.
+ * (the static module, the unit fixtures, the fuzz harness, and the
+ * compression branch's static module) includes THIS file instead of
+ * carrying a synchronized copy or sed-extracting the body.
  *
  * CONSUMER CONTRACT. Inside nginx, include after the nginx headers
- * and everything below resolves. Outside nginx (shims like the unit
- * fixture's), provide before including:
+ * and everything below resolves. Outside nginx (unit/fuzz shims),
+ * provide before including:
  *     typedef intptr_t   ngx_int_t;
  *     typedef uintptr_t  ngx_uint_t;
  *     typedef unsigned char  u_char;

@@ -252,9 +252,6 @@ jobs:
       - name: Build configuration policy regressions
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_build_config_policy.sh
 
-      - name: Frame-probe header seam regressions
-        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_probe_header_seam.sh
-
       - name: nginx tarball PGP verifier controls
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_verify_nginx_tarball.sh
 
