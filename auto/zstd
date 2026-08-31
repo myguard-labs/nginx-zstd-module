@@ -216,21 +216,30 @@ fi
 # 1.4.0); there is no ZSTD_initCStream_usingCDict() fallback path. The only
 # version-gated directive is zstd_target_cblock_size (libzstd >= 1.5.6).
 #
-# Extract ZSTD_VERSION_NUMBER directly from the header via the
-# preprocessor: feed "#include <zstd.h>" + the macro name through the
-# compiler's -E and read the expanded value off the last line.
-ngx_zstd_ver=$(echo "#include <zstd.h>
-ZSTD_VERSION_NUMBER" | \
-    $CC $ngx_zstd_opt_I -x c -E - 2>/dev/null | \
-    grep -v "^#" | grep -v "^$" | tail -1 | tr -d ' ')
+# Ask the compiler rather than trying to parse preprocessor output.  The
+# latter is compiler-specific (and cl does not implement gcc's -x c -E -),
+# while auto/feature already knows how to invoke the configured toolchain.
+ngx_feature="libzstd 1.5.6 or newer"
+ngx_feature_name=
+ngx_feature_run=no
+ngx_feature_incs="#include <zstd.h>"
+ngx_feature_path=
+ngx_feature_test="
+#if ZSTD_VERSION_NUMBER < 10506
+#error libzstd older than 1.5.6
+#endif
+(void) ZSTD_versionNumber()"
+ngx_feature_libs="$ngx_zstd_opt_L"
+SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
+. auto/feature
+CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
 
-if [ -n "$ngx_zstd_ver" ]; then
-    if [ "$ngx_zstd_ver" -lt 10506 ] 2>/dev/null; then
+if [ "$ngx_found" = no ]; then
         cat << END
-        Note: zstd version $ngx_zstd_ver detected (< 1.5.6 / 10506).
+        Note: libzstd older than 1.5.6 detected.
         "zstd_target_cblock_size" requires libzstd >= 1.5.6 and will have
         no effect at runtime on this build. Every other directive is
         fully functional. Upgrade libzstd to 1.5.6+ for that directive.
 END
-    fi
 fi
