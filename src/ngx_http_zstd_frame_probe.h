@@ -130,6 +130,10 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
     uint64_t    w;
     ngx_uint_t  fhd, fcs_size, off;
 
+#if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+    ngx_uint_t  i;
+#endif
+
     static const ngx_uint_t  did_len[4] = { 0, 1, 2, 4 };
 
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -263,8 +267,6 @@ ngx_http_zstd_static_probe_frame(const u_char *hdr, size_t n, uint64_t *window)
             break;
         }
 #else
-        ngx_uint_t  i;
-
         w = 0;
         for (i = 0; i < fcs_size; i++) {
             w |= (uint64_t) hdr[off + i] << (8 * i);
