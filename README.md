@@ -1208,13 +1208,14 @@ Controls how pre-compressed `.zst` files are served.
 When set to `on`, the module emits a `Vary: Accept-Encoding` response header itself as soon as a `.zst` sibling makes the URI depend on `Accept-Encoding` — including on the fallback path where the client does not accept zstd and the original file is served. Correct caching by proxies and CDNs therefore does not require [`gzip_vary`](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_vary); setting `gzip_vary on` is compatible and never produces a duplicate header. With [`zstd_static_dict_bypass`](#zstd_static_dict_bypass) off, `zstd_static always` ignores `Accept-Encoding` and emits no `Vary`; the opt-in bypass is the exception described below.
 
 > **Warning (`always` mode):** When `zstd_static always` is set and
-> `zstd_static_dict_bypass` is off, `.zst` files are served to every client
-> regardless of whether they advertise `Accept-Encoding: zstd`. No `Vary`
-> header is emitted and no `Content-Encoding` negotiation occurs. With the
+> `zstd_static_dict_bypass` is off, this mode is non-conformant by design:
+> `.zst` files are served with `Content-Encoding: zstd` to every client,
+> including requests with no `Accept-Encoding`, `Accept-Encoding: identity`,
+> or `Accept-Encoding: zstd;q=0`. It suppresses `Vary: Accept-Encoding` and
+> performs no content-coding negotiation. With the
 > bypass on, matching dictionary-aware requests stand aside with the complete
-> cache key instead. Any remaining client that does not support zstd will
-> receive a compressed body it cannot decode. Only use `always` on locations
-> where every non-bypassed client is guaranteed to support zstd — for example,
+> cache key instead. `always` is safe only when every non-bypassed client is
+> guaranteed to decode zstd — for example,
 > internal service-to-service calls where you control both ends.
 
 > **Magic-number validation.** Before serving a `.zst`, the module reads the first bytes of the file (one `pread(2)` at offset 0) and verifies they are the zstd frame magic (`ZSTD_MAGICNUMBER` `0xFD2FB528`) or a skippable-frame magic (`ZSTD_MAGIC_SKIPPABLE_*`). On mismatch — a truncated download, mistaken rename (`cp foo.txt foo.zst`), or any other non-zstd content — the handler logs `zstd static: "..." is not a zstd frame (leading bytes 0x...)` and **declines**; nginx then falls back to serving the uncompressed original, or returns 404 if no original is present. Without this, the client would receive a body labelled `Content-Encoding: zstd` that it cannot decode. The read is offset-explicit so it never disturbs the file position of the `open_file_cache` descriptor shared with other in-flight requests: `pread(2)` on POSIX, `ngx_read_file()` (a `ReadFile()` with an `OVERLAPPED` offset) on Win32. The verdict logic is a single shared function, so both platforms accept and reject exactly the same files. The probe is compiled out only on a POSIX build whose `configure` found no `pread(2)`, rather than degraded to a `read`+`lseek` pair that would corrupt those concurrent requests.
