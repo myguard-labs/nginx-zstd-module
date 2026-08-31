@@ -1572,13 +1572,19 @@ jobs:
         run: |
           tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
           cd "nginx-${NGINX_VERSION}"
-          SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g3 -O1"
+          # Recovery is required for the Test::Nginx lane below: upstream
+          # nginx debug logging has known UBSan findings, and a fatal trap
+          # kills its listener before the suite can finish. Reports remain
+          # complete and are graded by module frames after both suites exit.
+          SAN="-fsanitize=address,undefined -fsanitize-recover=undefined -fno-omit-frame-pointer -g3 -O1"
           ./configure \
             --with-compat \
             --with-debug \
             --with-cc-opt="-DZSTD_STATIC_LINKING_ONLY $SAN $(pkg-config --cflags libzstd zlib libpcre2-8)" \
             --with-ld-opt="$SAN $(pkg-config --libs libzstd zlib libpcre2-8)" \
             --with-http_sub_module \
+            --with-http_auth_request_module \
+            --with-http_gzip_static_module \
             --add-module="$GITHUB_WORKSPACE"
           make -j"$(nproc)"
           if grep -q 'NGX_HTTP_ZSTD_HAVE_LIBCRYPTO' objs/ngx_auto_config.h; then
@@ -2095,49 +2101,38 @@ jobs:
       - name: Run Perl suites under ASAN+UBSAN
         # Put the static-file / magic-probe / conditional / HEAD paths (covered
         # only by these Perl suites, audit CI7) through ASan/UBSan. Functional
-        # pass/fail is already gated by the non-ASan `tests` job, so here we
-        # DON'T gate on test results: nginx core
-        # emits benign sanitizer aborts on some Test::Nginx request paths
-        # unrelated to this module. Run non-halting, write ASan reports to
-        # files, and fail ONLY if a sanitizer report names this module's
-        # sources (ngx_http_zstd). detect_leaks=0 because nginx does not free
-        # every allocation at exit by design.
+        # pass/fail is also gated here: a bailout or incomplete TAP stream is
+        # not sanitizer coverage. Upstream nginx core has known UBSan reports
+        # on debug-log paths, so keep recovery enabled, parse complete reports,
+        # and fail when any report contains a zstd-module frame. detect_leaks=0
+        # because nginx does not free every allocation at exit by design.
         env:
           ASAN_OPTIONS: detect_leaks=0:halt_on_error=0:abort_on_error=0:exitcode=0:log_path=/tmp/asan-zstd
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0:log_path=/tmp/ubsan-zstd
           RUN_ID: ${{ github.run_id }}
           JOB_NAME: ${{ github.job }}
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          rm -f /tmp/asan-zstd.*
+          ci/tools/test_sanitizer_suite_verdict.sh
+          rm -f /tmp/asan-zstd.* /tmp/ubsan-zstd.*
           cd "$GITHUB_WORKSPACE"
           export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-asan-${RUN_ID}-${JOB_NAME}"
           mkdir -p "$TEST_NGINX_SERVROOT"
-          perl ci/t/00-filter.t > ci/t/filter-asan.log 2>&1 || true
+          filter_status=0
+          perl ci/t/00-filter.t > ci/t/filter-asan.log 2>&1 || filter_status=$?
           touch -d @1541504307 "$GITHUB_WORKSPACE/ci/t/suite/test" "$GITHUB_WORKSPACE/ci/t/suite/test.zst"
           export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/ci/t/servroot-static-${RUN_ID}-${JOB_NAME}"
           mkdir -p "$TEST_NGINX_SERVROOT"
-          perl ci/t/01-static.t > ci/t/static-asan.log 2>&1 || true
+          static_status=0
+          perl ci/t/01-static.t > ci/t/static-asan.log 2>&1 || static_status=$?
 
-          # NOTE (A29-F7, deferred): this lane still cannot tell "no
-          # sanitizer report" from "the suite never ran". A TAP/executed-
-          # count gate was implemented and DID work -- and immediately
-          # went red here, because nginx under ASan stops accepting on
-          # 127.0.0.1:2024 partway through: 00-filter.t bails at TEST 39
-          # and 01-static.t executed 22 of its 774 assertions
-          # (run 33229149473). That is a real, PRE-EXISTING defect this
-          # lane has been masking via `|| true`, not a gate bug. Fixing
-          # the bind failure is a prerequisite for landing the gate, so
-          # the gate is held back rather than shipped red.
-          # Gate strictly on sanitizer reports attributable to this module.
-          if cat /tmp/asan-zstd.* ci/t/filter-asan.log ci/t/static-asan.log 2>/dev/null \
-               | grep -nE 'ngx_http_zstd' \
-               | grep -iE 'runtime error|AddressSanitizer|Sanitizer|overflow|use-after'; then
-            echo "❌ sanitizer report attributable to the zstd module:"
-            cat /tmp/asan-zstd.* 2>/dev/null | grep -B2 -A15 ngx_http_zstd || true
-            exit 1
-          fi
-          echo "✓ no ASAN/UBSAN report attributable to the zstd module"
+          python3 ci/tools/sanitizer_suite_verdict.py \
+            --suite "00-filter.t:ci/t/filter-asan.log:$filter_status" \
+            --suite "01-static.t:ci/t/static-asan.log:$static_status" \
+            --sanitizer-log '/tmp/asan-zstd.*' \
+            --sanitizer-log '/tmp/ubsan-zstd.*' \
+            --sanitizer-log 'ci/t/filter-asan.log' \
+            --sanitizer-log 'ci/t/static-asan.log'
 
       - name: Run smoke tests under ASAN+UBSAN
         # Leak gating here is NOT free: every harness below starts nginx and

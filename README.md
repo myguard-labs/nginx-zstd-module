@@ -14,7 +14,7 @@
 
 An nginx module for [Zstandard (zstd)](https://facebook.github.io/zstd/) compression. Zstandard typically achieves better compression ratios than gzip at comparable or faster speeds, making it a good choice for reducing transmitted response sizes.
 
-This is a hardened fork: every PR is exercised against **nginx mainline**, the full test suite runs under **ASAN/UBSAN**, flawfinder/semgrep/clang-tidy run on every change, and a weekly deep pass fuzzes both parser targets and additionally covers **nginx stable** and **[Angie](https://angie.software/)** (see [Testing & CI](#testing--ci)).
+This is a hardened fork: every PR is exercised against **nginx mainline**, the filter/static suites and runtime regressions run under **ASAN/UBSAN**, flawfinder/semgrep/clang-tidy run on every change, and a weekly deep pass fuzzes both parser targets and additionally covers **nginx stable** and **[Angie](https://angie.software/)** (see [Testing & CI](#testing--ci)).
 
 # Table of Contents
 
@@ -1332,7 +1332,7 @@ documented `ubuntu-latest` fallback instead.
 |---|---|---|
 | **CI** ([`ci.yml`](.github/workflows/ci.yml)) | every PR + focused merged `master` signal + manual | Calls only Lint, Build&Test, Security Scanners, Harness Fault Arms, and the hosted Windows build. Four Linux jobs are initially runnable; dependency chains refill each lane as it becomes free. Only Harness Fault Arms runs on merged `master`. |
 | **Lint** ([`lint.yml`](.github/workflows/lint.yml)) | PR via CI + manual | Runs local deterministic checks, including runner trust, port bands, cadence, provenance, and the enforced four-lane topology. |
-| **Build&Test** ([`build-test.yml`](.github/workflows/build-test.yml)) | PR via CI + manual | Builds nginx mainline with strict warnings, runs the full Test::Nginx and runtime regression suites, tests libzstd 1.4.x fallbacks, linkage variants, arm64, and the full suite under ASAN/UBSAN. Its dependency graph forms four self-hosted lane chains. |
+| **Build&Test** ([`build-test.yml`](.github/workflows/build-test.yml)) | PR via CI + manual | Builds nginx mainline with strict warnings, runs the full functional and runtime regression suites, tests libzstd 1.4.x fallbacks, linkage variants, and arm64. Its sanitizer lane runs the filter and static Test::Nginx suites plus the runtime regressions under ASAN/UBSAN, requiring complete TAP/clean exits and rejecting complete sanitizer reports that contain module frames. Its dependency graph forms four self-hosted lane chains. |
 | **Security Scanners** ([`security-scanners.yml`](.github/workflows/security-scanners.yml)) | PR via CI, weekly deep + manual | Runs flawfinder, clang-tidy, and semgrep over the module sources. |
 | **Harness Fault Arms** ([`harness-fault-arms.yml`](.github/workflows/harness-fault-arms.yml)) | PR and merged `master` via CI + manual, not required | Builds with the shared [`nginx-module-testkit`](https://github.com/myguard-labs/nginx-module-testkit) and runs all six fault, allocation, codec-count, and parameter-count scenarios through one non-vacuous scenario runner. |
 | **Windows build** ([`windows-build.yml`](.github/workflows/windows-build.yml)) | PR via CI + manual | Builds and smoke-checks MSVC x64 static and MinGW-w64 x64 dynamic modules. |
