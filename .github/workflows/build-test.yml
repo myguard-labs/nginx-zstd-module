@@ -232,6 +232,14 @@ jobs:
       - name: Fork-runner dependency bootstrap regression
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_ci_dependency_bootstrap.sh
 
+      - name: Scanner selectors and fuzz-boundary regressions
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_ci_scanner_fuzz_boundaries.sh
+
+      - name: Soak schedule and max-length diagnostic contracts
+        run: |
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_soak_schedule_unit.sh
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_max_length_diagnostics.sh
+
       # Audit sha e289021 F2/F3 regression coverage: exercises ci-build.sh's
       # mv-guard and provenance checks directly (offline cases + one live
       # clean-root angie build).

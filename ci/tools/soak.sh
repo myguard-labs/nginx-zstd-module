@@ -19,6 +19,20 @@ set -euo pipefail
 NGINX="${1:?usage: soak.sh <nginx-binary> [duration] [concurrency]}"
 DURATION="${2:-60}"
 CONC="${3:-8}"
+SOAK_SEED="${SOAK_SEED:-$(( $(date +%s) & 0x7fffffff ))}"
+
+if ! [[ "$SOAK_SEED" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: SOAK_SEED must be an integer from 0 through 2147483647" >&2
+    exit 2
+fi
+SOAK_SEED="$(printf '%s' "$SOAK_SEED" | sed 's/^0*//')"
+SOAK_SEED="${SOAK_SEED:-0}"
+if [ "${#SOAK_SEED}" -gt 10 ] \
+    || { [ "${#SOAK_SEED}" -eq 10 ] && [ "$SOAK_SEED" -gt 2147483647 ]; }
+then
+    echo "FAIL: SOAK_SEED must be an integer from 0 through 2147483647" >&2
+    exit 2
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -134,6 +148,7 @@ echo "soak: ${DURATION}s, concurrency ${CONC}$(
     [ "${USE_VALGRIND:-0}" = 1 ] && echo ' (valgrind)'
     [ "${USE_HELGRIND:-0}" = 1 ] && echo ' (helgrind)'
 )"
+echo "soak: seed $SOAK_SEED (replay with SOAK_SEED=$SOAK_SEED)"
 END=$(($(date +%s) + DURATION))
 fail=0
 
@@ -141,34 +156,46 @@ worker() {
     local wid="$1"
     local paths=(/tiny /medium /large /compressible
         "/bypass" "/bypass?nozstd=1" /dcz)
-    local i=0 ok=0 bad=0 dcz_seen=0
-    while [ "$(date +%s)" -lt "$END" ]; do
-        p=${paths[$((RANDOM % ${#paths[@]}))]}
-        # Vary Accept-Encoding incl. clients that do not support zstd.
-        ae=$([ $((RANDOM % 4)) -eq 0 ] && echo "gzip" || echo "zstd")
+    local prefix_paths=(/tiny /tiny /medium /medium /large /large
+        /compressible /bypass "/bypass?nozstd=1" /dcz /dcz)
+    local prefix_aes=(gzip zstd gzip zstd gzip zstd zstd zstd zstd zstd dcz)
+    local prefix_count=${#prefix_paths[@]}
+    local i=0 ok=0 bad=0 dcz_seen=0 rng=$(((10#$SOAK_SEED + wid) & 0x7fffffff))
+    local -a counts
+    for ((cell = 0; cell < prefix_count; cell++)); do counts[cell]=0; done
+    while [ "$i" -lt "$prefix_count" ] || [ "$(date +%s)" -lt "$END" ]; do
+        if [ "$i" -lt "$prefix_count" ]; then
+            p=${prefix_paths[$i]}
+            ae=${prefix_aes[$i]}
+            cell=$i
+        else
+            rng=$(((1103515245 * rng + 12345) & 0x7fffffff))
+            p=${paths[$((rng % ${#paths[@]}))]}
+            rng=$(((1103515245 * rng + 12345) & 0x7fffffff))
+            ae=$([ $((rng % 4)) -eq 0 ] && echo "gzip" || echo "zstd")
+            cell=-1
+        fi
         i=$((i + 1))
         body="$WORK/r.${wid}.${i}"
-        # /dcz alternates between a request that negotiates dcz and one that
-        # does not, so both the refPrefix path and the plain-zstd fallback
-        # out of the same location run under the sanitizer.
-        #
-        # The FIRST iteration always sends the negotiating variant, and
-        # dcz_seen below records that a dcz frame actually came back. Both
-        # the path pick and the alternation are random, so without that the
-        # worker could take a short duration or an unlucky seed and send no
-        # dcz request at all -- and worse, a dcz regression that silently
-        # served plain zstd would decode fine in the 28b52ffd branch and
-        # keep the soak green. Coverage that can quietly stop covering is
-        # the same trap this oracle was extended to close, one level up.
+        # The prefix has separate /dcz plain-zstd and negotiated-dcz cells,
+        # so both the fallback and refPrefix paths always run. dcz_seen below
+        # additionally proves that negotiation produced a real dcz frame.
         dcz_want=0
+        bad_before=$bad
         hdrs=(-H "Accept-Encoding: $ae")
-        if [ "$i" -eq 1 ] || { [ "$p" = "/dcz" ] && [ $((RANDOM % 2)) -eq 0 ]; }
-        then
+        if [ "$ae" = "dcz" ]; then
             p=/dcz
             dcz_want=1
+            ae=zstd
             hdrs=(-H "Accept-Encoding: zstd, dcz"
                   -H "Available-Dictionary: :${DICT_B64}:"
                   -H "Sec-Fetch-Site: same-origin")
+        fi
+        identity_want=0
+        if [ "$ae" != "zstd" ] || [ "$p" = "/tiny" ] \
+            || [ "$p" = "/bypass?nozstd=1" ]
+        then
+            identity_want=1
         fi
         if curl -fsS "${hdrs[@]}" \
             "http://127.0.0.1:18222$p" -o "$body" 2>/dev/null; then
@@ -187,7 +214,14 @@ worker() {
             # the same dictionary the request advertised: that verifies the
             # frame header, the refPrefix output and the dictionary content.
             magic="$(head -c4 "$body" | od -An -tx1 | tr -d ' ')"
-            if [ "$magic" = "28b52ffd" ]; then
+            if [ "$identity_want" -eq 1 ]; then
+                if [ "$magic" = "28b52ffd" ] || [ "$magic" = "5e2a4d18" ]; then
+                    echo "BAD compressed identity-only cell $p (Accept-Encoding: $ae, magic: $magic)"
+                    bad=$((bad + 1))
+                else
+                    ok=$((ok + 1))
+                fi
+            elif [ "$magic" = "28b52ffd" ]; then
                 if zstd -dq -c "$body" >/dev/null 2>&1; then
                     ok=$((ok + 1))
                 else
@@ -209,19 +243,6 @@ worker() {
                 # dcz frame nor a zstd frame.
                 echo "BAD dcz $p: negotiated request returned magic $magic"
                 bad=$((bad + 1))
-            elif [ "$ae" != "zstd" ]; then
-                # This request advertised only gzip (no zstd in
-                # Accept-Encoding), so the module correctly declined to
-                # compress on every path, identity is expected here.
-                ok=$((ok + 1))
-            elif [ "$p" = "/tiny" ]; then
-                # /tiny is a 50-byte fixture, deliberately below
-                # zstd_min_length 100 on location /. Identity is expected.
-                ok=$((ok + 1))
-            elif [ "$p" = "/bypass?nozstd=1" ]; then
-                # zstd_bypass is active on this path, so the response is
-                # uncompressed identity. No magic header, just accept it.
-                ok=$((ok + 1))
             else
                 # Every other combination (ae advertised zstd, and the path
                 # is not sub-min_length or bypassed) must have compressed.
@@ -238,6 +259,9 @@ worker() {
                 echo "BAD dcz $p: negotiated request fell back to plain zstd"
                 bad=$((bad + 1))
             fi
+            if [ "$cell" -ge 0 ] && [ "$bad" -eq "$bad_before" ]; then
+                counts[cell]=$((counts[cell] + 1))
+            fi
         else
             echo "FAIL request $p (curl exit $?)"
             bad=$((bad + 1))
@@ -245,6 +269,13 @@ worker() {
         rm -f "$body"
     done
     echo "worker $wid: $ok ok, $bad bad/failed, $dcz_seen dcz"
+    for ((cell = 0; cell < prefix_count; cell++)); do
+        echo "worker $wid cell ${prefix_paths[$cell]}+${prefix_aes[$cell]}: ${counts[$cell]}"
+        if [ "${counts[$cell]}" -eq 0 ]; then
+            echo "FAIL worker $wid: deterministic cell ${prefix_paths[$cell]}+${prefix_aes[$cell]} had no verified response"
+            bad=$((bad + 1))
+        fi
+    done
     if [ "$dcz_seen" -eq 0 ]; then
         echo "FAIL worker $wid: no dcz response was ever verified"
         return 1
