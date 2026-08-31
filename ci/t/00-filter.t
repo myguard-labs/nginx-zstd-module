@@ -1100,7 +1100,7 @@ GET /filter
 Accept-Encoding: zstd
 --- ignore_response
 --- error_log
-input exceeded zstd_max_length (100) on a response with no Content-Length
+input exceeded zstd_max_length (100) after
 
 
 
@@ -3250,4 +3250,4 @@ GET /filter
 Accept-Encoding: zstd
 --- ignore_response
 --- error_log
-input exceeded zstd_max_length (4999) on a response with no Content-Length
+input exceeded zstd_max_length (4999) after
