@@ -16,6 +16,7 @@
 
 #include "ngx_http_zstd_common.h"
 #include "ngx_http_zstd_sha256.h"
+#include "ngx_http_zstd_version.h"
 
 #ifdef NGX_TEST_HARNESS
 #include "ngx_http_zstd_probe_hooks.h"
@@ -546,6 +547,8 @@ typedef struct {
      * own per-call no_cacheable flag -- see that function's comment).
      */
     ngx_flag_t                   any_enabled;
+    ngx_flag_t                   any_negative_level;
+    ngx_flag_t                   any_target_cblock_size;
 } ngx_http_zstd_main_conf_t;
 
 
@@ -857,6 +860,7 @@ static void *ngx_http_zstd_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
 static ngx_int_t ngx_http_zstd_add_variables(ngx_conf_t *cf);
+static ngx_int_t ngx_http_zstd_init_module(ngx_cycle_t *cycle);
 static ngx_int_t ngx_http_zstd_dcz_dicts_hashed_variable(
     ngx_http_request_t *r, ngx_http_variable_value_t *vv, uintptr_t data);
 static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
@@ -1398,7 +1402,7 @@ ngx_module_t  ngx_http_zstd_filter_module = {
     ngx_http_zstd_filter_commands,          /* module directives */
     NGX_HTTP_MODULE,                        /* module type */
     NULL,                                   /* init master */
-    NULL,                                   /* init module */
+    ngx_http_zstd_init_module,              /* init module */
     NULL,                                   /* init process */
     NULL,                                   /* init thread */
     NULL,                                   /* exit thread */
@@ -5898,6 +5902,55 @@ ngx_http_zstd_release_cctx(void *data)
 }
 
 
+/* Warn on ABI-compatible skew, but fail when configured compile-time gates
+ * rely on a feature floor the dynamically loaded library does not meet. */
+static ngx_int_t
+ngx_http_zstd_init_module(ngx_cycle_t *cycle)
+{
+    unsigned                    runtime;
+    ngx_http_zstd_version_result_t  policy;
+    ngx_http_zstd_main_conf_t  *zmcf;
+
+    runtime = ZSTD_versionNumber();
+
+    zmcf = ngx_http_cycle_get_module_main_conf(cycle,
+                                                ngx_http_zstd_filter_module);
+    if (zmcf == NULL) {
+        return NGX_ERROR;
+    }
+
+    policy = ngx_http_zstd_version_policy(ZSTD_VERSION_NUMBER, runtime,
+                                          zmcf->any_target_cblock_size,
+                                          zmcf->any_negative_level);
+    if (policy == NGX_HTTP_ZSTD_VERSION_OK) {
+        return NGX_OK;
+    }
+
+    ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                  "zstd module was built with libzstd %ui but loaded "
+                  "libzstd %ui at runtime",
+                  (ngx_uint_t) ZSTD_VERSION_NUMBER, (ngx_uint_t) runtime);
+
+    if (policy == NGX_HTTP_ZSTD_VERSION_REFUSE_TARGET_CBLOCK) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "configured zstd_target_cblock_size requires runtime "
+                      "libzstd 1.5.6 or newer (loaded %ui)",
+                      (ngx_uint_t) runtime);
+        return NGX_ERROR;
+    }
+
+    if (policy == NGX_HTTP_ZSTD_VERSION_REFUSE_NEGATIVE_LEVEL) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "a configured negative zstd_comp_level requires "
+                      "runtime libzstd 1.4.0 or newer (loaded %ui)",
+                      (ngx_uint_t) runtime);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
 /*
  * Free every cached context in the worker's slot ring at process exit.
  *
@@ -6275,6 +6328,7 @@ static char *
 ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
 {
     const ngx_int_t  *np = data;
+    ngx_http_zstd_main_conf_t  *zmcf;
 
     (void)post;
 
@@ -6307,6 +6361,12 @@ ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
     }
 #endif
 
+    if (*np < 0) {
+        zmcf = ngx_http_conf_get_module_main_conf(cf,
+                                                  ngx_http_zstd_filter_module);
+        zmcf->any_negative_level = 1;
+    }
+
     return NGX_CONF_OK;
 }
 
@@ -6338,6 +6398,7 @@ ngx_http_zstd_check_size_int_max(ngx_conf_t *cf, void *post, void *data)
 {
     ssize_t  *sp = data;
     char     *rc;
+    ngx_http_zstd_main_conf_t  *zmcf;
 
     (void) post;
 
@@ -6345,6 +6406,12 @@ ngx_http_zstd_check_size_int_max(ngx_conf_t *cf, void *post, void *data)
                                      "zstd_target_cblock_size");
     if (rc != NGX_CONF_OK) {
         return rc;
+    }
+
+    if (*sp > 0) {
+        zmcf = ngx_http_conf_get_module_main_conf(cf,
+                                                  ngx_http_zstd_filter_module);
+        zmcf->any_target_cblock_size = 1;
     }
 
     /*

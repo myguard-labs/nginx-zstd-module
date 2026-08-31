@@ -203,6 +203,12 @@ load_module modules/ngx_http_zstd_static_module.so;
 
 Notes on the libzstd floor — these are enforced in code, not assumed:
 
+* At startup, dynamically linked builds compare the loaded libzstd version
+  with the headers used to compile the module and warn on any mismatch. Normal
+  ABI-compatible skew remains supported. Startup is refused only when a
+  configured compile-gated feature crosses its runtime floor: a negative
+  `zstd_comp_level` below 1.4.0, or `zstd_target_cblock_size` below 1.5.6.
+
 * **< 1.4.0**: the streaming API the module uses (`ZSTD_compressStream2`)
   is unavailable; this is the hard minimum. Negative `zstd_comp_level`
   values are also unsupported and are clamped to `1` with a warning
