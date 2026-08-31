@@ -56,7 +56,7 @@ fi
 # detection entirely (used by CI to keep the portable path covered;
 # also the escape hatch if a build must not link libcrypto).
 if [ "${NGX_ZSTD_NO_LIBCRYPTO:-0}" != 1 ]; then
-    if [ "$USE_OPENSSL" = YES -a "$ngx_module_link" != DYNAMIC ]; then
+    if [ "${USE_OPENSSL:-NO}" = YES ] && [ "$ngx_module_link" != DYNAMIC ]; then
         # nginx itself links OpenSSL (--with-http_ssl_module et al), so
         # for a static addon libcrypto is already on the final link line
         # and its headers are in CORE_INCS. That covers
@@ -65,8 +65,29 @@ if [ "${NGX_ZSTD_NO_LIBCRYPTO:-0}" != 1 ]; then
         # probe CANNOT succeed — and it also means the module uses the
         # same OpenSSL nginx was built with, rather than probing
         # whatever the system ships. Nothing to add to ngx_module_libs.
-        have=NGX_HTTP_ZSTD_HAVE_LIBCRYPTO . auto/have
-        echo " + zstd dcz dictionary hashing uses nginx's OpenSSL"
+        ngx_feature="OpenSSL EVP SHA-256 headers"
+        ngx_feature_name="NGX_HTTP_ZSTD_HAVE_LIBCRYPTO"
+        ngx_feature_run=no
+        ngx_feature_incs="#include <openssl/evp.h>"
+        ngx_feature_path="$CORE_INCS"
+        if [ -n "${OPENSSL:-}" ]; then
+            # auto/lib/openssl adds this generated include directory only
+            # after addon configuration, so make it explicit for the probe.
+            ngx_feature_path="$ngx_feature_path $OPENSSL/.openssl/include"
+        fi
+        ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
+                          unsigned int   n;
+                          (void) md;
+                          (void) n;
+                          (void) EVP_sha256"
+        ngx_feature_libs=
+        . auto/feature
+
+        if [ "$ngx_found" = yes ]; then
+            echo " + zstd dcz dictionary hashing uses nginx's OpenSSL"
+        else
+            echo " + zstd dcz dictionary hashing uses portable SHA-256"
+        fi
     else
         ngx_feature="OpenSSL EVP SHA-256 (libcrypto)"
         ngx_feature_name="NGX_HTTP_ZSTD_HAVE_LIBCRYPTO"
@@ -123,8 +144,21 @@ if [ "$ngx_module_link" != DYNAMIC ]; then
     # contains $ngx_module_name (or $next) as a substring. Pad the list
     # with surrounding spaces so every entry has space delimiters on
     # both sides, then match " token " exactly.
+    if ! echo " $HTTP_FILTER_MODULES " | grep " $next " >/dev/null; then
+        echo "$0: error: cannot order $ngx_module_name before absent $next" >&2
+        exit 1
+    fi
+
     HTTP_FILTER_MODULES=`echo " $HTTP_FILTER_MODULES " \
                          | sed "s/ $ngx_module_name / /" \
                          | sed "s/ $next / $next $ngx_module_name /" \
                          | sed "s/^ *//;s/ *\$//"`
+
+    case " $HTTP_FILTER_MODULES " in
+        *" $next $ngx_module_name "*) ;;
+        *)
+            echo "$0: error: failed to order $ngx_module_name after $next" >&2
+            exit 1
+        ;;
+    esac
 fi

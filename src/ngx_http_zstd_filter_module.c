@@ -100,6 +100,16 @@
 static ngx_inline ngx_uint_t
 ngx_http_zstd_ceil_log2(size_t x)
 {
+    ngx_uint_t  wlog;
+
+#if (defined(__GNUC__) || defined(__clang__)) \
+    && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+    unsigned long long  ull;
+    int                 leading_zeros;
+#else
+    size_t              pow2;
+#endif
+
     if (x <= 1024) {  /* 2^10 */
         return 10;
     }
@@ -108,15 +118,16 @@ ngx_http_zstd_ceil_log2(size_t x)
         return 23;  /* RFC 9842 cap */
     }
 
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) \
+    && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
     /* Use compiler builtin for count-leading-zeros on 64-bit. GCC and Clang
      * both provide __builtin_clzll; __builtin_clz is 32-bit but we require
      * 64-bit size_t here. The bit length (64 - leading_zeros) is exactly
      * ceil-log2 for non-powers-of-two, and one too many for exact powers of
      * two -- so the only correction needed is a decrement in that case. */
-    unsigned long long  ull = (unsigned long long) x;
-    int                 leading_zeros = __builtin_clzll(ull);
-    ngx_uint_t          wlog = 64 - leading_zeros;
+    ull = (unsigned long long) x;
+    leading_zeros = __builtin_clzll(ull);
+    wlog = 64 - leading_zeros;
 
     if ((ull & (ull - 1)) == 0) {
         /* Exact power of two: bit length is one too many. */
@@ -127,9 +138,9 @@ ngx_http_zstd_ceil_log2(size_t x)
 #else
     /* Fallback: linear shift-and-count to find the highest set bit position.
      * At most 13 iterations for size_t values in our range (1025 to 2^23).
-     * Declared inside the branch to keep C99+ compound-literal style. */
-    ngx_uint_t  wlog = 10;
-    size_t      pow2 = 1024;  /* 2^10 */
+     * Its declarations stay at function scope for C89/MSVC compatibility. */
+    wlog = 10;
+    pow2 = 1024;  /* 2^10 */
 
     while (pow2 < x && wlog < 23) {
         pow2 <<= 1;
