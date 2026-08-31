@@ -61,4 +61,31 @@ cp ci/tools/test_ceil_log2_unit.c "$OUT/test_ceil_log2_unit.c"
     -o "$OUT/ceil_log2_unit" "$OUT/test_ceil_log2_unit.c"
 "$OUT/ceil_log2_unit"
 
+# C89 has neither `unsigned long long` nor C99's mixed declarations.  This
+# strict fixture therefore selects the portable fallback, executes its power-
+# of-two boundaries, and makes either construct leaking into that path a hard
+# compile failure.
+cat > "$OUT/test_ceil_log2_c89.c" <<'EOF'
+#include <stddef.h>
+
+typedef unsigned long ngx_uint_t;
+#define ngx_inline __inline
+
+#include "generated_ceil_log2.inc"
+
+int
+main(void)
+{
+    return ngx_http_zstd_ceil_log2(1024) != 10
+           || ngx_http_zstd_ceil_log2(1025) != 11
+           || ngx_http_zstd_ceil_log2(4096) != 12
+           || ngx_http_zstd_ceil_log2(4097) != 13
+           || ngx_http_zstd_ceil_log2((size_t) 1 << 23) != 23;
+}
+EOF
+
+"$CC" -std=c89 -pedantic-errors -Wall -Wextra -Werror -O2 -I"$OUT" \
+    -o "$OUT/ceil_log2_c89" "$OUT/test_ceil_log2_c89.c"
+"$OUT/ceil_log2_c89"
+
 echo "OK: ceil_log2 unit fixture (extracted from current $SRC)"

@@ -15,6 +15,11 @@ typedef unsigned char  u_char;
 
 #define ngx_memcpy  memcpy
 
+#ifdef TEST_BIG_ENDIAN_FALLBACK
+#undef __BYTE_ORDER__
+#define __BYTE_ORDER__  __ORDER_BIG_ENDIAN__
+#endif
+
 /* The shipped probe itself (#270) -- no generated extraction. */
 #include "../../src/ngx_http_zstd_frame_probe.h"
 

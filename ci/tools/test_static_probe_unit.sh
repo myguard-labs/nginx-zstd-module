@@ -32,3 +32,13 @@ done
 	ci/tools/test_static_probe_unit.c
 
 "$OUT/test_static_probe_unit"
+
+# The production header is also consumed by C89-era/MSVC-style builds.
+# Compile the same behavioral fixture in strict C89 mode so declarations
+# introduced inside the byte-decoding fallback cannot regress portability.
+"$CC" -std=c89 -pedantic-errors -Wall -Wextra -Werror -O1 \
+	-Dngx_inline=__inline -DTEST_BIG_ENDIAN_FALLBACK -I ci/tools \
+	-o "$OUT/test_static_probe_unit_c89" \
+	ci/tools/test_static_probe_unit.c
+
+"$OUT/test_static_probe_unit_c89"
