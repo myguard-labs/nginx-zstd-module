@@ -129,6 +129,32 @@
 #define NGX_HTTP_ZSTD_STATIC_DIO_SCRATCH_MAX  \
     (NGX_HTTP_ZSTD_STATIC_DIO_PROBE_MAX * 2)
 
+/*
+ * Bounded worker-local cache for malformed sidecars.  A broken generated
+ * asset otherwise incurs the same probe and NGX_LOG_ERR on every request.
+ * The exact path and mtime form the identity: changing either forces a fresh
+ * probe.  Fixed storage avoids an unbounded worker-lifetime allocation
+ * surface; overlong paths simply retain the established behaviour.
+ */
+#define NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS  64
+
+#if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
+
+typedef struct {
+    ngx_file_uniq_t  uniq;
+    time_t      mtime;
+    off_t       size;
+    size_t      len;
+    ngx_uint_t  valid;
+    u_char      path[NGX_MAX_PATH];
+} ngx_http_zstd_static_bad_cache_t;
+
+static ngx_http_zstd_static_bad_cache_t
+    ngx_http_zstd_static_bad_cache[NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS];
+static ngx_uint_t  ngx_http_zstd_static_bad_cache_next;
+
+#endif
+
 
 typedef struct {
     ngx_uint_t  enable;
@@ -659,6 +685,60 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
 
 
 #if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
+
+static ngx_uint_t
+ngx_http_zstd_static_bad_cached(ngx_str_t *path, ngx_open_file_info_t *of)
+{
+    ngx_uint_t                         i;
+    ngx_http_zstd_static_bad_cache_t  *entry;
+
+    if (path->len >= NGX_MAX_PATH) {
+        return 0;
+    }
+
+    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS; i++) {
+        entry = &ngx_http_zstd_static_bad_cache[i];
+
+        if (entry->valid && entry->uniq == of->uniq
+            && entry->mtime == of->mtime && entry->size == of->size
+            && entry->len == path->len
+            && ngx_memcmp(entry->path, path->data, path->len) == 0)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+static void
+ngx_http_zstd_static_bad_remember(ngx_str_t *path, ngx_open_file_info_t *of)
+{
+    ngx_http_zstd_static_bad_cache_t  *entry;
+
+    if (path->len >= NGX_MAX_PATH) {
+        return;
+    }
+
+    entry = &ngx_http_zstd_static_bad_cache[
+                ngx_http_zstd_static_bad_cache_next];
+    entry->uniq = of->uniq;
+    entry->mtime = of->mtime;
+    entry->size = of->size;
+    entry->len = path->len;
+    ngx_memcpy(entry->path, path->data, path->len);
+    entry->valid = 1;
+
+    ngx_http_zstd_static_bad_cache_next++;
+    if (ngx_http_zstd_static_bad_cache_next
+        == NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS)
+    {
+        ngx_http_zstd_static_bad_cache_next = 0;
+    }
+}
+
+
 /*
  * Magic-number sanity check on the .zst file.
  *
@@ -820,7 +900,7 @@ ngx_http_zstd_static_probe_verdict(const u_char *frame, size_t avail,
 static ngx_int_t
 ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     const ngx_http_core_loc_conf_t *clcf, ngx_open_file_info_t *of,
-    ngx_str_t *path, ngx_log_t *log)
+    ngx_str_t *path, ngx_log_t *log, ngx_uint_t *malformed)
 {
     /*
      * 58 bytes covers a canonical 40-byte dcz skippable prefix plus
@@ -837,10 +917,13 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     off_t        pos, base, have_base;
     ngx_int_t    probe_rc;
 
+    *malformed = 0;
+
     if (of->size < 4) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "zstd static: \"%s\" too small to be a zstd frame "
                       "(%O bytes)", path->data, of->size);
+        *malformed = 1;
         return NGX_DECLINED;
     }
 
@@ -1001,6 +1084,7 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
                               "against the device geometry",
                               align, path->data, n);
                 probe_rc = NGX_DECLINED;
+                *malformed = (n >= 0);
                 goto probe_done;
             }
 
@@ -1017,6 +1101,7 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
                           "(\"%s\", frame header) returned %z",
                           path->data, n);
             probe_rc = NGX_DECLINED;
+            *malformed = (n >= 0);
             goto probe_done;
         }
 
@@ -1045,6 +1130,7 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
                               (ngx_uint_t)
                                   NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES + 1);
                 probe_rc = NGX_DECLINED;
+                *malformed = 1;
                 goto probe_done;
             }
 
@@ -1052,6 +1138,7 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
         }
 
         if (probe_rc != NGX_OK) {
+            *malformed = 1;
             goto probe_done;
         }
 
@@ -1316,7 +1403,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 {
     u_char                       *p;
     ngx_int_t                     rc;
-    ngx_uint_t                    accepts;
+    ngx_uint_t                    accepts, malformed;
     ngx_uint_t                    level;
     size_t                        root;
     ngx_str_t                     path;
@@ -1445,8 +1532,19 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 #endif /* !NGX_WIN32 */
 
 #if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
-    rc = ngx_http_zstd_static_probe_file(r, clcf, &of, &path, log);
+    if (ngx_http_zstd_static_bad_cached(&path, &of)) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+                       "zstd static: cached malformed verdict for \"%s\"",
+                       path.data);
+        return NGX_DECLINED;
+    }
+
+    rc = ngx_http_zstd_static_probe_file(r, clcf, &of, &path, log,
+                                         &malformed);
     if (rc != NGX_OK) {
+        if (malformed) {
+            ngx_http_zstd_static_bad_remember(&path, &of);
+        }
         return rc;
     }
 #endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */

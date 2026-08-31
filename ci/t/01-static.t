@@ -23,6 +23,7 @@ add_block_preprocessor(sub {
 no_long_string();
 log_level 'debug';
 repeat_each(3);
+check_accum_error_log();
 plan 'no_plan';
 run_tests();
 
@@ -1720,3 +1721,40 @@ Content-Encoding: zstd
 reusing 58-byte block at offset 0 for next frame
 --- no_error_log
 [error]
+
+
+
+=== TEST 58: malformed sidecar verdict is memoized per path and mtime
+# Three repeated requests hit the same malformed sidecar and fixed revision.
+# The first path is probed; the later requests use its worker-local verdict.
+# Matching only the stable message fragments makes
+# grep_error_log_out an exact count assertion independent of the temp path.
+#
+# Falsifiability: removing the cache lookup yields three "not a zstd frame"
+# matches and no cached-verdict matches.
+--- config
+    error_log logs/error.log debug;
+    location /memoized.txt {
+        zstd_static on;
+        root html;
+    }
+--- user_files
+>>> memoized.txt 202601010000.00
+identity fallback
+>>> memoized.txt.zst 202601010000.00
+HELO malformed sidecar
+--- request
+GET /memoized.txt
+--- more_headers
+Accept-Encoding: zstd
+--- response_body
+identity fallback
+--- grep_error_log eval
+qr/(?:is not a zstd frame|cached malformed verdict)/
+--- grep_error_log_out eval
+["is not a zstd frame\n",
+ "is not a zstd frame\ncached malformed verdict\n",
+ "is not a zstd frame\ncached malformed verdict\n"
+ . "cached malformed verdict\n"]
+--- no_error_log
+[alert]
