@@ -853,6 +853,13 @@ case_chain_dcz_q0_then_q1_accepts(void)
           "chain/dcz: later 'dcz;q=1' overrides an earlier refusal");
 }
 
+static void
+case_chain_dcz_q1_then_q0_declines(void)
+{
+    check(chain_dcz("dcz;q=1", "dcz;q=0", NULL, NULL) == NGX_DECLINED,
+          "chain/dcz: later 'dcz;q=0' overrides an earlier allowance");
+}
+
 /*
  * The wildcard gate survives the chain: a '*' on ANY line must not turn
  * dcz on, because only a client holding the dictionary can decode it.
@@ -1483,6 +1490,7 @@ main(void)
     case_chain_dcz_q0_second_line();
     case_chain_dcz_q0_first_line();
     case_chain_dcz_q0_then_q1_accepts();
+    case_chain_dcz_q1_then_q0_declines();
     case_chain_dcz_wildcard_never_matches();
     case_chain_dcz_three_lines();
 

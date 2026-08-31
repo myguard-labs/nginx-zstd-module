@@ -958,8 +958,8 @@ Content-Encoding: dcz
 
 
 === TEST 36: chained Accept-Encoding — "dcz;q=0" on a later line falls back
-# The duplicate-coding rule reaches dcz too: an explicit refusal anywhere
-# in the field is final. Falling back to plain zstd is the safe direction.
+# An explicit dcz refusal is the latest matching token, so this falls back
+# to plain zstd.
 --- config
     location /t {
         zstd on;
@@ -979,7 +979,9 @@ Content-Encoding: zstd
 
 
 
-=== TEST 37: chained Accept-Encoding — "dcz;q=0" first, "dcz;q=1" later, still falls back
+=== TEST 37: chained Accept-Encoding — "dcz;q=0" first, "dcz;q=1" later accepts
+# Duplicate field lines are comma-joined in received order, so the latest
+# explicit dcz token decides just as it does in a single field line.
 --- config
     location /t {
         zstd on;
@@ -992,6 +994,27 @@ Content-Encoding: zstd
 GET /t
 --- more_headers eval
 "Accept-Encoding: zstd, dcz;q=0\nAccept-Encoding: dcz;q=1\nAvailable-Dictionary: :$::dict_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+=== TEST 37b: chained Accept-Encoding — "dcz;q=1" first, "dcz;q=0" later falls back
+# Negative control for TEST 37: reversing the same fields must reverse the
+# dcz decision and leave the plain zstd fallback selected.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz;q=1\nAccept-Encoding: dcz;q=0\nAvailable-Dictionary: :$::dict_b64:"
 --- response_headers
 Content-Encoding: zstd
 --- no_error_log
