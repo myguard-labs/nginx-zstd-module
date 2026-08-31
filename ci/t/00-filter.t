@@ -3080,10 +3080,9 @@ Content-Length: 59738
 
 
 
-=== TEST 108: chained Accept-Encoding — q=0 then q=1 stays declined
-# The self-contradictory case RFC 9110 does not resolve. Fail-safe: the
-# explicit refusal wins, so the worst case is a missed compression, never
-# an undecodable body.
+=== TEST 108: chained Accept-Encoding — q=0 then q=1 accepts
+# Duplicate field lines are comma-joined in received order, so this follows
+# the parser's existing last-explicit-token-wins rule.
 --- config
     location /filter {
         zstd on;
@@ -3098,6 +3097,31 @@ GET /filter
 --- more_headers
 Accept-Encoding: zstd;q=0
 Accept-Encoding: zstd;q=1
+--- response_headers
+!Content-Length
+Transfer-Encoding: chunked
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+=== TEST 108b: chained Accept-Encoding — q=1 then q=0 declines
+# Negative control for TEST 108: reversing the same fields must reverse the
+# decision, proving that field order reaches the live negotiation path.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd;q=1
+Accept-Encoding: zstd;q=0
 --- response_headers
 Content-Length: 59738
 !Content-Encoding

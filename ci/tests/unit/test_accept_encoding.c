@@ -713,12 +713,7 @@ case_chain_single_line_unchanged(void)
           "chain: single 'zstd' line still accepts");
 }
 
-/*
- * q=0 STICKINESS. An explicit refusal on either line is final, and in
- * particular a later q=1 must NOT upgrade an earlier q=0 back into an
- * accept -- that is the direction that serves a body the client said it
- * cannot decode.
- */
+/* Duplicate explicit values follow the received (comma-joined) order. */
 static void
 case_chain_q0_first_line(void)
 {

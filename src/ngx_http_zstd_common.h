@@ -493,30 +493,10 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
  * Accept-Encoding negotiation, and a client that split its codings across
  * two lines is entitled to the same answer it would have got from one.
  *
- * DUPLICATE-CODING RULE — an explicit q=0 anywhere is final ("sticky").
- *
- * When the same coding appears in more than one field line with different
- * weights (`zstd;q=0` on one line, `zstd;q=1` on another), the joined list
- * is self-contradictory and RFC 9110 blesses no winner, because a
- * conforming sender should never have produced it. We resolve it in the
- * fail-safe direction: the LOWEST explicit weight wins, so an explicit
- * "do not send me this" is honoured wherever it appears and can never be
- * upgraded back into an accept by a later line.
- *
- * That is not a new policy invented here — it is the policy this module
- * already documents. README's "Selection policy" says the module "honours
- * each coding's own q=0 as an absolute 'not acceptable'", and the dcz
- * section lists "dcz;q=0" as a hard gate miss. "Absolute" has to mean
- * absolute across the whole field, otherwise a client can refuse a coding
- * on one line and have the refusal quietly discarded by the next.
- *
- * The asymmetry is the whole argument: honouring a q=0 that appeared
- * anywhere can only ever make us send LESS zstd than a permissive reading
- * would. The opposite rule (last-wins) can turn an explicit refusal into an
- * accept, and the failure that produces — a body the client told us it
- * cannot decode — is the one that actually hurts a user. Between two
- * defensible readings of input that should not exist, we take the one whose
- * worst case is a missed compression opportunity.
+ * Duplicate coding values retain that received order: the latest explicit
+ * token wins, just as it does within one field line. Thus `zstd;q=0` then
+ * `zstd;q=1` accepts, while the reversed order declines. This keeps a
+ * comma-joined set of lines equivalent to its single-field representation.
  *
  * The wildcard is accumulated the same way and stays subordinate to an
  * explicit token exactly as in the single-value parser: any explicit token
