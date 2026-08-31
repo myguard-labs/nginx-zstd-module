@@ -49,9 +49,10 @@ BIN="$DIR/test_accept_encoding"
 LEGACY_BIN="$DIR/test_accept_encoding_legacy"
 CHAIN_BIN="$DIR/test_accept_encoding_chain"
 PROBE_BIN="$DIR/test_static_probe"
+VERSION_BIN="$DIR/test_version_policy"
 
 if [ "${1:-}" = "clean" ]; then
-	rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$PROBE_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
+	rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$PROBE_BIN" "$VERSION_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
 	echo "unit test binary removed"
 	exit 0
 fi
@@ -135,3 +136,13 @@ echo "==> Running"
 # away, but a timeout costs nothing and keeps the layer's failure mode
 # uniform.
 timeout 60s "$PROBE_BIN"
+
+echo "==> Building $VERSION_BIN with ${CC}"
+# shellcheck disable=SC2086
+$CC "${OWN_CFLAGS[@]}" -c "$DIR/test_version_policy.c" \
+	-o "$DIR/test_version_policy.o"
+# shellcheck disable=SC2086
+$CC "${LINK_EXTRA[@]}" -o "$VERSION_BIN" "$DIR/test_version_policy.o"
+
+echo "==> Running libzstd version policy checks"
+timeout 60s "$VERSION_BIN"
