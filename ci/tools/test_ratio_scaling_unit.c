@@ -33,6 +33,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 
 typedef unsigned long  ngx_uint_t;
@@ -103,6 +104,107 @@ main(void)
         /* bytes_in / bytes_out == 1, remainder == 1, frac == 1000/(MAX-1)
          * which truncates to 0. */
         check("near-uint64-max-both", bytes_in, bytes_out, 1, 0);
+    }
+
+    /* 3. Expanding stream: bytes_out > bytes_in, which happens whenever
+     * zstd expands incompressible input. This is the case a divide-first
+     * form still gets wrong -- the remainder is then bytes_in itself, so
+     * scaling it by 1000 in one step overflows exactly as the original
+     * single-expression form did. Reported by CodeRabbit against the first
+     * version of this fix; the digit-at-a-time long division must report
+     * 0.999 rather than wrapping to 0.000. */
+    check("large-expanding-stream", UINT64_MAX - 1, UINT64_MAX, 0, 999);
+    check("expanding-half", 500, 1000, 0, 500);
+    check("expanding-near-max-third", UINT64_MAX / 3, UINT64_MAX, 0, 333);
+
+    /* 4. Differential sweep against an unsigned __int128 oracle over a
+     * mix of ordinary and extreme magnitudes. The oracle computes the
+     * exact bytes_in*1000/bytes_out in 128-bit, so any wrap or precision
+     * loss in the 64-bit implementation shows up as a mismatch rather
+     * than needing a hand-picked witness per case. */
+    {
+        static const uint64_t vals[] = {
+            1, 2, 3, 7, 999, 1000, 1001, 65535,
+            4294967295ULL, 4294967296ULL,
+            987654321987654321ULL,
+            UINT64_MAX / 3, UINT64_MAX / 2, UINT64_MAX - 1, UINT64_MAX
+        };
+        size_t  n = sizeof(vals) / sizeof(vals[0]);
+        size_t  i, j;
+
+        for (i = 0; i < n; i++) {
+            for (j = 0; j < n; j++) {
+                unsigned __int128  scaled;
+                uint64_t           bi = vals[i];
+                uint64_t           bo = vals[j];
+                ngx_uint_t         gi, gf;
+                char               name[64];
+
+                scaled = ((unsigned __int128) bi * 1000)
+                         / (unsigned __int128) bo;
+
+                ngx_http_zstd_ratio_parts(bi, bo, &gi, &gf);
+
+                if (gi != (ngx_uint_t) (scaled / 1000)
+                    || gf != (ngx_uint_t) (scaled % 1000))
+                {
+                    snprintf(name, sizeof(name), "oracle[%zu][%zu]", i, j);
+                    printf("FAIL %s: bytes_in=%llu bytes_out=%llu -> "
+                           "%llu.%03llu, want %llu.%03llu\n",
+                           name, (unsigned long long) bi,
+                           (unsigned long long) bo,
+                           (unsigned long long) gi,
+                           (unsigned long long) gf,
+                           (unsigned long long) (scaled / 1000),
+                           (unsigned long long) (scaled % 1000));
+                    failures++;
+                }
+            }
+        }
+    }
+
+    /* 5. Randomized differential sweep against the same 128-bit oracle,
+     * with a fixed seed so a failure is reproducible. Covers magnitude
+     * combinations the hand-picked table does not enumerate, including
+     * many bytes_out > bytes_in (expanding) pairs. */
+    {
+        unsigned long long  state = 0x9E3779B97F4A7C15ULL;
+        int                 iter;
+
+        for (iter = 0; iter < 200000; iter++) {
+            unsigned __int128  scaled;
+            uint64_t           bi, bo;
+            ngx_uint_t         gi, gf;
+
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            bi = state;
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            bo = state;
+
+            /* exercise small magnitudes too, not only full-width values */
+            if (iter % 3 == 1) { bi >>= (iter % 63); }
+            if (iter % 3 == 2) { bo >>= (iter % 63); }
+
+            if (bo == 0) { bo = 1; }
+
+            scaled = ((unsigned __int128) bi * 1000) / (unsigned __int128) bo;
+
+            ngx_http_zstd_ratio_parts(bi, bo, &gi, &gf);
+
+            if (gi != (ngx_uint_t) (scaled / 1000)
+                || gf != (ngx_uint_t) (scaled % 1000))
+            {
+                printf("FAIL random[%d]: bytes_in=%llu bytes_out=%llu -> "
+                       "%llu.%03llu, want %llu.%03llu\n",
+                       iter, (unsigned long long) bi,
+                       (unsigned long long) bo,
+                       (unsigned long long) gi, (unsigned long long) gf,
+                       (unsigned long long) (scaled / 1000),
+                       (unsigned long long) (scaled % 1000));
+                failures++;
+                break;
+            }
+        }
     }
 
     if (failures) {
