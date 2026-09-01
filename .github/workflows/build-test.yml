@@ -772,6 +772,14 @@ jobs:
           ls -la "$MATRIX_DIR/objs/$MATRIX_FLAVOR"
           "$MATRIX_DIR/objs/$MATRIX_FLAVOR" -V 2>&1
 
+      - name: Module must not veto an http-less configuration
+        env:
+          MATRIX_DIR: ${{ matrix.dir }}
+          MATRIX_FLAVOR: ${{ matrix.flavor }}
+        run: |
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_no_http_block.sh \
+            "$MATRIX_DIR/objs/$MATRIX_FLAVOR"
+
       - name: Upload server binary artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
