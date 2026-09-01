@@ -126,10 +126,17 @@ if ! grep -q '^[[:space:]]*ngx_zstd_opt_I="-I\$ZSTD_INC -DZSTD_STATIC_LINKING_ON
     echo "FAIL: auto/zstd no longer stages -DZSTD_STATIC_LINKING_ONLY in the ZSTD_INC/ZSTD_LIB static-archive branch the way this test expects -- update auto/zstd's staging line or this test together with README.md's Installation/Compatibility wording"
     fail=1
 fi
-if grep -q 'auto-discovery' auto/zstd \
-    && grep -A2 '# auto-discovery: prefer dynamic linking' auto/zstd \
-       | grep -q 'DZSTD_STATIC_LINKING_ONLY'; then
-    echo "FAIL: auto/zstd's auto-discovery branch now defines -DZSTD_STATIC_LINKING_ONLY -- README.md's 'plain ./configure does not enable it' claim is stale and must be rewritten to match"
+# Extract the WHOLE auto-discovery `else` branch (from its marker comment to
+# the closing `fi` at the same indent) rather than a fixed window, so the flag
+# cannot be reintroduced anywhere inside it and still pass this test.
+zstd_autodisco_branch=$(
+    sed -n '/^    # auto-discovery: prefer dynamic linking/,/^fi$/p' auto/zstd
+)
+if [ -z "$zstd_autodisco_branch" ]; then
+    echo "FAIL: could not locate auto/zstd's auto-discovery branch (the '# auto-discovery: prefer dynamic linking' marker or its closing 'fi' moved) -- update this test together with auto/zstd and README.md"
+    fail=1
+elif printf '%s\n' "$zstd_autodisco_branch" | grep -q 'DZSTD_STATIC_LINKING_ONLY'; then
+    echo "FAIL: auto/zstd's auto-discovery branch now mentions -DZSTD_STATIC_LINKING_ONLY -- README.md's 'plain ./configure does not enable it' claim is stale and must be rewritten to match"
     fail=1
 fi
 # shellcheck disable=SC2016  # literal README phrase, backticks must not run
