@@ -425,9 +425,7 @@ http {{
             if args.log_level == "debug":
                 witness_floors = (
                     WitnessFloor(NOMEM_WITNESS, "buffer-cap/nomem", 1),
-                    WitnessFloor(
-                        FLUSH_WITNESS, "content-less flush", PROXY_REPEAT
-                    ),
+                    WitnessFloor(FLUSH_WITNESS, "content-less flush", PROXY_REPEAT),
                 )
             for witness, path_name, floor in witness_floors:
                 n = elog.count(witness)
