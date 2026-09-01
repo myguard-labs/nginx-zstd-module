@@ -60,7 +60,9 @@ check_accepted() {
 
 # --- injection payloads (the actual F1 exploit shape) ---
 check_rejected '3600"; id; #' "quote-breakout shell injection"
+# shellcheck disable=SC2016  # literal payload fixture, must not expand
 check_rejected '$(id)' "command substitution"
+# shellcheck disable=SC2016  # literal payload fixture, must not expand
 check_rejected '`id`' "backtick substitution"
 check_rejected '3600; rm -rf /' "semicolon-chained command"
 check_rejected '3600 && id' "shell-and injection"

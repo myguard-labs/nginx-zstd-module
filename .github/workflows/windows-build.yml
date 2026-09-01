@@ -167,7 +167,8 @@ jobs:
           events {}
           http { server { listen 127.0.0.1:18080; zstd_not_a_directive on; } }
           '@ | Set-Content -Encoding ascii conf/invalid.conf
-          if (& .\objs\nginx.exe -t -p . -c conf/invalid.conf 2>$null) {
+          & .\objs\nginx.exe -t -p . -c conf/invalid.conf 2>$null
+          if ($LASTEXITCODE -eq 0) {
             throw 'invalid zstd directive was accepted'
           }
           & .\objs\nginx.exe -t -p . -c conf/nginx.conf

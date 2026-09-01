@@ -166,16 +166,24 @@ python3 ci/tools/test_var_dynamic_cacheable.py \
 
 # The testkit is the only layer that reaches worker-internal fault/counter
 # paths. Use the same canonical six-scenario runner as the PR and Memcheck
-# jobs; a failure stays visible but does not suppress the remaining gcov data,
-# because this script publishes a report rather than acting as a test gate.
+# jobs; a failure stays visible AND fails this script at the end (after the
+# report is still published) -- a bailed-out scenario, whose TAP plan/oracle
+# evidence run-testkit-scenarios.sh already verifies per scenario, must never
+# pass silently just because the coverage PERCENTAGE has no floor.
+HARNESS_SCENARIOS_FAILED=0
 if [ "$COVERAGE_HARNESS" = "1" ]; then
     echo "== coverage: exercising all module testkit scenarios =="
     if [ ! -x "$MODULE_DIR/ci/t/harness/ci/prober/run-scenario.sh" ]; then
         echo "WARNING: harness submodule not checked out --" \
              "fault/counter paths will report as uncovered" >&2
     else
-        if [ ! -x "$MODULE_DIR/ci/t/harness/ci/prober/prober" ]; then
-            bash "$MODULE_DIR/ci/t/harness/ci/prober/build.sh" || true
+        # Always (re)build: the prober binary can exist but be staler than its
+        # sources, which silently bails every fault/counter scenario while
+        # this script still reports coverage success (audit A30-F7).
+        if ! bash "$MODULE_DIR/ci/t/harness/ci/prober/build.sh"; then
+            echo "ERROR: prober build failed --" \
+                 "fault/counter paths will report as uncovered" >&2
+            HARNESS_SCENARIOS_FAILED=1
         fi
 
         scen_version="${SRCDIR##*/}"
@@ -187,8 +195,10 @@ if [ "$COVERAGE_HARNESS" = "1" ]; then
             --flavor "$FLAVOR" \
             --version "$scen_version" \
             --log-dir "$REPORT_DIR"; then
-            echo "WARNING: one or more testkit scenarios failed;" \
-                 "their missing lines remain visible in the report" >&2
+            echo "ERROR: one or more testkit scenarios failed their TAP" \
+                 "plan/oracle; their missing lines remain visible in the" \
+                 "report, but this run will exit non-zero" >&2
+            HARNESS_SCENARIOS_FAILED=1
         fi
     fi
 fi
@@ -244,3 +254,10 @@ fi
 gcovr "${GCOVR_ARGS[@]}"
 
 echo "== coverage: report written to $REPORT_DIR =="
+
+if [ "$HARNESS_SCENARIOS_FAILED" -ne 0 ]; then
+    echo "ERROR: coverage report published above, but one or more testkit" \
+         "scenarios did not verify -- see the ERROR lines above for which" \
+         "scenario/TAP plan bailed" >&2
+    exit 1
+fi

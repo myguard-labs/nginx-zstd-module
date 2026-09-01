@@ -75,10 +75,33 @@ SHA_ZSTD=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
 # failure). Overridable so a fix branch can be tested before it lands:
 #   REPO_ZSTD_MODULE=<fork url> REF_ZSTD_MODULE=<branch> (fresh clone
 #   required when switching repos — the existing clone's origin wins).
-# The zstd-module pin is the squash commit that brought the MSVC
-# support this script depends on.
-REPO_ZSTD_MODULE=${REPO_ZSTD_MODULE:-https://github.com/myguard-labs/nginx-zstd-module.git}
-REF_ZSTD_MODULE=${REF_ZSTD_MODULE:-37cf9ac6b58284ae2da95620f4905930d1277b54}
+#
+# The zstd module default resolves to the CURRENT CHECKOUT (this script's
+# own repo, HEAD), not a fixed historical commit (audit A30-F3: a static
+# commit pin here drifted ~154 commits behind and silently built a stale
+# module even though the README presents this script alongside current
+# behaviour). REPO_ZSTD_MODULE/REF_ZSTD_MODULE stay fully overridable for
+# the deliberate self-pin / fork-testing use case documented above.
+_zstd_module_repo_root() {
+    # SCRIPT_DIR is not assigned yet this early — derive it locally so this
+    # default resolves regardless of where DIR_PROJECT/SCRIPT_DIR end up.
+    local script_dir
+    script_dir=$(cd "$(dirname "$0")" && pwd)
+    git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true
+}
+if [ -z "${REPO_ZSTD_MODULE:-}" ] || [ -z "${REF_ZSTD_MODULE:-}" ]; then
+    _default_zstd_root="$(_zstd_module_repo_root)"
+    if [ -n "$_default_zstd_root" ] && [ -d "$_default_zstd_root/ci/tools" ]; then
+        REPO_ZSTD_MODULE=${REPO_ZSTD_MODULE:-$_default_zstd_root}
+        REF_ZSTD_MODULE=${REF_ZSTD_MODULE:-$(git -C "$_default_zstd_root" rev-parse HEAD)}
+    else
+        # Not running from inside a nginx-zstd-module checkout (e.g. a
+        # standalone copy of this script) — fall back to the last commit
+        # verified to build cleanly under this script, same as before.
+        REPO_ZSTD_MODULE=${REPO_ZSTD_MODULE:-https://github.com/myguard-labs/nginx-zstd-module.git}
+        REF_ZSTD_MODULE=${REF_ZSTD_MODULE:-37cf9ac6b58284ae2da95620f4905930d1277b54}
+    fi
+fi
 REPO_BROTLI=${REPO_BROTLI:-https://github.com/mreiden/ngx_brotli.git}
 REF_BROTLI=${REF_BROTLI:-a7705082d191df904f25fe82188c4dd87e16ff8d}
 REPO_HEADERS_MORE=${REPO_HEADERS_MORE:-https://github.com/openresty/headers-more-nginx-module.git}
@@ -210,8 +233,10 @@ if [ "$WITH_BROTLI" = 1 ]; then
         cmake --build ngx_brotli/deps/brotli/out
     fi
 fi
-[ "$WITH_ZSTD" = 1 ] \
-    && clone_module nginx-zstd-module "$REPO_ZSTD_MODULE" "$REF_ZSTD_MODULE"
+if [ "$WITH_ZSTD" = 1 ]; then
+    echo "nginx-zstd-module: repo=$REPO_ZSTD_MODULE ref=$REF_ZSTD_MODULE" >&2
+    clone_module nginx-zstd-module "$REPO_ZSTD_MODULE" "$REF_ZSTD_MODULE"
+fi
 
 cd ../..   # back to nginx-$VER_NGINX
 

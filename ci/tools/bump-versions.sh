@@ -15,13 +15,13 @@
 #     no static mainline pin in this repo to bump.
 #   - nginx STABLE pin  -- ci-deep.yml's build-flavors matrix (label: stable)
 #   - angie pin         -- ci-deep.yml's build-flavors matrix (label: angie)
-#   - NGINX_SHA256       -- tools/ci-build.sh, nginx-stable only (verified
+#   - NGINX_SHA256       -- ci/tools/ci-build.sh, nginx-stable only (verified
 #                            against the tarball's OWN PGP signature via the
-#                            vendored keys in tools/keys/ before the digest is
-#                            recorded, so a bad bump can't silently pin a
+#                            vendored keys in ci/tools/keys/ before the digest
+#                            is recorded, so a bad bump can't silently pin a
 #                            malicious tarball's hash -- floating mainline has
 #                            no entry here, see above)
-#   - ANGIE_SHA256       -- tools/ci-build.sh (angie.software publishes no
+#   - ANGIE_SHA256       -- ci/tools/ci-build.sh (angie.software publishes no
 #                            PGP signature, so sha256 is the only check)
 #
 # A version bump with a stale sha256 pin is worse than no pin (ci-build.sh
@@ -35,8 +35,17 @@ set -euo pipefail
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
-# ci/tools/ -> ci/ -> repo root: TWO levels since the ci/ move.
-cd "$(dirname "$0")/../.."
+# Derive every repo-relative path from the script's OWN location, never from
+# cwd -- a caller running this from elsewhere must not silently miss the
+# ci-build.sh / keys move (A30-F4: tools/ -> ci/tools/, verified dead on the
+# old paths).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
+
+CI_BUILD_SH="ci/tools/ci-build.sh"
+KEYS_DIR="ci/tools/keys"
+MATRIX_FILE=".github/workflows/ci-deep.yml"
 
 # --- discover latest versions -------------------------------------------
 
@@ -85,7 +94,7 @@ matrix_version_for_label() {
     awk -v want="$1" '
         /version:/ { match($0, /"[0-9.]+"/); v = substr($0, RSTART+1, RLENGTH-2); next }
         /label:/   { split($0, a, ":"); l = a[2]; gsub(/[ \t]/, "", l); if (l == want) { print v; exit } }
-    ' .github/workflows/ci-deep.yml
+    ' "$MATRIX_FILE"
 }
 
 CUR_STABLE="$(matrix_version_for_label stable)"
@@ -122,8 +131,14 @@ sha256_for_nginx_stable() {
     export GNUPGHOME
     chmod 700 "$gnupghome"
     shopt -s nullglob
-    keyfiles=(tools/keys/*.key)
+    keyfiles=("$KEYS_DIR"/*.key)
     shopt -u nullglob
+    if [ "${#keyfiles[@]}" -eq 0 ]; then
+        rm -rf "$gnupghome" "$tmp" "${tmp}.asc"
+        unset GNUPGHOME
+        echo "FATAL: no keyring found under $KEYS_DIR -- refusing to pin an unverified digest" >&2
+        exit 1
+    fi
     for keyfile in "${keyfiles[@]}"; do
         gpg --quiet --import "$keyfile" 2>/dev/null
     done
@@ -142,39 +157,60 @@ sha256_for_nginx_stable() {
 }
 
 # --- bump a version in ci-deep.yml's build-flavors matrix ----------------
+# Every mutator here writes to a temp file and renames it into place only
+# after the edit is confirmed to have actually matched something -- a no-op
+# replacement (stale path, drifted format) now FAILS LOUDLY instead of
+# silently leaving the source file untouched while the script reports success
+# (A30-F4). No partial edits: either the temp file replaces the original, or
+# the original is untouched and the script exits non-zero.
 bump_matrix_pin() {
-    local label="$1" old="$2" new="$3"
+    local label="$1" old="$2" new="$3" tmp
     [ "$old" = "$new" ] && return 0
-    python3 - "$label" "$old" "$new" <<'PYEOF'
+    tmp="$(mktemp)"
+    if ! python3 - "$label" "$old" "$new" "$MATRIX_FILE" "$tmp" <<'PYEOF'
 import re, sys
-label, old, new = sys.argv[1:4]
-path = ".github/workflows/ci-deep.yml"
+label, old, new, path, out = sys.argv[1:6]
 text = open(path).read()
 pattern = re.compile(
     r'(version:\s*"' + re.escape(old) + r'"\n\s*label:\s*' + re.escape(label) + r')'
 )
 replaced = pattern.sub(lambda m: m.group(1).replace(old, new), text)
 if replaced == text:
-    print(f"WARNING: no matrix entry matched for label={label} old={old}", file=sys.stderr)
-open(path, "w").write(replaced)
+    print(f"FATAL: no matrix entry matched for label={label} old={old} in {path}", file=sys.stderr)
+    sys.exit(1)
+open(out, "w").write(replaced)
 PYEOF
+    then
+        rm -f "$tmp"
+        exit 1
+    fi
+    mv "$tmp" "$MATRIX_FILE"
+    CHANGED=1
+}
+
+_bump_sha256_pin() {
+    local table="$1" old="$2" new="$3" digest="$4" tmp
+    grep -q "\[\"${new}\"\]" "$CI_BUILD_SH" && return 0 # already pinned
+    if ! grep -q "declare -A ${table}=(" "$CI_BUILD_SH"; then
+        echo "FATAL: no 'declare -A ${table}=(' table found in $CI_BUILD_SH -- refusing a no-op pin" >&2
+        exit 1
+    fi
+    tmp="$(mktemp)"
+    # Insert the new pin right after the table's opening line; leave old
+    # entries in place (ci-build.sh keys by version, older callers still work).
+    sed "/declare -A ${table}=(/a\\    [\"${new}\"]=\"${digest}\"" "$CI_BUILD_SH" >"$tmp"
+    mv "$tmp" "$CI_BUILD_SH"
     CHANGED=1
 }
 
 bump_angie_sha256_pin() {
     local old="$1" new="$2" digest="$3"
-    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0 # already pinned
-    # Insert the new pin right after the table's opening line; leave old
-    # entries in place (ci-build.sh keys by version, older callers still work).
-    sed -i "/declare -A ANGIE_SHA256=(/a\\    [\"${new}\"]=\"${digest}\"" tools/ci-build.sh
-    CHANGED=1
+    _bump_sha256_pin ANGIE_SHA256 "$old" "$new" "$digest"
 }
 
 bump_nginx_sha256_pin() {
     local old="$1" new="$2" digest="$3"
-    grep -q "\[\"${new}\"\]" tools/ci-build.sh && return 0 # already pinned
-    sed -i "/declare -A NGINX_SHA256=(/a\\    [\"${new}\"]=\"${digest}\"" tools/ci-build.sh
-    CHANGED=1
+    _bump_sha256_pin NGINX_SHA256 "$old" "$new" "$digest"
 }
 
 if [ "$NEW_STABLE" != "$CUR_STABLE" ]; then

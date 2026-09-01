@@ -136,9 +136,12 @@ if [ "$CHECK" -eq 1 ]; then
             rc=1
         fi
     done
-    perl -MTest::Nginx::Socket -e1 2>/dev/null \
-        && printf '%-14s ok\n' 'Test::Nginx' \
-        || { printf '%-14s MISSING\n' 'Test::Nginx'; rc=1; }
+    if perl -MTest::Nginx::Socket -e1 2>/dev/null; then
+        printf '%-14s ok\n' 'Test::Nginx'
+    else
+        printf '%-14s MISSING\n' 'Test::Nginx'
+        rc=1
+    fi
     exit "$rc"
 fi
 
