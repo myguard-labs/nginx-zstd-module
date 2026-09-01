@@ -107,35 +107,27 @@ jobs:
         with:
           languages: c-cpp
           queries: security-extended
-          # `paths:`/`paths-ignore:` are NOT init-action inputs (verified
-          # against codeql-action's action.yml at this pinned SHA — they
-          # don't appear in its `inputs:` list at all); they are CodeQL
-          # *config-file* keys, so passing them as `with:` silently no-ops.
-          # `config:` (inline YAML, same schema as config-file) is what
-          # actually wires them in.
+          # No `paths:`/`paths-ignore:` here, deliberately. GitHub documents
+          # them as applying only to interpreted languages, or to a compiled
+          # language analyzed WITHOUT building it:
           #
-          # Scope caveat, and the reason this is `paths-ignore` and not a
-          # narrower build: for a COMPILED language the C/C++ tracer
-          # extracts every translation unit the build actually compiles, so
-          # these keys cannot keep nginx core OUT of the database — they
-          # filter which extracted files are analyzed and reported, not
-          # which are extracted. Excluding nginx from extraction would mean
-          # compiling the module alone, and that is exactly what produced
-          # the "no source code seen during build" failure recorded on the
-          # build step below (`--add-module` links the module objects into
-          # the nginx binary; there is no module-only compile). So: nginx
-          # core is extracted and then filtered out of results, which is
-          # the intended and only workable arrangement here. The assertion
-          # step after `analyze` therefore checks that module sources are
-          # PRESENT, and deliberately does not assert nginx core is absent.
-          config: |
-            paths:
-              - filter
-              - static
-              - '*.c'
-              - '*.h'
-            paths-ignore:
-              - 'nginx-*/**'
+          #   "You can use this option when you run the CodeQL actions on an
+          #    interpreted language (Python, Ruby, and JavaScript/TypeScript)
+          #    or when you analyze a compiled language without building the
+          #    code (currently supported for C/C++, C#, Java and Rust)."
+          #
+          # This job does a full traced `make` of C/C++, so both keys are
+          # silently inert -- a `paths-ignore: nginx-*/**` here was carried
+          # for months and filtered nothing (nginx-core alerts kept landing
+          # in the Security tab on every mainline bump).
+          #
+          # The documented alternative, "specify appropriate build steps",
+          # does not apply either: --add-module compiles the module objects
+          # INTO the nginx binary, so there is no module-only compile, and
+          # attempting one yields the "no source code seen during build"
+          # empty-database failure. nginx core is therefore unavoidably
+          # extracted, and scoping happens after analysis, on the SARIF --
+          # see the filter step below.
 
       - name: Build module sources for CodeQL
         run: |
@@ -161,12 +153,41 @@ jobs:
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: "/language:c-cpp"
+          output: sarif-results
+          # 'failure-only' is the documented setting "for users
+          # post-processing the SARIF file before uploading it to Code
+          # Scanning": results are not published here, but debugging
+          # information still reaches Code Scanning if the run fails.
+          # Prefer it over 'never', which the action documents as
+          # complicating debugging for external users.
+          upload: failure-only
           # `analyze` finalizes the database and then tears the cluster
           # down ("Cleaned up database cluster directory"), so by the time
           # a following step runs, <db>/src is already gone -- the
           # assertion below cannot see it under the default cleanup. Keep
           # the database on disk so the extraction scope stays checkable.
           cleanup-level: none
+
+      - name: Drop nginx-core results from SARIF
+        env:
+          SARIF: sarif-results/cpp.sarif
+        run: |
+          set -euo pipefail
+          if [ ! -f "$SARIF" ]; then
+            echo "::error::expected CodeQL SARIF at $SARIF"
+            ls -la sarif-results || true
+            exit 1
+          fi
+          python3 ci/tools/filter-codeql-sarif.py "$SARIF"
+
+      - name: Upload filtered SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          sarif_file: sarif-results/cpp.sarif
+          category: "/language:c-cpp"
+          # Surface a rejected SARIF as a failure here rather than a
+          # silently absent update in the Security tab.
+          wait-for-processing: true
 
       - name: Assert database saw module sources, not just nginx core
         env:

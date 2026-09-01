@@ -69,6 +69,13 @@ case_ 0 "--list works" ci/linter/run-all.sh --list
 case_ 0 "CI topology negative controls hold" \
     python3 ci/linter/ci_topology.py --selftest
 
+# The CodeQL SARIF filter decides which findings reach the Security tab. Its
+# dangerous direction is dropping a result it should have kept -- silently,
+# since a dropped finding leaves no trace. Its own controls assert the KEEP
+# side (module results, and results with no resolvable location).
+case_ 0 "CodeQL SARIF filter scoping controls hold" \
+    python3 ci/tools/filter-codeql-sarif.py --selftest
+
 # Work-list consumers used process substitution, whose exit status is not
 # visible to mapfile. Exercise each real consumer with a producer that emits a
 # plausible prefix and then fails; all three must propagate its exact status.
