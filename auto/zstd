@@ -44,7 +44,7 @@ ngx_zstd_opt_I=
 ngx_zstd_incs=
 ngx_zstd_opt_L=
 
-if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
+if [ -n "$ZSTD_INC" ] || [ -n "$ZSTD_LIB" ]; then
 
     if [ "$NGX_CC_NAME" = "msvc" ] && command -v cygpath > /dev/null 2>&1; then
         # cl is a native Windows program: it reads an MSYS-style

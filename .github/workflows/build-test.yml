@@ -264,6 +264,9 @@ jobs:
       - name: .gitattributes byte-exactness and archive-exclusion regressions (A30-F5)
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_gitattributes.sh
 
+      - name: coverage.sh stale-prober rebuild guard regression (A30-F7)
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_coverage_prober_rebuild.sh
+
       - name: Shell script linting (shellcheck)
         run: |
           # Gate on error-severity findings (real bugs); style/info noise does
