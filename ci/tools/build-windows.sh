@@ -235,6 +235,11 @@ if [ "$WITH_BROTLI" = 1 ]; then
 fi
 if [ "$WITH_ZSTD" = 1 ]; then
     echo "nginx-zstd-module: repo=$REPO_ZSTD_MODULE ref=$REF_ZSTD_MODULE" >&2
+    # clone_module runs a real git-clone even when REPO_ZSTD_MODULE resolved
+    # to a local checkout path (the default above) -- that only pulls
+    # COMMITTED history, so uncommitted working-tree edits in that checkout
+    # are not part of this build. Commit (even to a throwaway branch) before
+    # building to include local changes.
     clone_module nginx-zstd-module "$REPO_ZSTD_MODULE" "$REF_ZSTD_MODULE"
 fi
 
