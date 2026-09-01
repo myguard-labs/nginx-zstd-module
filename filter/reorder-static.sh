@@ -19,3 +19,21 @@ ngx_http_zstd_reorder_static_filter() {
         ;;
     esac
 }
+
+# Select the filter that zstd must be ordered immediately after on the static
+# path. Sourced by filter/config (the production caller) and exercised directly
+# by ci/tools/test_build_config_policy.sh, so the test evaluates this policy
+# rather than a copy of it.
+#
+# Reads: $HTTP_FILTER_MODULES, $HTTP_GZIP. Echoes the chosen anchor.
+ngx_http_zstd_static_next() {
+    if echo " $HTTP_FILTER_MODULES " | grep ngx_http_brotli_filter_module >/dev/null; then
+        echo ngx_http_brotli_filter_module
+    elif [ "${HTTP_GZIP:-}" = YES ]; then
+        echo ngx_http_gzip_filter_module
+    elif echo " $HTTP_FILTER_MODULES " | grep pagespeed_etag_filter >/dev/null; then
+        echo ngx_pagespeed_etag_filter
+    else
+        echo ngx_http_range_header_filter_module
+    fi
+}

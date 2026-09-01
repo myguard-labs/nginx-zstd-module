@@ -21,6 +21,12 @@ fi
 
 # Exercise the authoritative reorder helper and its hard-failure control.
 grep -Fq '. "$_ngx_zstd_root/filter/reorder-static.sh"' "$root/filter/config"
+# The next= anchor must come from the shared helper, not an inline copy.
+grep -Fq 'next=`ngx_http_zstd_static_next`' "$root/filter/config"
+if grep -q 'next=ngx_http_brotli_filter_module' "$root/filter/config"; then
+    echo 'filter/config still inlines the next= matrix; it must use ngx_http_zstd_static_next' >&2
+    exit 1
+fi
 . "$root/filter/reorder-static.sh"
 # Consumed by the sourced helper.
 # shellcheck disable=SC2034
@@ -69,6 +75,14 @@ fi
 # gzip in HTTP_FILTER_MODULES (the static init-order array), which by the
 # same last-initialized-runs-first idiom also means zstd RUNS BEFORE gzip.
 #
+# Scope limit: the two checks below are PREMISE GUARDS, not a derivation of
+# the dynamic insertion index. ngx_add_module() inserts at the lowest index
+# among loaded modules named in order[], so postpone's presence alone does not
+# by itself fix the position; fully deriving it would mean modelling the module
+# loader here. What these guards do assert is that the two facts the argument
+# above rests on -- gzip absent from the list, postpone present as the anchor --
+# still hold, so the argument is re-checked rather than assumed on every run.
+#
 # Property under test: both paths initialize zstd strictly after gzip in
 # their respective init-order arrays (dynamic: implicitly, via the shared
 # postpone anchor; static: explicitly, via reorder-static.sh's splice
@@ -96,19 +110,14 @@ esac
 
 # --- static path: exercise the full next= decision matrix ------------------
 # Mirrors filter/config:132-140 verbatim so drift in that matrix is caught.
+# No local reimplementation of the next= matrix: a test that copies the policy
+# it checks cannot catch drift in the original. Call the same
+# ngx_http_zstd_static_next() that filter/config uses in production.
 zstd_static_next() {
     # $1 = HTTP_FILTER_MODULES, $2 = HTTP_GZIP
-    _hfm=$1
-    _gz=$2
-    if echo "$_hfm" | grep ngx_http_brotli_filter_module >/dev/null; then
-        echo ngx_http_brotli_filter_module
-    elif [ "$_gz" = YES ]; then
-        echo ngx_http_gzip_filter_module
-    elif echo "$_hfm" | grep pagespeed_etag_filter >/dev/null; then
-        echo ngx_pagespeed_etag_filter
-    else
-        echo ngx_http_range_header_filter_module
-    fi
+    HTTP_FILTER_MODULES=$1
+    HTTP_GZIP=$2
+    ngx_http_zstd_static_next
 }
 
 assert_static_case() {
