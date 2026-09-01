@@ -12,7 +12,7 @@
 
 # zstd-nginx-module
 
-An nginx module for [Zstandard (zstd)](https://facebook.github.io/zstd/) compression. Zstandard typically achieves better compression ratios than gzip at comparable or faster speeds, making it a good choice for reducing transmitted response sizes.
+An nginx module for [Zstandard (zstd)](https://facebook.github.io/zstd/) compression. Zstandard typically achieves substantially better compression ratios than gzip, making it a good choice for reducing transmitted response sizes. Throughput depends on the level and payload: at the low levels recommended for web traffic, zstd trades some encode speed for that ratio -- see the [measured benchmark table](#benchmarks) rather than assuming a general speed win.
 
 This is a hardened fork: every PR is exercised against **nginx mainline**, the filter/static suites and runtime regressions run under **ASAN/UBSAN**, flawfinder/semgrep/clang-tidy run on every change, and a weekly deep pass fuzzes both parser targets and additionally covers **nginx stable** and **[Angie](https://angie.software/)** (see [Testing & CI](#testing--ci)).
 
@@ -1465,12 +1465,16 @@ setup and the `git ls-files` trap: [CONTRIBUTING.md](CONTRIBUTING.md).
 Reproduce with `python3 ci/tools/benchmark.py` (drives the `zstd`/`gzip`
 CLIs linked against the same libzstd/zlib on the machine that runs it).
 Compression **ratio** for a given library/input/settings combination is
-stable across runs and machines; **throughput** is not — it scales with
-CPU and varies run to run, so treat any MB/s figure as a rough range,
-not a point value. These numbers come from the CLI codecs directly:
-they exclude nginx's own filter, context, buffering, and flush
-overhead, so they are not a measurement of module throughput. Figures
-below: **libzstd 1.5.5**, single core, `--repeat 3`, best wall-time.
+stable across runs and machines, but not necessarily across libzstd
+versions — encoder heuristics change between releases while staying
+format-compatible, so expect the ratios below to shift somewhat on the
+recommended 1.5.7 rather than the 1.5.5 measured here. **Throughput** is
+not stable at all: it scales with CPU and varies run to run, so treat
+any MB/s figure as a rough range, not a point value. These numbers come
+from the CLI codecs directly: they exclude nginx's own filter, context,
+buffering, and flush overhead, so they are not a measurement of module
+throughput. Figures below: **libzstd 1.5.5**, single core, `--repeat 3`,
+best wall-time.
 
 For nginx request-path measurements, `ci/tools/ab_bench.py` keeps its existing
 plain-zstd workload by default and accepts `--workload dcz` for a focused RFC
@@ -1535,8 +1539,10 @@ What changed is the module's per-response *overhead* inside nginx:
   churn under load — not as a different ratio or a different CLI MB/s
   figure. The trade is a higher per-request memory floor (~256 KB);
   see [`zstd_buffers`](#zstd_buffers).
-* **`$zstd_ratio` now computes with a single division** instead of two
-  — a log-path micro-cost, no effect on the response itself.
+* **`$zstd_ratio` is computed by exact integer long division**, so it
+  stays correct for byte counts near the 64-bit range and for streams
+  that expand rather than shrink — a log-path cost only, no effect on
+  the response itself.
 * **`zstd_long` (off by default)** can materially improve ratio on
   large, internally repetitive bodies that exceed the match window —
   but only when explicitly enabled, and the gain is workload-specific,

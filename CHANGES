@@ -2,6 +2,16 @@ Changes with http-zstd
 
 Unreleased
 
+    *) Bugfix: "$zstd_ratio" is now exact for the whole 64-bit range of
+       byte counts. The previous form scaled the input count before
+       dividing, so a large enough response overflowed the intermediate
+       and reported a wrong ratio -- for bytes_in near UINT64_MAX it
+       logged 0.000 where the true ratio was 0.999. The variable is now
+       produced by exact integer long division that extracts each of the
+       three fractional digits without an intermediate that can wrap,
+       and is correct for expanding streams as well as shrinking ones.
+       Log output only; no response bytes change.
+
     *) Tests: removed the standalone dcz CDict-vs-refPrefix equivalence
        probes. They were one-off investigation tools, not production-helper
        regression tests, and keeping them under ci/tools made the dcz test
