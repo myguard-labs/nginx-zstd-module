@@ -42,8 +42,8 @@ awk '
     }
 ' "$SRC" >"$OUT"
 
-if ! grep -q 'ngx_http_zstd_dcz_decode_digest' "$OUT" ||
-    [ "$(tail -n1 "$OUT")" != "}" ]; then
+if ! grep -q 'ngx_http_zstd_dcz_decode_digest' "$OUT" \
+    || [ "$(tail -n1 "$OUT")" != "}" ]; then
     echo "✗ failed to extract ngx_http_zstd_dcz_decode_digest() from $SRC" >&2
     echo "  (function signature/layout changed? update extract_dcz.sh)" >&2
     rm -f "$OUT"
