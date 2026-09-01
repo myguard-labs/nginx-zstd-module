@@ -1902,6 +1902,67 @@ Vary: X-No-Compression, Accept-Encoding
 
 
 
+=== TEST 68b: below zstd_min_length never reaches the bypass decision, no bypass Vary
+# A31b-F4: zstd_bypass_vary must key only the responses for which this
+# module actually reaches the zstd_bypass fork (the compressed and
+# bypassed-identity variants). A response declined earlier by an
+# eligibility gate -- here, body smaller than zstd_min_length -- would be
+# identity regardless of the bypass predicate's value, so no bypass-driven
+# cache variance exists and no "Vary: X-No-Compression" line is added.
+# Accept-Encoding is still absent: this location has no gzip_vary and the
+# module's own Vary: Accept-Encoding push also sits below this gate.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types text/plain;
+        zstd_min_length 60k;
+        zstd_bypass      $http_x_no_compression;
+        zstd_bypass_vary X-No-Compression;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding:
+!Vary
+--- no_error_log
+[error]
+
+
+
+=== TEST 68c: content type outside zstd_types never reaches the bypass decision, no bypass Vary
+# A31b-F4 negative control for the content-type eligibility gate: same
+# claim as TEST 68b, different gate. The fixture is served as text/plain
+# by default; restricting zstd_types to a type it does not match makes the
+# content-type gate the one that declines, above the bypass_vary push.
+--- config
+    location /filter {
+        zstd on;
+        zstd_types application/json;
+        zstd_bypass      $http_x_no_compression;
+        zstd_bypass_vary X-No-Compression;
+        proxy_pass http://127.0.0.1:$TEST_NGINX_SERVER_PORT/test;
+    }
+    location /test {
+        root $TEST_NGINX_PERL_PATH/suite/;
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding:
+!Vary
+--- no_error_log
+[error]
+
+
+
 === TEST 69: quoted-string in coding-name position does not fabricate zstd
 # A quoted-string can never be a valid coding. With the name scan not
 # stopping at '"', the comma inside `"a,zstd "` split the element and the

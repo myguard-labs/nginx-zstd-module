@@ -974,11 +974,18 @@ server {
 **Default:** `—`
 **Context:** `http, server, location`
 
-Appends `field-name` to the response `Vary` header on every response from
-the location (both the compressed and the bypassed-identity variant), so a
-shared cache keys on the request header that drives a header/cookie-based
-[`zstd_bypass`](#zstd_bypass). Use it whenever a bypass predicate reads a
-request header or cookie:
+Appends `field-name` to the response `Vary` header on every response for
+which this module actually reaches the `zstd_bypass` decision — both the
+compressed variant and the bypassed-identity variant — so a shared cache
+keys on the request header that drives a header/cookie-based
+[`zstd_bypass`](#zstd_bypass). A response declined earlier by an
+eligibility gate (ineligible status, already encoded, below
+`zstd_min_length`, above `zstd_max_length`, header-only, content type not
+in [`zstd_types`](#zstd_types), or `Cache-Control: no-transform`) never
+reaches that decision: it would be served identity regardless of the
+bypass predicate, so no bypass-driven variance exists to declare and this
+directive adds no `Vary` field to it. Use it whenever a bypass predicate
+reads a request header or cookie:
 
 ```nginx
 server {
