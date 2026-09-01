@@ -372,6 +372,76 @@ ngx_http_zstd_dcz_window_log(size_t dict_len, off_t pledged_size,
 }
 
 
+/*
+ * Is a pledged (upstream-declared) body length usable, at FULL off_t width,
+ * as the ZSTD_compressBound() input that sizes the first output buffer?
+ *
+ * ctx->pledged_size is r->headers_out.content_length_n -- an off_t, and
+ * upstream-controlled. ZSTD_compressBound() takes a size_t. On an ILP32
+ * build with large-file support (32-bit size_t, 64-bit off_t, the usual
+ * shape once _FILE_OFFSET_BITS=64 is in effect) a bare `(size_t)` cast is
+ * a TRUNCATION: a pledge of 4 GiB + 389 narrows to 389, ZSTD_compressBound()
+ * returns a bound around 389, the clamp below accepts it as smaller than
+ * the configured buffer size, and the first output buffer is allocated
+ * three orders of magnitude too small for the body it was sized for. That
+ * is a heap overflow waiting on libzstd's next write, not a missed
+ * optimization.
+ *
+ * Two independent reasons to decline, checked at full width so neither can
+ * be lost to the very narrowing it is guarding:
+ *
+ *   1. NOT REPRESENTABLE. sizeof(off_t) > sizeof(size_t) and the value
+ *      exceeds SIZE_MAX. Compared through uintmax_t, which is at least as
+ *      wide as both, after the caller has established pledged_size >= 0.
+ *      The sizeof() test is a compile-time constant, so on an LP64 build
+ *      the whole comparison folds away and this costs nothing.
+ *
+ *   2. ABOVE ZSTD's OWN INPUT CEILING. ZSTD_compressBound() returns 0 --
+ *      an error, not a bound -- for srcSize >= ZSTD_MAX_INPUT_SIZE. A 0
+ *      propagating into the clamp would be *worse* than truncation: it
+ *      floors to NGX_HTTP_ZSTD_BOUND_MIN and pins the buffer at 256 bytes.
+ *      ZSTD_MAX_INPUT_SIZE is itself width-dependent (0xFF00FF00 when
+ *      size_t is 32-bit, 0xFF00FF00FF00FF00 when it is 64-bit), which is
+ *      exactly why this must be asked of the real constant rather than of
+ *      a hardcoded 64-bit literal.
+ *
+ * Declining is always SAFE, never merely conservative: the caller's only
+ * use of the bound is to SHRINK buf_size below the configured
+ * zlcf->bufs.size. Declining leaves the configured size in place, i.e. the
+ * exact geometry every non-first buffer and every unknown-length response
+ * already uses. It costs one over-allocation on a response whose declared
+ * length is at least 4 GiB -- and it must not be reached for any smaller
+ * one, or it would disable the first-buffer optimization that is the whole
+ * point of the call site.
+ *
+ * On success *out receives the full-width value, losslessly narrowed.
+ */
+static ngx_inline ngx_uint_t
+ngx_http_zstd_pledge_to_bound_input(off_t pledged_size, size_t *out)
+{
+    if (pledged_size < 0) {
+        return 0;
+    }
+
+    if (sizeof(off_t) > sizeof(size_t)
+        && (uintmax_t) pledged_size > (uintmax_t) SIZE_MAX)
+    {
+        return 0;
+    }
+
+    /*
+     * Now known representable, so the cast is lossless and the remaining
+     * comparison can be made in size_t against zstd's real ceiling.
+     */
+    if ((size_t) pledged_size >= (size_t) ZSTD_MAX_INPUT_SIZE) {
+        return 0;
+    }
+
+    *out = (size_t) pledged_size;
+    return 1;
+}
+
+
 typedef struct {
     ngx_str_t                    dict_file;
     /* explicit opt-in for the non-RFC-9842 dict mode; S1/RFC1 */
@@ -3193,95 +3263,73 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
          * streaming case, so this never fires there.
          */
         if (first_buf && ctx->pledged_size >= 0) {
+            size_t  pledged;
 
             /*
-             * ZSTD_compressBound(n) == n + (n>>8) + margin, margin >= 0
-             * always (see zstd.h's ZSTD_COMPRESSBOUND macro) -- so the
-             * bound this call would return can never be smaller than
-             * `ctx->pledged_size` itself, and the `+= 64` pad below only
-             * grows it further. When the pledged size is already at
-             * least the configured buffer size, `bound` (however it is
-             * computed) can therefore never satisfy `bound < buf_size`,
-             * so the clamp below never fires and buf_size is left
-             * exactly as it already is. Skip the call entirely on that
-             * path -- one fewer external libzstd call per known large
-             * response, same buf_size either way -- PROVIDED the call
-             * could not instead have hit ZSTD_compressBound()'s own
-             * overflow branch (return 0), which the gate below rules out.
+             * FULL-WIDTH first. ctx->pledged_size is an off_t, and
+             * ZSTD_compressBound() takes a size_t: on an ILP32 build with
+             * large-file support the two are not the same width, and a bare
+             * cast here would truncate an upstream-declared length modulo
+             * 2^32 -- a 4 GiB + 389 byte pledge becoming 389, and the clamp
+             * below then shrinking the first output buffer to ~389 bytes
+             * for a 4 GiB body. ngx_http_zstd_pledge_to_bound_input()
+             * answers "is this length representable AND is the bound
+             * computable" once, at off_t width, before any narrowing; when
+             * it declines, buf_size keeps the configured zlcf->bufs.size
+             * and nothing is shrunk, which is the safe direction.
              *
-             * ZSTD_MAX_INPUT_SIZE is NOT platform-invariant: zstd.h
-             * defines it as
-             *   (sizeof(size_t) == 8) ? 0xFF00FF00FF00FF00ULL
-             *                         : 0xFF00FF00U
-             * so on an ILP32 target (32-bit size_t) it is 0xFF00FF00,
-             * not the 64-bit constant. A build with a 32-bit size_t but
-             * a 64-bit off_t (_FILE_OFFSET_BITS=64 is common on such
-             * targets) would satisfy an off_t-only gate while still
-             * being able to pledge a size_t-valued length above
-             * 0xFF00FF00 -- exactly the case where the real
-             * ZSTD_compressBound() would hit its overflow branch and
-             * this skip must not fire.
-             *
-             * Gate on BOTH auto-detected platform maxima, neither derived
-             * from the other, so neither can stand in for the other:
-             *
-             *   NGX_MAX_OFF_T_VALUE  (nginx's own auto-detected off_t
-             *                        max, from auto/types/sizeof into
-             *                        objs/ngx_auto_config.h) proves
-             *                        ctx->pledged_size (an off_t) cannot
-             *                        exceed the 64-bit ZSTD_MAX_INPUT_SIZE
-             *                        constant;
-             *   SIZE_MAX             (the standard <stdint.h> constant,
-             *                        already included above) proves
-             *                        sizeof(size_t) == 8 on this build,
-             *                        i.e. that ZSTD_MAX_INPUT_SIZE
-             *                        actually IS that 64-bit constant and
-             *                        not the 32-bit one. NGX_MAX_SIZE_T_VALUE
-             *                        is NOT usable here even though the
-             *                        name suggests it: nginx defines it as
-             *                        the max value of size_t treated as
-             *                        SIGNED (9223372036854775807LL, i.e.
-             *                        INT64_MAX, for %d-style formatting
-             *                        bounds elsewhere in this file), which
-             *                        is smaller than 0xFF00FF00FF00FF00 on
-             *                        every width -- a ">=" test against it
-             *                        would never fire and silently disable
-             *                        the whole optimization rather than
-             *                        proving anything. SIZE_MAX is the
-             *                        type's true (unsigned) maximum and is
-             *                        the correct comparand.
-             *
-             * Both must hold for the skip to be safe. On a target where
-             * either is false (32-bit off_t, or 32-bit size_t under a
-             * 64-bit off_t) this whole block compiles out and the
-             * original ZSTD_compressBound() call and clamp below run
-             * unchanged -- the optimization is 64-bit-server-only by
-             * design, per the audit's accepted resolution.
+             * Note what is NOT done here: the fast path is not disabled.
+             * Every pledged length representable in size_t and below
+             * ZSTD_MAX_INPUT_SIZE -- i.e. every response an ILP32 host can
+             * actually serve from memory, and all of them on LP64 short of
+             * ~18 EB -- still takes the sizing below exactly as before.
              */
-#if NGX_MAX_OFF_T_VALUE <= 0xFF00FF00FF00FF00ULL \
-    && SIZE_MAX >= 0xFF00FF00FF00FF00ULL
-            if ((size_t) ctx->pledged_size >= buf_size) {
-                /* Skip: buf_size is already provably the final value. */
-            } else
-#endif
+            if (ngx_http_zstd_pledge_to_bound_input(ctx->pledged_size,
+                                                    &pledged))
             {
-                size_t  bound = ZSTD_compressBound((size_t) ctx->pledged_size);
-
                 /*
-                 * ZSTD_compressBound() covers only the compressed
-                 * payload; pad it for libzstd's own frame/block header
-                 * overhead. Never grow past the configured size, and
-                 * keep a small floor so tiny/empty bodies still get a
-                 * buffer the frame overhead fits inside.
+                 * ZSTD_compressBound(n) == n + (n>>8) + margin, margin >= 0
+                 * always (see zstd.h's ZSTD_COMPRESSBOUND macro) -- so the
+                 * bound this call would return can never be smaller than
+                 * `pledged` itself, and the `+= 64` pad below only grows it
+                 * further. When the pledged size is already at least the
+                 * configured buffer size, `bound` (however it is computed)
+                 * can therefore never satisfy `bound < buf_size`, so the
+                 * clamp below never fires and buf_size is left exactly as
+                 * it already is. Skip the call entirely on that path -- one
+                 * fewer external libzstd call per known large response,
+                 * same buf_size either way.
+                 *
+                 * This skip needs no platform gate any more. The old
+                 * NGX_MAX_OFF_T_VALUE/SIZE_MAX #if existed only to prove
+                 * that the value reaching ZSTD_compressBound() could not be
+                 * at or above the width-dependent ZSTD_MAX_INPUT_SIZE (for
+                 * which ZSTD_compressBound() returns 0, an error, not a
+                 * bound) and could not have truncated on the way in. Both
+                 * of those are now established by the helper, at full
+                 * width, against the real ZSTD_MAX_INPUT_SIZE rather than a
+                 * hardcoded 64-bit literal -- so the optimization is
+                 * correct on ILP32 too instead of being compiled out there.
                  */
-                bound += NGX_HTTP_ZSTD_BOUND_FRAME_SLACK;
+                if (pledged < buf_size) {
+                    size_t  bound = ZSTD_compressBound(pledged);
 
-                if (bound < NGX_HTTP_ZSTD_BOUND_MIN) {
-                    bound = NGX_HTTP_ZSTD_BOUND_MIN;
-                }
+                    /*
+                     * ZSTD_compressBound() covers only the compressed
+                     * payload; pad it for libzstd's own frame/block header
+                     * overhead. Never grow past the configured size, and
+                     * keep a small floor so tiny/empty bodies still get a
+                     * buffer the frame overhead fits inside.
+                     */
+                    bound += NGX_HTTP_ZSTD_BOUND_FRAME_SLACK;
 
-                if (bound < buf_size) {
-                    buf_size = bound;
+                    if (bound < NGX_HTTP_ZSTD_BOUND_MIN) {
+                        bound = NGX_HTTP_ZSTD_BOUND_MIN;
+                    }
+
+                    if (bound < buf_size) {
+                        buf_size = bound;
+                    }
                 }
             }
         }

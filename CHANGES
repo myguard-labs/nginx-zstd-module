@@ -42,6 +42,19 @@ Unreleased
        zstd_dict_strict_path: declaring it after a literal-carrying
        zstd_dcz_dict_file is a config-load error.
 
+    *) Bugfix: on 32-bit (ILP32) builds with large-file support, the
+       pledged response length used to size the first output buffer was
+       narrowed to size_t before ZSTD_compressBound(), truncating a
+       declared length above 4 GiB modulo 2^32 -- a 4 GiB body pledged as
+       4 GiB + 389 bytes was sized for 389 bytes. The length is now
+       checked for representability, and against libzstd's own
+       width-dependent input ceiling, at full off_t width before any
+       narrowing; a length that fails either check keeps the configured
+       buffer size instead of shrinking. Lengths that are representable
+       still take the first-buffer sizing unchanged, on every width. LP64
+       builds, where off_t and size_t are the same width, were never
+       affected.
+
     *) Bugfix: per-request byte counters for $zstd_bytes_in and
        $zstd_bytes_out wrapped on 32-bit (ILP32) systems for responses
        exceeding 4 GiB. Both counters are now uint64_t.

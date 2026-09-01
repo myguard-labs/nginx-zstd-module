@@ -351,23 +351,32 @@ jobs:
           # lazy-copy allocation failure without mutating caller links.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_input_chain_cursor_unit.sh
 
-      - name: compressBound skip gate unit fixture (size_t-width correctness)
+      - name: pledged-length compressBound guard unit fixture (ILP32/LFS)
+        env:
+          # gcc-multilib is installed above, so a missing -m32 toolchain
+          # here means the runner image regressed, not that multilib is
+          # optionally absent. The ILP32 pass is the ONLY one that can
+          # observe this defect at all, so losing it silently would leave a
+          # green tick over untested code -- fail loudly instead.
+          REQUIRE_M32: "1"
         run: |
-          # A27-F4: get_buf()'s ZSTD_compressBound() skip is gated on a
-          # compile-time proof that off_t's range cannot reach
-          # ZSTD_MAX_INPUT_SIZE -- but that libzstd constant is itself
-          # size_t-width-dependent (0xFF00FF00FF00FF00 on an 8-byte size_t,
-          # 0xFF00FF00 on a 4-byte one), so an off_t-only gate is wrong on
-          # an ILP32 target built with a 64-bit off_t
-          # (_FILE_OFFSET_BITS=64). This repo builds and tests only on
-          # LP64 hosts, where the old (wrong) and the corrected gate
-          # evaluate identically, so this is the only way to observe the
-          # difference without standing up a cross-compiled ILP32 leg.
-          # Extracts the shipped #if/#endif verbatim and evaluates it
-          # under substituted NGX_MAX_OFF_T_VALUE/SIZE_MAX pairs for
-          # LP64, ILP32+64-bit-off_t and plain ILP32. Needs only a C
-          # compiler.
-          bash "$GITHUB_WORKSPACE"/ci/tools/test_compressbound_skip_gate.sh
+          # A30-N3: get_buf() sizes the FIRST output buffer from the pledged
+          # body length (r->headers_out.content_length_n, an off_t) via
+          # ZSTD_compressBound() (which takes a size_t). On an ILP32 build
+          # with large-file support those are different widths, so a bare
+          # cast truncates modulo 2^32: a 4 GiB + 389 pledge becomes 389 and
+          # the first buffer is allocated ~389 bytes for a 4 GiB body.
+          # ngx_http_zstd_pledge_to_bound_input() decides representability
+          # and the ZSTD_MAX_INPUT_SIZE ceiling at full off_t width before
+          # any narrowing. Extracted verbatim and driven against an
+          # independent uintmax_t oracle over hand-picked boundaries
+          # (SIZE_MAX -1/+0/+1, ZSTD_MAX_INPUT_SIZE -1/+0/+1, 4 GiB, 4 GiB +
+          # 389), every power of two +/- 1, and a deterministic randomized
+          # sweep. Compiled twice -- natively, and under
+          # -m32 -D_FILE_OFFSET_BITS=64, the shape that reproduces the
+          # truncation. Header-only (uses zstd.h's ZSTD_COMPRESSBOUND macro),
+          # so the 32-bit pass needs no 32-bit libzstd.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_pledge_bound_input_unit.sh
 
       - name: soak.sh ASAN/UBSAN verdict unit fixture (A27-F9)
         run: |
