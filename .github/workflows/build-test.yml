@@ -261,6 +261,9 @@ jobs:
       - name: nginx-module-testkit scenario runner controls
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_run_testkit_scenarios.sh
 
+      - name: .gitattributes byte-exactness and archive-exclusion regressions (A30-F5)
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_gitattributes.sh
+
       - name: Shell script linting (shellcheck)
         run: |
           # Gate on error-severity findings (real bugs); style/info noise does

@@ -24,6 +24,18 @@ ci/fuzz/fuzz.dict -text
 # the on-disk size and fails every identity-response assertion.
 ci/t/suite/* -text
 
+# More byte-exact fuzz fixtures: corpus_dcz/* are raw dcz-dict header
+# bytes, and regressions{,_dcz}/* are saved crash-reproducer inputs —
+# core.autocrlf=true would smudge either and corrupt the fuzzer's inputs
+# or make a saved crash stop reproducing. Each regressions dir also has a
+# real README.md, which must stay text; order it after the wildcard so
+# the more specific rule wins.
+ci/fuzz/corpus_dcz/* -text
+ci/fuzz/regressions/* -text
+ci/fuzz/regressions/README.md text
+ci/fuzz/regressions_dcz/* -text
+ci/fuzz/regressions_dcz/README.md text
+
 # CI-only stub module (linkage-isolation job); keep it out of release
 # tarballs (git archive). Its former sibling, the vary-suppression
 # stub, no longer exists in the tree.
