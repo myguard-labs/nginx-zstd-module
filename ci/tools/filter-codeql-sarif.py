@@ -17,7 +17,15 @@ import re
 import sys
 
 # Vendored nginx is extracted into the workspace as nginx-<version>/.
-VENDORED = re.compile(r"^nginx-[0-9]")
+#
+# Every alert this pipeline has actually produced carries a workspace-relative
+# path ("nginx-1.31.4/src/core/ngx_log.c"), which is what `^nginx-[0-9]` is
+# anchored for. SARIF nonetheless permits an absolute or `file:`-scheme URI,
+# and a vendored result that arrived in that shape would slip past a purely
+# leading-anchored match and land in the Security tab -- the exact leak this
+# filter exists to stop. So match the vendored directory as a path SEGMENT,
+# which covers the relative form and the absolute one alike.
+VENDORED = re.compile(r"(?:^|/)nginx-[0-9][^/]*/")
 
 
 def result_uri(result):
@@ -39,7 +47,7 @@ def filter_sarif(sarif):
             if uri is None:
                 unlocated += 1
                 keep.append(result)
-            elif VENDORED.match(uri):
+            elif VENDORED.search(uri):
                 removed += 1
             else:
                 kept += 1
@@ -87,9 +95,30 @@ def selftest():
         # `nginx-` alone must not match: the anchor is `nginx-<digit>`, so a
         # module-owned path that merely starts with the vendor prefix stays.
         ("nginx-like module path kept", ["nginx-helpers/ngx_zstd_util.c"], (0, 1, 0)),
-        # Absolute or dot-prefixed paths are NOT vendored-matched by design:
-        # the regex is anchored, and over-matching would drop module results.
-        ("non-anchored vendored path kept", ["build/nginx-1.29.4/src/x.c"], (0, 1, 0)),
+        # A vendored path is matched as a path SEGMENT, so the nested,
+        # absolute and file:-scheme forms are dropped too -- SARIF permits
+        # all of them, and a leading-anchored match would have leaked them.
+        ("nested vendored path dropped", ["build/nginx-1.29.4/src/x.c"], (1, 0, 0)),
+        (
+            "absolute vendored path dropped",
+            ["/home/runner/work/m/m/nginx-1.31.4/src/core/ngx_log.c"],
+            (1, 0, 0),
+        ),
+        (
+            "file: scheme vendored path dropped",
+            ["file:///home/runner/work/m/m/nginx-1.31.4/src/core/ngx_log.c"],
+            (1, 0, 0),
+        ),
+        # ...while an absolute MODULE path is still kept: the segment match
+        # must not degrade into "contains nginx- anywhere".
+        (
+            "absolute module path kept",
+            ["/home/runner/work/m/m/filter/ngx_http_zstd_filter_module.c"],
+            (0, 1, 0),
+        ),
+        # A trailing path component is not a directory segment: a file
+        # literally named nginx-1.2.3 is not the vendored tree.
+        ("vendored-looking filename kept", ["src/nginx-1.2.3"], (0, 1, 0)),
         ("empty run", [], (0, 0, 0)),
     ]
     failed = False
