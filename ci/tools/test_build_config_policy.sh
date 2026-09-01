@@ -6,7 +6,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 # The advisory must be a real compiler decision, not parsed -E output.
 grep -q 'ngx_feature="libzstd 1.5.6 or newer"' "$root/auto/zstd"
 if grep -q -- '-x c -E -' "$root/auto/zstd"; then
-	exit 1
+    exit 1
 fi
 
 # Static OpenSSL integration is optional even when nginx requested OpenSSL:
@@ -16,7 +16,7 @@ grep -Fq 'ngx_feature_path="$CORE_INCS"' "$root/filter/config"
 grep -q 'OPENSSL/.openssl/include' "$root/filter/config"
 grep -Fq '${USE_OPENSSL:-NO}' "$root/filter/config"
 if grep -Fq '[ "$USE_OPENSSL" = YES -a ' "$root/filter/config"; then
-	exit 1
+    exit 1
 fi
 
 # Exercise the authoritative reorder helper and its hard-failure control.
@@ -33,8 +33,8 @@ ngx_http_zstd_reorder_static_filter
 
 HTTP_FILTER_MODULES=ngx_http_range_header_filter_module
 if ngx_http_zstd_reorder_static_filter >/dev/null 2>&1; then
-	echo 'absent reorder anchor unexpectedly succeeded' >&2
-	exit 1
+    echo 'absent reorder anchor unexpectedly succeeded' >&2
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -78,87 +78,87 @@ fi
 
 # --- dynamic path: parse ngx_module_order out of filter/config -------------
 ngx_dyn_order=$(sed -n '/^ngx_module_order="\$ngx_module_name \\$/,/"$/p' \
-	"$root/filter/config" | tr -d '\\"' | tr -s ' \t\n' ' ')
+    "$root/filter/config" | tr -d '\\"' | tr -s ' \t\n' ' ')
 
 case " $ngx_dyn_order " in
-	*' ngx_http_gzip_filter_module '*)
-		echo 'FAIL: dynamic ngx_module_order now names gzip directly -- re-derive the cross-mode property, do not assume it still holds' >&2
-		exit 1
-		;;
+    *' ngx_http_gzip_filter_module '*)
+        echo 'FAIL: dynamic ngx_module_order now names gzip directly -- re-derive the cross-mode property, do not assume it still holds' >&2
+        exit 1
+        ;;
 esac
 case " $ngx_dyn_order " in
-	*' ngx_http_postpone_filter_module '*) ;;
-	*)
-		echo 'FAIL: dynamic ngx_module_order no longer anchors on postpone_filter_module -- the gzip-precedes-postpone argument no longer applies' >&2
-		exit 1
-		;;
+    *' ngx_http_postpone_filter_module '*) ;;
+    *)
+        echo 'FAIL: dynamic ngx_module_order no longer anchors on postpone_filter_module -- the gzip-precedes-postpone argument no longer applies' >&2
+        exit 1
+        ;;
 esac
 
 # --- static path: exercise the full next= decision matrix ------------------
 # Mirrors filter/config:132-140 verbatim so drift in that matrix is caught.
 zstd_static_next() {
-	# $1 = HTTP_FILTER_MODULES, $2 = HTTP_GZIP
-	_hfm=$1
-	_gz=$2
-	if echo "$_hfm" | grep ngx_http_brotli_filter_module >/dev/null; then
-		echo ngx_http_brotli_filter_module
-	elif [ "$_gz" = YES ]; then
-		echo ngx_http_gzip_filter_module
-	elif echo "$_hfm" | grep pagespeed_etag_filter >/dev/null; then
-		echo ngx_pagespeed_etag_filter
-	else
-		echo ngx_http_range_header_filter_module
-	fi
+    # $1 = HTTP_FILTER_MODULES, $2 = HTTP_GZIP
+    _hfm=$1
+    _gz=$2
+    if echo "$_hfm" | grep ngx_http_brotli_filter_module >/dev/null; then
+        echo ngx_http_brotli_filter_module
+    elif [ "$_gz" = YES ]; then
+        echo ngx_http_gzip_filter_module
+    elif echo "$_hfm" | grep pagespeed_etag_filter >/dev/null; then
+        echo ngx_pagespeed_etag_filter
+    else
+        echo ngx_http_range_header_filter_module
+    fi
 }
 
 assert_static_case() {
-	# $1=label $2=HTTP_FILTER_MODULES $3=HTTP_GZIP $4=expected anchor
-	_label=$1
-	_hfm=$2
-	_gz=$3
-	_expect=$4
+    # $1=label $2=HTTP_FILTER_MODULES $3=HTTP_GZIP $4=expected anchor
+    _label=$1
+    _hfm=$2
+    _gz=$3
+    _expect=$4
 
-	_got=$(zstd_static_next "$_hfm" "$_gz")
-	if [ "$_got" != "$_expect" ]; then
-		echo "FAIL: $_label: next= matrix gave '$_got', expected '$_expect'" >&2
-		exit 1
-	fi
+    _got=$(zstd_static_next "$_hfm" "$_gz")
+    if [ "$_got" != "$_expect" ]; then
+        echo "FAIL: $_label: next= matrix gave '$_got', expected '$_expect'" >&2
+        exit 1
+    fi
 
-	# Consumed by the sourced helper.
-	# shellcheck disable=SC2034
-	ngx_module_name=ngx_http_zstd_filter_module
-	# shellcheck disable=SC2034
-	next=$_got
-	HTTP_FILTER_MODULES=$_hfm
-	ngx_http_zstd_reorder_static_filter
-	case " $HTTP_FILTER_MODULES " in
-		*" $_expect ngx_http_zstd_filter_module "*) ;;
-		*)
-			echo "FAIL: $_label: zstd not spliced immediately after $_expect (got: $HTTP_FILTER_MODULES)" >&2
-			exit 1
-			;;
-	esac
+    # Consumed by the sourced helper.
+    # shellcheck disable=SC2034
+    ngx_module_name=ngx_http_zstd_filter_module
+    # shellcheck disable=SC2034
+    next=$_got
+    HTTP_FILTER_MODULES=$_hfm
+    ngx_http_zstd_reorder_static_filter
+    case " $HTTP_FILTER_MODULES " in
+        *" $_expect ngx_http_zstd_filter_module "*) ;;
+        *)
+            echo "FAIL: $_label: zstd not spliced immediately after $_expect (got: $HTTP_FILTER_MODULES)" >&2
+            exit 1
+            ;;
+    esac
 }
 
 # 1. brotli present -> zstd goes after brotli, regardless of HTTP_GZIP.
 assert_static_case brotli-present \
-	'ngx_http_brotli_filter_module ngx_http_gzip_filter_module ngx_http_range_header_filter_module' \
-	YES ngx_http_brotli_filter_module
+    'ngx_http_brotli_filter_module ngx_http_gzip_filter_module ngx_http_range_header_filter_module' \
+    YES ngx_http_brotli_filter_module
 
 # 2. no brotli, HTTP_GZIP=YES -> zstd goes after gzip.
 assert_static_case gzip-yes \
-	'ngx_http_gzip_filter_module ngx_http_range_header_filter_module' \
-	YES ngx_http_gzip_filter_module
+    'ngx_http_gzip_filter_module ngx_http_range_header_filter_module' \
+    YES ngx_http_gzip_filter_module
 
 # 3. no brotli, HTTP_GZIP!=YES, pagespeed_etag present -> zstd goes after it.
 assert_static_case pagespeed-etag-fallback \
-	'ngx_pagespeed_etag_filter ngx_http_range_header_filter_module' \
-	NO ngx_pagespeed_etag_filter
+    'ngx_pagespeed_etag_filter ngx_http_range_header_filter_module' \
+    NO ngx_pagespeed_etag_filter
 
 # 4. no brotli, no gzip, no pagespeed -> fallback anchor is range_header.
 assert_static_case bare-fallback \
-	'ngx_http_range_header_filter_module' \
-	NO ngx_http_range_header_filter_module
+    'ngx_http_range_header_filter_module' \
+    NO ngx_http_range_header_filter_module
 
 # --- negative control: prove the assertion above can go red ----------------
 # Deliberately assert the WRONG expected anchor for the gzip-yes case (the
@@ -167,20 +167,20 @@ assert_static_case bare-fallback \
 # does not abort this script; capture stderr to show the real failure text.
 _neg_status=0
 _neg_out=$(
-	assert_static_case gzip-yes-WRONG-on-purpose \
-		'ngx_http_gzip_filter_module ngx_http_range_header_filter_module' \
-		YES ngx_http_range_header_filter_module 2>&1
+    assert_static_case gzip-yes-WRONG-on-purpose \
+        'ngx_http_gzip_filter_module ngx_http_range_header_filter_module' \
+        YES ngx_http_range_header_filter_module 2>&1
 ) || _neg_status=$?
 if [ "$_neg_status" -eq 0 ]; then
-	echo 'FAIL: negative control did not go red (deliberately wrong anchor was accepted)' >&2
-	exit 1
+    echo 'FAIL: negative control did not go red (deliberately wrong anchor was accepted)' >&2
+    exit 1
 fi
 case "$_neg_out" in
-	*"next= matrix gave 'ngx_http_gzip_filter_module', expected 'ngx_http_range_header_filter_module'"*) ;;
-	*)
-		echo "FAIL: negative control failed for the wrong reason: $_neg_out" >&2
-		exit 1
-		;;
+    *"next= matrix gave 'ngx_http_gzip_filter_module', expected 'ngx_http_range_header_filter_module'"*) ;;
+    *)
+        echo "FAIL: negative control failed for the wrong reason: $_neg_out" >&2
+        exit 1
+        ;;
 esac
 echo "negative control observed red: $_neg_out"
 
