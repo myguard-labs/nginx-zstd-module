@@ -160,6 +160,36 @@ if [ -f CONTRIBUTING.md ] && grep -qi 'fuzz.*-Werror\|-Werror.*fuzz' CONTRIBUTIN
     fi
 fi
 
+# --- README's static-probe skippable-chain bound must match
+# NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES (audit A30-F6): the README states
+# a concrete "up to 4 leading skippable frames" bound and says the
+# declared-window check applies to the first REGULAR frame reached after
+# that chain. Anchor both on the real code so a future change to the
+# bound, or to which frame the window check targets, breaks this test
+# instead of silently drifting the prose again. ---
+skip_frames_define=$(
+    grep -E '^#define[[:space:]]+NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES[[:space:]]+[0-9]+' \
+        src/ngx_http_zstd_frame_probe.h
+)
+if [ -z "$skip_frames_define" ]; then
+    echo "FAIL: could not find NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES in src/ngx_http_zstd_frame_probe.h -- update this test together with the source"
+    fail=1
+else
+    skip_bound="$(printf '%s\n' "$skip_frames_define" | grep -oE '[0-9]+$')"
+    if ! grep -Fq "up to $skip_bound leading skippable frames" README.md; then
+        echo "FAIL: README.md's stated skippable-chain bound does not match NGX_HTTP_ZSTD_STATIC_MAX_SKIP_FRAMES ($skip_bound) in src/ngx_http_zstd_frame_probe.h -- update README.md's Declared-window/Magic-number validation prose"
+        fail=1
+    fi
+fi
+if ! grep -q 'ngx_http_zstd_static_probe_verdict' src/ngx_http_zstd_static_module.c; then
+    echo "FAIL: ngx_http_zstd_static_probe_verdict no longer exists in src/ngx_http_zstd_static_module.c -- the window-check anchor this test relies on moved or was renamed; update this test together with README.md"
+    fail=1
+fi
+if ! grep -Fq 'first regular frame' README.md; then
+    echo "FAIL: README.md no longer states that the declared-window check applies to the first REGULAR frame reached after the leading skippable-frame chain (audit A30-F6 regression)"
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "FAIL: docs/CI drift detected (audit sha e289021 F7 regression)"
     exit 1
