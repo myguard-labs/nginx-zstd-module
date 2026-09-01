@@ -24,7 +24,7 @@
 #      curl); all sources and the build land in the workspace.
 #
 # Module toggles (env or edit here):
-#   WITH_ZSTD=1 WITH_BROTLI=1 WITH_HEADERS_MORE=1 ./tools/build-windows.sh
+#   WITH_ZSTD=1 WITH_BROTLI=1 WITH_HEADERS_MORE=1 ./ci/tools/build-windows.sh
 #
 # Every downloaded tarball is pinned by SHA-256; bumping a VER_* means
 # updating its SHA_* alongside (sha256sum <tarball>).

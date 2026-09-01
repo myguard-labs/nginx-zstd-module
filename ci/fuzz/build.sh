@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build the Accept-Encoding and dcz-digest libFuzzer targets.
-# Usage: fuzz/build.sh [accept-encoding-output-binary] [dcz-output-binary]
+# Usage: ci/fuzz/build.sh [accept-encoding-output-binary] [dcz-output-binary]
 #
 # Requires clang with libFuzzer (clang >= 6). CFLAGS/CC overridable for
 # OSS-Fuzz / ClusterFuzzLite, which pass their own sanitizer flags.

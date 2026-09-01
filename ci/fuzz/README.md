@@ -62,8 +62,8 @@ from upstream `src/core/ngx_string.{h,c}` with citations.
 ## Run locally
 
 ```bash
-bash fuzz/build.sh          # needs clang with libFuzzer
-cd fuzz
+bash ci/fuzz/build.sh          # needs clang with libFuzzer
+cd ci/fuzz
 ./fuzz_accept_encoding -max_total_time=60 corpus/
 ./fuzz_dcz -max_total_time=60 corpus_dcz/
 ```

@@ -9,9 +9,9 @@ request overhead, so the numbers are stable and reproducible across
 machines (throughput scales with CPU; ratio does not).
 
 Usage:
-    python3 tools/benchmark.py                 # human table
-    python3 tools/benchmark.py --json results.json
-    python3 tools/benchmark.py --levels 1,3,9,19 --repeat 5
+    python3 ci/tools/benchmark.py                 # human table
+    python3 ci/tools/benchmark.py --json results.json
+    python3 ci/tools/benchmark.py --levels 1,3,9,19 --repeat 5
 
 Exit non-zero only on harness error (missing zstd/gzip), never on a
 "slow" result — this is measurement, not a pass/fail gate.
