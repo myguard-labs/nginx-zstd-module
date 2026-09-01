@@ -180,15 +180,6 @@ jobs:
           fi
           python3 ci/tools/filter-codeql-sarif.py "$SARIF"
 
-      - name: Upload filtered SARIF
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
-        with:
-          sarif_file: sarif-results/cpp.sarif
-          category: "/language:c-cpp"
-          # Surface a rejected SARIF as a failure here rather than a
-          # silently absent update in the Security tab.
-          wait-for-processing: true
-
       - name: Assert database saw module sources, not just nginx core
         env:
           DB_LOCATIONS: ${{ steps.analyze.outputs.db-locations }}
@@ -240,3 +231,17 @@ jobs:
             exit 1
           fi
           echo "✓ database includes module sources ($module_hits files)"
+
+      # Publishing happens only AFTER the extraction-scope assertion above.
+      # The assertion is what proves the database actually contained module
+      # sources; uploading first would let a run whose extraction silently
+      # collapsed to nginx-core-only publish an empty, filtered report that
+      # Code Scanning accepts as an authoritative "no module findings".
+      - name: Upload filtered SARIF
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          sarif_file: sarif-results/cpp.sarif
+          category: "/language:c-cpp"
+          # Surface a rejected SARIF as a failure here rather than a
+          # silently absent update in the Security tab.
+          wait-for-processing: true
