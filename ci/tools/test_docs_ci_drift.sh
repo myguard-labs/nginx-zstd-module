@@ -111,6 +111,37 @@ if [ -f SECURITY.md ] && grep -q 'AGENTS\.md' SECURITY.md; then
     fail=1
 fi
 
+# --- README's -DZSTD_STATIC_LINKING_ONLY claim must match auto/zstd's
+# actual behavior (audit A31b-F5): the flag is committed to CFLAGS only
+# inside the `ZSTD_INC`/`ZSTD_LIB` static-archive branch (auto/zstd's
+# "we try the static library first" section) -- auto-discovery (no
+# ZSTD_INC/ZSTD_LIB) and pkg-config never define it. The documented plain
+# `./configure --add-dynamic-module=...` command therefore does not carry
+# the flag, so README.md must say so explicitly rather than imply the
+# flag is just "on" for anyone following the docs. This is a docs-drift
+# regression test, not a build-behavior change: it never touches
+# auto/zstd or the release build flags. ---
+# shellcheck disable=SC2016  # literal grep pattern: $ZSTD_INC/$ must not expand
+if ! grep -q '^[[:space:]]*ngx_zstd_opt_I="-I\$ZSTD_INC -DZSTD_STATIC_LINKING_ONLY"$' auto/zstd; then
+    echo "FAIL: auto/zstd no longer stages -DZSTD_STATIC_LINKING_ONLY in the ZSTD_INC/ZSTD_LIB static-archive branch the way this test expects -- update auto/zstd's staging line or this test together with README.md's Installation/Compatibility wording"
+    fail=1
+fi
+if grep -q 'auto-discovery' auto/zstd \
+    && grep -A2 '# auto-discovery: prefer dynamic linking' auto/zstd \
+       | grep -q 'DZSTD_STATIC_LINKING_ONLY'; then
+    echo "FAIL: auto/zstd's auto-discovery branch now defines -DZSTD_STATIC_LINKING_ONLY -- README.md's 'plain ./configure does not enable it' claim is stale and must be rewritten to match"
+    fail=1
+fi
+# shellcheck disable=SC2016  # literal README phrase, backticks must not run
+if ! grep -Fq 'does not enable `-DZSTD_STATIC_LINKING_ONLY`' README.md; then
+    echo "FAIL: README.md Installation section no longer states that the plain ./configure command does not enable -DZSTD_STATIC_LINKING_ONLY (audit A31b-F5 regression)"
+    fail=1
+fi
+if grep -Fq 'production and CI builds enable that flag' README.md; then
+    echo "FAIL: README.md re-introduced the 'production and CI builds enable that flag' phrasing, which reads as the flag being on by default rather than requiring ZSTD_INC/ZSTD_LIB pointed at a static libzstd (audit A31b-F5 regression)"
+    fail=1
+fi
+
 # --- CONTRIBUTING.md's -Werror claim about the fuzz harness must match
 # reality: only assert this if a fuzz build step actually exists and does
 # NOT pass -Werror, since a future CI change legitimately flipping this on

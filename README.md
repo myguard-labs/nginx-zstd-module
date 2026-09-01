@@ -176,6 +176,21 @@ load_module modules/ngx_http_zstd_static_module.so;
 
 * Both `ngx_http_zstd_filter_module` and `ngx_http_zstd_static_module` are compiled together.
 * If you are using a custom zstd installation, set `ZSTD_INC` (path to `zstd.h`) and `ZSTD_LIB` (path to the library) before running `configure`. If unset, the system-installed zstd is used.
+* **This plain `./configure` line does not enable `-DZSTD_STATIC_LINKING_ONLY`.**
+  With no `ZSTD_INC`/`ZSTD_LIB` set, `auto/zstd` goes straight to
+  auto-discovery (dynamic linking, then pkg-config), and neither of those
+  paths ever defines the flag — it is only ever added when `ZSTD_INC` and
+  `ZSTD_LIB` are both set *and* they resolve to a static `libzstd.a`
+  (`zstd_static.lib` on MSVC) at that exact location. There is no configure
+  flag that turns it on directly. A build produced by the command above
+  therefore does **not** have the experimental memory-estimator API
+  compiled in: `zstd_max_cctx_memory` will fail `nginx -t` with
+  `"zstd_max_cctx_memory" requires the module to be built with
+  -DZSTD_STATIC_LINKING_ONLY ...`, and the implicit no-budget advisory
+  (see [Directives](#directives)) silently does not run. To get the flag,
+  point `ZSTD_INC`/`ZSTD_LIB` at a static libzstd build before running
+  `configure`; see [`zstd_max_cctx_memory`](#zstd_max_cctx_memory) and
+  [Compatibility](#compatibility) for the full requirement.
 * **Windows:** MSVC builds the modules statically into `nginx.exe`; MinGW-w64
   can also build them as dynamic `.so`-named PE DLLs. The SHA-pinned
   [`ci/tools/build-windows.sh`](ci/tools/build-windows.sh) assembles the MSVC build
@@ -232,10 +247,13 @@ Notes on the libzstd floor — these are enforced in code, not assumed:
   1.4.0 floor above is unaffected and unchanged.
 * **`zstd_max_cctx_memory`** additionally requires the module to be
   built with `-DZSTD_STATIC_LINKING_ONLY` so libzstd's experimental
-  memory-estimator API is available. The project's production and CI
-  builds enable that flag; without it, the directive is rejected at
-  config load with a clear, actionable error rather than silently
-  no-op'd.
+  memory-estimator API is available. This project's own CI opts into
+  that flag by pointing `ZSTD_INC`/`ZSTD_LIB` at a static libzstd (see
+  [Installation](#installation)) — it is **not** the outcome of the
+  plain `./configure --add-dynamic-module=...` command documented
+  above, which auto-discovers a dynamic libzstd and never defines the
+  flag. Without it, the directive is rejected at config load with a
+  clear, actionable error rather than silently no-op'd.
 
 "CI-verified" means the PR or weekly deep workflow builds and runs the full
 test suite against that exact version (see [Testing & CI](#testing--ci)). Other
@@ -722,7 +740,7 @@ location /api/bulk-export {
 **Syntax:** `zstd_max_cctx_memory size;`
 **Default:** `—` (no budget enforced; see [the advisory](#implicit-advisory-when-no-budget-is-set) below)
 **Context:** `http, server, location`
-**Requires:** module built with `-DZSTD_STATIC_LINKING_ONLY` against libzstd ≥ 1.4.0 (the project's production and CI builds do; see [Compatibility](#compatibility)).
+**Requires:** module built with `-DZSTD_STATIC_LINKING_ONLY` against libzstd ≥ 1.4.0. This is **not** the result of the plain `./configure --add-dynamic-module=...` command in [Installation](#installation) — that auto-discovers a dynamic libzstd and never defines the flag. It is only set when `ZSTD_INC`/`ZSTD_LIB` point at a static libzstd build; see [Installation](#installation) and [Compatibility](#compatibility).
 
 Asserts at **config load** that the combined zstd parameters configured
 for the location (`zstd_comp_level`, `zstd_window_log`, `zstd_long`,
