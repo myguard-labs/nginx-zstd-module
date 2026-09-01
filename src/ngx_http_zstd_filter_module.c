@@ -373,6 +373,21 @@ ngx_http_zstd_dcz_window_log(size_t dict_len, off_t pledged_size,
 
 
 /*
+ * ZSTD_MAX_INPUT_SIZE is not declared by every libzstd this module
+ * supports -- it postdates the 1.4.x floor, and the "libzstd 1.4.x --
+ * fallback paths" CI leg builds against a header without it. Define
+ * exactly what upstream zstd.h defines, and only when the header did not,
+ * so a newer libzstd's own definition always wins: the width-dependent
+ * input ceiling at or above which ZSTD_compressBound() returns 0 rather
+ * than a bound.
+ */
+#ifndef ZSTD_MAX_INPUT_SIZE
+#define ZSTD_MAX_INPUT_SIZE \
+    ((sizeof(size_t) == 8) ? 0xFF00FF00FF00FF00ULL : 0xFF00FF00U)
+#endif
+
+
+/*
  * Is a pledged (upstream-declared) body length usable, at FULL off_t width,
  * as the ZSTD_compressBound() input that sizes the first output buffer?
  *
