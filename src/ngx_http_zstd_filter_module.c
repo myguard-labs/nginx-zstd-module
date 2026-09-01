@@ -6059,7 +6059,14 @@ ngx_http_zstd_init_module(ngx_cycle_t *cycle)
     zmcf = ngx_http_cycle_get_module_main_conf(cycle,
                                                 ngx_http_zstd_filter_module);
     if (zmcf == NULL) {
-        return NGX_ERROR;
+        /*
+         * No http block in this configuration -- a stream-only or
+         * mail-only nginx that happens to carry the module. Nothing is
+         * configured, so there is no feature floor to enforce; treating
+         * this as an error kept such a binary from starting at all,
+         * and with no diagnostic (init-module failures are silent).
+         */
+        return NGX_OK;
     }
 
     policy = ngx_http_zstd_version_policy(ZSTD_VERSION_NUMBER, runtime,
