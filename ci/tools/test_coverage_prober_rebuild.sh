@@ -46,6 +46,15 @@ assert_unconditional_rebuild() {
     else_branch=$(printf '%s\n' "$block" | sed -n '/^    else$/,/^    fi$/p')
     [ -n "$else_branch" ] || return 1
 
+    # The rebuild invocation must actually be present INSIDE the else
+    # branch (not merely somewhere else in the file, e.g. a comment or a
+    # different guarded copy) -- otherwise this whole check is satisfied
+    # by a file that mentions build.sh anywhere and never calls it here.
+    # shellcheck disable=SC2016  # literal pattern: $MODULE_DIR must not expand
+    printf '%s\n' "$else_branch" \
+        | grep -Fq 'bash "$MODULE_DIR/ci/t/harness/ci/prober/build.sh"' \
+        || return 1
+
     # Old buggy shape: a second, nested absence guard directly wrapping
     # the build.sh call, e.g.
     #   if [ ! -x ".../prober" ]; then
@@ -115,5 +124,24 @@ fi
 echo 'OK: negative control -- absence-guarded mutant correctly fails the' \
     'unconditional-rebuild assertion'
 
+# Second negative control: drop the build.sh invocation from the else
+# branch entirely (e.g. accidentally deleted, or moved somewhere the
+# assertion does not look) and confirm the assertion still catches it --
+# a file that merely MENTIONS build.sh elsewhere (a comment, a different
+# guarded copy) must not satisfy this check.
+cp "$src" "$work/coverage-removed.sh"
+# shellcheck disable=SC2016  # literal pattern: $MODULE_DIR must not expand
+sed -i '/bash "\$MODULE_DIR\/ci\/t\/harness\/ci\/prober\/build\.sh"/d' \
+    "$work/coverage-removed.sh"
+if assert_unconditional_rebuild "$work/coverage-removed.sh" >/dev/null 2>&1; then
+    echo 'FAIL: coverage.sh copy with the build.sh call removed from the' \
+        'else branch still passed the unconditional-rebuild assertion --' \
+        'the assertion does not actually require the call inside that' \
+        'branch' >&2
+    exit 1
+fi
+echo 'OK: negative control -- else-branch-missing-build.sh mutant' \
+    'correctly fails the unconditional-rebuild assertion'
+
 echo 'OK: coverage.sh unconditionally rebuilds the prober (A30-F7) and' \
-    'negative control'
+    'negative controls'
