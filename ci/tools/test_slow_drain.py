@@ -51,6 +51,7 @@ import sys
 import tempfile
 import threading
 import time
+import typing
 
 DRAIN_SIZE = 1_000_000
 READ_CHUNK = 16384
@@ -63,6 +64,14 @@ INTER_PART_GAP = 0.15
 
 NOMEM_WITNESS = "no free buffer, nomem set"
 FLUSH_WITNESS = "content-less flush completed"
+
+
+class WitnessFloor(typing.NamedTuple):
+    """One (log substring, human label, minimum occurrence count) row."""
+
+    witness: str
+    path_name: str
+    floor: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -412,11 +421,13 @@ http {{
             # mid-relay (and those only log content-less when they too
             # meet an empty encoder). The nomem count depends on drain
             # scheduling, so only its existence is pinned.
-            witness_floors = ()
+            witness_floors: tuple[WitnessFloor, ...] = ()
             if args.log_level == "debug":
                 witness_floors = (
-                    (NOMEM_WITNESS, "buffer-cap/nomem", 1),
-                    (FLUSH_WITNESS, "content-less flush", PROXY_REPEAT),
+                    WitnessFloor(NOMEM_WITNESS, "buffer-cap/nomem", 1),
+                    WitnessFloor(
+                        FLUSH_WITNESS, "content-less flush", PROXY_REPEAT
+                    ),
                 )
             for witness, path_name, floor in witness_floors:
                 n = elog.count(witness)

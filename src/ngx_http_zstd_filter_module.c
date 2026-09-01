@@ -5739,6 +5739,32 @@ ngx_http_zstd_dcz_dicts_hashed_variable(ngx_http_request_t *r,
 }
 
 
+/*
+ * Split bytes_in/bytes_out into an integer part and a three-decimal
+ * fractional part (*ratio_int, *ratio_frac) using two divisions instead of
+ * a single `bytes_in * 1000 / bytes_out`. bytes_in is a running total of
+ * streamed input and can approach UINT64_MAX on a long-lived connection;
+ * multiplying it by 1000 first can overflow the uint64_t accumulator and
+ * silently wrap, corrupting both digits. Dividing first keeps every
+ * intermediate value bounded by bytes_in (never larger than the input
+ * itself), and only the remainder -- already < bytes_out -- is scaled by
+ * 1000 before the second division, so that multiplication cannot overflow
+ * either: remainder < bytes_out <= bytes_in <= UINT64_MAX, and
+ * (bytes_out - 1) * 1000 does not overflow uint64_t for any bytes_out that
+ * can occur here (bytes_out is a real allocation-backed byte count, far
+ * below UINT64_MAX / 1000). Caller guarantees bytes_out != 0.
+ */
+static void
+ngx_http_zstd_ratio_parts(uint64_t bytes_in, uint64_t bytes_out,
+    ngx_uint_t *ratio_int, ngx_uint_t *ratio_frac)
+{
+    uint64_t  remainder = bytes_in % bytes_out;
+
+    *ratio_int  = (ngx_uint_t) (bytes_in / bytes_out);
+    *ratio_frac = (ngx_uint_t) (remainder * 1000 / bytes_out);
+}
+
+
 static ngx_int_t
 ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data)
@@ -5761,20 +5787,8 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    /*
-     * Compute the scaled ratio once and derive both the integer and the
-     * three-decimal fractional part from it, instead of dividing
-     * bytes_in by bytes_out twice. uint64_t scaling is required anyway to
-     * avoid overflow in the *1000 step, so the single division carries no
-     * extra precondition over the previous two. bytes_in and bytes_out are
-     * uint64_t so no cast is needed for the multiplication.
-     */
-    {
-        uint64_t  scaled = ctx->bytes_in * 1000 / ctx->bytes_out;
-
-        ratio_int  = (ngx_uint_t) (scaled / 1000);
-        ratio_frac = (ngx_uint_t) (scaled % 1000);
-    }
+    ngx_http_zstd_ratio_parts(ctx->bytes_in, ctx->bytes_out, &ratio_int,
+                               &ratio_frac);
 
     vv->len = ngx_sprintf(vv->data, "%ui.%03ui", ratio_int, ratio_frac)
               - vv->data;

@@ -572,9 +572,16 @@ case_fraction_exhaustive_three_digit(void)
      * mutation whose effect happens to cancel out on those particular
      * inputs, but summing every input in the space cannot.
      */
-    char       digits[3];
+    /*
+     * NUL-terminated for the "%s" diagnostic below; the parser end pointer
+     * still targets exactly the first 3 bytes, so the '\0' at digits[3] is
+     * never itself in the parsed slice.
+     */
+    char       digits[4];
     int        n, h, t, u;
     int        local_failures = 0;
+
+    digits[3] = '\0';
 
     for (n = 0; n < 1000; n++) {
         h = n / 100;
