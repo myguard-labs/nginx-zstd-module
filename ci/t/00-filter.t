@@ -1927,6 +1927,7 @@ Vary: X-No-Compression, Accept-Encoding
 GET /filter
 --- more_headers
 Accept-Encoding: zstd
+X-No-Compression: 1
 --- response_headers
 Content-Encoding:
 !Vary
@@ -1955,6 +1956,7 @@ Content-Encoding:
 GET /filter
 --- more_headers
 Accept-Encoding: zstd
+X-No-Compression: 1
 --- response_headers
 Content-Encoding:
 !Vary
