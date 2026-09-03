@@ -455,6 +455,21 @@ jobs:
           # directio mount. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_static_pread_unit.sh
 
+      - name: static probe-verdict cache unit fixture (identity key, bound, eviction)
+        run: |
+          # ngx_http_zstd_static_cached_verdict() /
+          # ngx_http_zstd_static_remember(): the worker-local cache that lets
+          # a repeat request skip the frame probe. Extracts both helpers plus
+          # their table verbatim and states the key directly, because a
+          # live-nginx fixture cannot vary st_ino independently of mtime and
+          # size, and cannot tell "the cache hit" apart from "the probe ran
+          # again and agreed". Pins that mtime, size, uniq and path each
+          # invalidate a cached POSITIVE verdict -- the dangerous direction,
+          # where a stale answer would serve an unvalidated sidecar -- and
+          # that the fixed table stays bounded under more distinct files than
+          # slots. Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_static_verdict_cache_unit.sh
+
       - name: static frame-header probe unit fixture
         run: |
           # ngx_http_zstd_static_probe_frame(): pure frame-header arithmetic.
