@@ -4104,7 +4104,7 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
  * the steering this function exists to refuse.
  *
  * `label` names the component for the diagnostic ("/" for the root fd,
- * the component bytes otherwise); `comp_path` is the accumulated path
+ * the component bytes otherwise); `path` is the accumulated path
  * so far, for the same purpose the leaf checks use `path` for.
  */
 static ngx_int_t

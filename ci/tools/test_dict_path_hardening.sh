@@ -66,7 +66,7 @@ events { worker_connections 16; }
 http { access_log off; }
 EOF
 if ! timeout 10 "$NGINX" -t -p "$PRELUDE_WORK" \
-        -c "$PRELUDE_WORK/conf/nginx.conf" >"$PRELUDE_WORK/out" 2>&1; then
+    -c "$PRELUDE_WORK/conf/nginx.conf" >"$PRELUDE_WORK/out" 2>&1; then
     echo "❌ baseline config with $FILTER_MOD does not even load --"
     echo "   every rejection fixture below would pass vacuously. Aborting."
     cat "$PRELUDE_WORK/out"
@@ -96,27 +96,50 @@ echo "✓ baseline: module loads, rejection fixtures are non-vacuous"
 # unrelated to what each fixture tests. Validate $HOME itself against
 # the same rule the module now enforces before trusting it as the
 # mktemp base, and fail loudly with a clear precondition error rather
-# than let every downstream fixture misreport.
+# than let every downstream fixture misreport. Resolve the candidate first so
+# a symlink in HOME itself does not become part of the fixture path, then vet
+# every component the module will walk.
 if [ -z "${HOME:-}" ] || [ ! -d "$HOME" ]; then
     echo "❌ \$HOME is unset or not a directory; cannot pick a safe base" \
-         "for the strict-mode fixtures below" >&2
-    exit 1
-fi
-home_owner="$(stat -c '%u' "$HOME")"
-home_mode="$(stat -c '%a' "$HOME")"
-if [ "$home_owner" != "$(id -u)" ] && [ "$home_owner" != "0" ]; then
-    echo "❌ \$HOME ($HOME) is owned by uid $home_owner, neither this" \
-         "job's uid $(id -u) nor root; not a safe ancestor for the" \
-         "strict-mode fixtures below" >&2
-    exit 1
-fi
-if [ $(( 0$home_mode & 0022 )) -ne 0 ]; then
-    echo "❌ \$HOME ($HOME) is mode $home_mode, writable by group or" \
-         "other; not a safe ancestor for the strict-mode fixtures below" >&2
+        "for the strict-mode fixtures below" >&2
     exit 1
 fi
 
-WORK="$(mktemp -d --tmpdir="$HOME" zstd-dict-hardening.XXXXXX)"
+STRICT_BASE="$(readlink -f -- "$HOME")"
+
+validate_strict_ancestor() {
+    local candidate="$1" owner mode
+
+    owner="$(stat -c '%u' "$candidate")"
+    mode="$(stat -c '%a' "$candidate")"
+    if [ "$owner" != "$(id -u)" ] && [ "$owner" != "0" ]; then
+        echo "❌ strict fixture ancestor $candidate is owned by uid $owner," \
+            "neither this job's uid $(id -u) nor root" >&2
+        exit 1
+    fi
+    if [ $((0$mode & 0022)) -ne 0 ]; then
+        echo "❌ strict fixture ancestor $candidate is mode $mode, writable" \
+            "by group or other" >&2
+        exit 1
+    fi
+}
+
+current=/
+validate_strict_ancestor "$current"
+IFS='/' read -r -a strict_parts <<<"${STRICT_BASE#/}"
+for part in "${strict_parts[@]}"; do
+    [ -n "$part" ] || continue
+    current="${current%/}/$part"
+    validate_strict_ancestor "$current"
+done
+
+if [ ! -w "$STRICT_BASE" ] || [ ! -x "$STRICT_BASE" ]; then
+    echo "❌ strict fixture base $STRICT_BASE is not writable and searchable" \
+        "by uid $(id -u); mktemp cannot create the fixture directory there" >&2
+    exit 1
+fi
+
+WORK="$(mktemp -d --tmpdir="$STRICT_BASE" zstd-dict-hardening.XXXXXX)"
 cleanup() {
     if [ -n "${NGINX_PID:-}" ]; then
         kill -9 "$NGINX_PID" 2>/dev/null || true
@@ -165,8 +188,7 @@ $snippet
 }
 EOF
     if timeout 10 "$NGINX" -t -p "$WORK" -c "$WORK/conf/nginx.conf" \
-        >"$WORK/logs/t.out" 2>&1
-    then
+        >"$WORK/logs/t.out" 2>&1; then
         echo "OK"
     else
         if [ "$?" -eq 124 ]; then
@@ -591,8 +613,7 @@ else
     # accept either wording as proof the symlink swap was refused.
     if curl -fsS -o /dev/null "http://127.0.0.1:18198/" 2>/dev/null \
         && grep -qE "is a symlink; refused|levels of symbolic links" \
-            "$WORK/logs/error.log"
-    then
+            "$WORK/logs/error.log"; then
         echo "✓ old-cycle-active fixture: reload refused, old cycle still serving"
     else
         echo "✗ old-cycle-active fixture: refusal not logged or old cycle stopped answering"
