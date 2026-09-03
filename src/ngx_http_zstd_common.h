@@ -819,7 +819,7 @@ ngx_http_zstd_vary_find_tokens(ngx_http_request_t *r,
         }
 
         {
-            u_char  *end, *p, *start;
+            u_char  *end, *p, *start, *tok_end;
 
             p = h[i].value.data;
             end = p + h[i].value.len;
@@ -833,6 +833,14 @@ ngx_http_zstd_vary_find_tokens(ngx_http_request_t *r,
                 while (p < end && *p != ',') {
                     p++;
                 }
+
+                /*
+                 * `p` is the untrimmed token end (the comma, or `end`);
+                 * keep it so the tail advance below can reuse it instead
+                 * of re-walking from the OWS-trimmed pointer to find the
+                 * same comma again.
+                 */
+                tok_end = p;
 
                 while (p > start && (p[-1] == ' ' || p[-1] == '\t')) {
                     p--;
@@ -858,9 +866,7 @@ ngx_http_zstd_vary_find_tokens(ngx_http_request_t *r,
                     return;
                 }
 
-                while (p < end && *p != ',') {
-                    p++;
-                }
+                p = tok_end;
             }
         }
     }
