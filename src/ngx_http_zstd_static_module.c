@@ -181,10 +181,14 @@ static ngx_uint_t  ngx_http_zstd_static_bad_cache_next;
  * once because this handler is fully synchronous per worker.
  *
  * SAFETY -- ngx_time(): nginx refreshes this cached value once per event
- * loop iteration and it is monotonically non-decreasing within a worker's
- * lifetime (nginx does not step it backwards), so `now - window_start`
- * below never underflows and the comparison is correct without touching
- * the wall clock or gettimeofday() on this hot path.
+ * loop iteration and it is ordinarily monotonically non-decreasing within
+ * a worker's lifetime, so `now - window_start` below is ordinarily
+ * correct without touching the wall clock or gettimeofday() on this hot
+ * path. An administrative or NTP step backward is still handled
+ * explicitly (`now < window_start` below forces a rollover) rather than
+ * assumed away: a signed `time_t` subtraction under a backward step goes
+ * negative and would otherwise fail the `>=` window test, extending
+ * suppression indefinitely instead of the intended fixed window.
  *
  * SAFETY -- worker-cycle lifetime: a config reload forks new worker
  * processes; the old ones drain and exit, so a reload cannot hide a NEW
@@ -211,6 +215,7 @@ ngx_http_zstd_static_dio_err_should_log(ngx_log_t *log)
     now = ngx_time();
 
     if (ngx_http_zstd_static_dio_err_window_start == 0
+        || now < ngx_http_zstd_static_dio_err_window_start
         || now - ngx_http_zstd_static_dio_err_window_start
                >= NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW)
     {

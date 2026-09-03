@@ -147,11 +147,28 @@ main(void)
     r = ngx_http_zstd_static_dio_err_should_log(NULL);
     check("boundary rolls over", r, 1);
 
+    /*
+     * 8. Backward wall-clock step (NTP correction, admin action):
+     *    ngx_time() going backward must force a rollover, not extend
+     *    suppression indefinitely. A signed `now - window_start` under a
+     *    backward step is negative and would otherwise stay under the
+     *    `>=` window threshold forever.
+     */
+    reset_state();
+    ngx_http_zstd_static_dio_err_should_log(NULL); /* logs, opens window at 1000 */
+    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    check("mid-window before clock step is suppressed", r, NOT_SUPPRESSED);
+
+    fake_now = 500; /* clock stepped backward past window_start */
+    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    check("backward clock step forces rollover, not extended suppression",
+          r, 1);
+
     if (failures) {
         printf("FAILED: %d check(s)\n", failures);
         return 1;
     }
 
-    printf("OK: directio probe log rate limiter (%d checks)\n", 7);
+    printf("OK: directio probe log rate limiter (%d checks)\n", 8);
     return 0;
 }
