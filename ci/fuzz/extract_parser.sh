@@ -20,8 +20,8 @@ HEADER="$FUZZ_DIR/../../src/ngx_http_zstd_common.h"
 OUT="$FUZZ_DIR/generated_parser.inc"
 
 if [ ! -f "$HEADER" ]; then
-	echo "✗ cannot find $HEADER" >&2
-	exit 1
+    echo "✗ cannot find $HEADER" >&2
+    exit 1
 fi
 
 # Extract each function from its return-type line through the matching
@@ -56,26 +56,26 @@ awk '
     }
 ' "$HEADER" >"$OUT"
 
-if ! grep -q 'ngx_http_zstd_chain_coding_weight' "$OUT" ||
-	! grep -q 'ngx_http_zstd_request_coding_weight' "$OUT" ||
-	! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" ||
-	! grep -q 'ngx_http_zstd_parse_q_fraction' "$OUT" ||
-	! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" ||
-	! grep -Eq '^ngx_http_zstd_coding_weight_ex\(' "$OUT" ||
-	! grep -Eq '^ngx_http_zstd_coding_weight\(' "$OUT" ||
-	! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" ||
-	! grep -q 'ngx_http_zstd_accepts' "$OUT" ||
-	[ "$(tail -n1 "$OUT")" != "}" ]; then
-	echo "✗ failed to extract the Accept-Encoding parser from $HEADER" >&2
-	echo "  (header layout changed? update extract_parser.sh)" >&2
-	rm -f "$OUT"
-	exit 1
+if ! grep -q 'ngx_http_zstd_chain_coding_weight' "$OUT" \
+    || ! grep -q 'ngx_http_zstd_request_coding_weight' "$OUT" \
+    || ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" \
+    || ! grep -q 'ngx_http_zstd_parse_q_fraction' "$OUT" \
+    || ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" \
+    || ! grep -Eq '^ngx_http_zstd_coding_weight_ex\(' "$OUT" \
+    || ! grep -Eq '^ngx_http_zstd_coding_weight\(' "$OUT" \
+    || ! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" \
+    || ! grep -q 'ngx_http_zstd_accepts' "$OUT" \
+    || [ "$(tail -n1 "$OUT")" != "}" ]; then
+    echo "✗ failed to extract the Accept-Encoding parser from $HEADER" >&2
+    echo "  (header layout changed? update extract_parser.sh)" >&2
+    rm -f "$OUT"
+    exit 1
 fi
 
 LINES=$(wc -l <"$OUT")
 echo "✓ extracted ngx_http_zstd_skip_quoted() + ngx_http_zstd_parse_q_fraction()" \
-	"+ ngx_http_zstd_eval_qvalue() + ngx_http_zstd_coding_weight_ex()" \
-	"+ ngx_http_zstd_coding_weight()" \
-	"+ ngx_http_zstd_chain_coding_weight()" \
-	"+ ngx_http_zstd_request_coding_weight() + ngx_http_zstd_accept_encoding()" \
-	"+ ngx_http_zstd_accepts() — $LINES lines -> $OUT"
+    "+ ngx_http_zstd_eval_qvalue() + ngx_http_zstd_coding_weight_ex()" \
+    "+ ngx_http_zstd_coding_weight()" \
+    "+ ngx_http_zstd_chain_coding_weight()" \
+    "+ ngx_http_zstd_request_coding_weight() + ngx_http_zstd_accept_encoding()" \
+    "+ ngx_http_zstd_accepts() — $LINES lines -> $OUT"

@@ -349,6 +349,10 @@ ngx_http_zstd_coding_weight_ex(const ngx_str_t *ae, const char *coding,
     ngx_int_t      coding_q = -1; /* explicit `coding` weight, -1 = absent */
     ngx_int_t      star_q = -1;   /* "*" wildcard weight,      -1 = absent */
 
+#ifdef NGX_HTTP_ZSTD_TEST_COUNT_CODING_WEIGHT
+    ngx_http_zstd_test_coding_weight_calls++;
+#endif
+
     while (p < end) {
 
         u_char        *tok;
@@ -617,7 +621,7 @@ ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
     ngx_uint_t        i;
     ngx_list_part_t  *part;
     ngx_table_elt_t  *headers;
-    ngx_int_t         q, coding_q, star_q;
+    ngx_int_t         coding_q, star_q, line_coding_q, line_star_q;
 
     coding_q = -1;
     star_q = -1;
@@ -643,21 +647,16 @@ ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
             continue;
         }
 
-        q = ngx_http_zstd_coding_weight(&headers[i].value, coding,
-                                         coding_len, 0);
-        if (q >= 0) {
-            coding_q = q;
+        (void) ngx_http_zstd_coding_weight_ex(&headers[i].value, coding,
+                                              coding_len, allow_wildcard,
+                                              &line_coding_q, &line_star_q);
+        if (line_coding_q >= 0) {
+            coding_q = line_coding_q;
             continue;
         }
 
-        if (!allow_wildcard) {
-            continue;
-        }
-
-        q = ngx_http_zstd_coding_weight(&headers[i].value, coding,
-                                         coding_len, 1);
-        if (q >= 0) {
-            star_q = q;
+        if (allow_wildcard && line_star_q >= 0) {
+            star_q = line_star_q;
         }
     }
 
