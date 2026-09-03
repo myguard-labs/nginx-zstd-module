@@ -76,7 +76,19 @@ fi
 rm -rf "$PRELUDE_WORK"
 echo "✓ baseline: module loads, rejection fixtures are non-vacuous"
 
-WORK="$(mktemp -d)"
+# NOT under /tmp directly: /tmp is mode 1777 (world-writable), and the
+# strict-path ancestor-directory vetting this file exercises now refuses
+# EVERY component of a dictionary path, including /tmp itself, when it
+# is group/world-writable -- correctly so, since a world-writable /tmp
+# is exactly the attack surface (an unprivileged user renaming a file
+# into a sibling of $WORK) that check exists to close. A dictionary
+# fixture placed directly under /tmp would therefore fail every
+# "strict on, must still load" case for a reason that has nothing to do
+# with what that case is testing. $HOME is used as the mktemp base
+# instead so the whole ancestor chain (/, /home, $HOME, $WORK) is
+# root- or self-owned and non-group/world-writable, matching a real
+# deployment's dictionary directory tree.
+WORK="$(mktemp -d --tmpdir="$HOME" zstd-dict-hardening.XXXXXX)"
 cleanup() {
     if [ -n "${NGINX_PID:-}" ]; then
         kill -9 "$NGINX_PID" 2>/dev/null || true
@@ -86,6 +98,13 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/html"
+
+# mkdir honours umask, which on a typical dev/CI account (002) leaves
+# these group-writable (0775) -- exactly the bit the strict-path
+# ancestor vetting now refuses on every walked directory. Pin them
+# explicitly rather than relying on umask, same reasoning as the
+# chmod 0644 a few lines below for the leaf fixture file.
+chmod 0755 "$WORK" "$WORK/conf" "$WORK/logs" "$WORK/html"
 
 fail=0
 
@@ -353,6 +372,110 @@ check "world-writable, strict on (zstd_dict_file)" reject "$r"
 r=$(conf_test "    zstd_dict_strict_path on;
     zstd_dcz_dict_file $WORK/html/writable.dict;")
 check "world-writable, strict on (zstd_dcz_dict_file)" reject "$r"
+
+# ── A33-F2: ancestor-DIRECTORY ownership/mode, not just the leaf ──────
+#
+# The regression this pins: M3 (intermediate-symlink fixture above) made
+# the strict-mode walk resolve every path component with
+# openat(O_NOFOLLOW|O_DIRECTORY), and M4 (self-owned/world-writable
+# fixtures above) added leaf ownership+mode checks. Neither ever
+# fstat()-checked the intermediate DIRECTORY fds the walk opens along
+# the way. A local user who owns, or can write into, an ancestor
+# directory can rename() a root-owned 0644 file into the leaf position
+# and pass both leaf checks while still having fully steered which
+# bytes strict mode loads -- the directive's promise ("a
+# less-privileged local writer cannot steer the bytes") only holds when
+# EVERY component is vetted, not just the last one.
+#
+# Two arms below, one per unsafe-ancestor cause (mode, then ownership),
+# each proved against a PARENT directory of the dictionary file, never
+# the leaf itself -- the existing M4 fixtures already cover the leaf.
+
+# ── Arm 1: world-writable PARENT directory ─────────────────────────────
+mkdir -p "$WORK/html/unsafe-parent-mode"
+cp "$WORK/html/regular.dict" "$WORK/html/unsafe-parent-mode/leaf.dict"
+chmod 0644 "$WORK/html/unsafe-parent-mode/leaf.dict"
+chmod 0777 "$WORK/html/unsafe-parent-mode"
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/unsafe-parent-mode/leaf.dict;")
+check "world-writable PARENT directory, strict on (zstd_dict_file)" reject "$r"
+
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dcz_dict_file $WORK/html/unsafe-parent-mode/leaf.dict;")
+check "world-writable PARENT directory, strict on (zstd_dcz_dict_file)" reject "$r"
+
+# Complement: the identical layout must still load with strict off, so
+# the ancestor rule is confined to strict mode.
+r=$(conf_test "    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/unsafe-parent-mode/leaf.dict;")
+check "world-writable PARENT directory, strict off / default" regular "$r"
+
+# NO STICKY-BIT EXEMPTION: a sticky world-writable ancestor (the
+# /tmp-style layout) still lets an unprivileged user CREATE the next
+# path component -- it only stops them deleting/renaming someone
+# else's existing entry, which is not the attack here (the attacker
+# creates a new file, they don't need to touch an existing one). This
+# must reject exactly like the plain 0777 case above, not be
+# special-cased into passing.
+mkdir -p "$WORK/html/unsafe-parent-sticky"
+cp "$WORK/html/regular.dict" "$WORK/html/unsafe-parent-sticky/leaf.dict"
+chmod 0644 "$WORK/html/unsafe-parent-sticky/leaf.dict"
+chmod 1777 "$WORK/html/unsafe-parent-sticky"
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/unsafe-parent-sticky/leaf.dict;")
+check "sticky world-writable PARENT directory, strict on (zstd_dict_file)" reject "$r"
+
+r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dcz_dict_file $WORK/html/unsafe-parent-sticky/leaf.dict;")
+check "sticky world-writable PARENT directory, strict on (zstd_dcz_dict_file)" reject "$r"
+
+# ── Arm 2: PARENT directory owned by a foreign, non-root uid ──────────
+# Same coverage-honesty split as the M4 leaf-ownership fixture above:
+# only root can chown a directory away from itself, so the genuine
+# foreign-owner case runs under root and the observable complement
+# (self-owned parent still loads) runs everywhere else.
+if [ "$(id -u)" -eq 0 ]; then
+    foreign_uid=""
+    for cand in nobody daemon bin; do
+        if id -u "$cand" >/dev/null 2>&1; then
+            foreign_uid="$(id -u "$cand")"
+            break
+        fi
+    done
+
+    if [ -n "$foreign_uid" ]; then
+        mkdir -p "$WORK/html/unsafe-parent-owner"
+        cp "$WORK/html/regular.dict" "$WORK/html/unsafe-parent-owner/leaf.dict"
+        chmod 0644 "$WORK/html/unsafe-parent-owner/leaf.dict"
+        chmod 0755 "$WORK/html/unsafe-parent-owner"
+        chown "$foreign_uid" "$WORK/html/unsafe-parent-owner"
+
+        r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/unsafe-parent-owner/leaf.dict;")
+        check "foreign-owned PARENT directory, strict on (zstd_dict_file)" reject "$r"
+
+        r=$(conf_test "    zstd_dict_strict_path on;
+    zstd_dcz_dict_file $WORK/html/unsafe-parent-owner/leaf.dict;")
+        check "foreign-owned PARENT directory, strict on (zstd_dcz_dict_file)" reject "$r"
+
+        r=$(conf_test "    zstd_dict_file_unsafe on;
+    zstd_dict_file $WORK/html/unsafe-parent-owner/leaf.dict;")
+        check "foreign-owned PARENT directory, strict off / default" regular "$r"
+    else
+        echo "::warning::no unprivileged account (nobody/daemon/bin) found;"
+        echo "  A33-F2 foreign-owner-ancestor half NOT COVERED in this run"
+    fi
+else
+    echo "• A33-F2 foreign-owner-ancestor half NOT COVERED: running as uid"
+    echo "  $(id -u), which cannot chown a directory away from itself. The"
+    echo "  observable complement (self-owned parent, sane mode, strict on"
+    echo "  still loads) is asserted by every 'strict on ... loads'"
+    echo "  fixture above, whose dictionaries all sit under \$WORK/html,"
+    echo "  itself self-owned mode 0755 (pinned above)."
+fi
 
 # ── Regression: zstd_dict_strict_path AFTER the dcz directive must not
 #    silently skip the check for a dictionary already loaded by that
