@@ -657,9 +657,11 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
      * dictionary store here: those are filter-owned policy.  This cheap
      * routing predicate only asks whether the filter should get the request.
      */
-    ngx_uint_t        i;
+    ngx_uint_t        i, avail_dict_count;
     ngx_list_part_t  *part;
     ngx_table_elt_t  *headers;
+
+    avail_dict_count = 0;
 
     part = &r->headers_in.headers.part;
     headers = part->elts;
@@ -667,7 +669,7 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
     for (i = 0; /* void */; i++) {
         if (i >= part->nelts) {
             if (part->next == NULL) {
-                return 0;
+                break;
             }
 
             part = part->next;
@@ -680,10 +682,26 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
                                (u_char *) "Available-Dictionary",
                                sizeof("Available-Dictionary") - 1) == 0)
         {
-            return ngx_http_zstd_request_coding_weight(r, "dcz",
-                       sizeof("dcz") - 1, 0) > 0;
+            avail_dict_count++;
         }
     }
+
+    /*
+     * Match the filter's fail-closed disposition (see
+     * ngx_http_zstd_collect_dcz_headers() / avail_dict_count > 1 in
+     * ngx_http_zstd_filter_module.c): stand aside only when exactly one
+     * Available-Dictionary header is present. Zero means there is
+     * nothing to serve dcz for; two or more is the ambiguous case the
+     * filter refuses outright, so this routing predicate must not bypass
+     * to it either -- doing so would forfeit a usable .zst sidecar for
+     * dynamic zstd or identity when the filter later declines.
+     */
+    if (avail_dict_count != 1) {
+        return 0;
+    }
+
+    return ngx_http_zstd_request_coding_weight(r, "dcz",
+               sizeof("dcz") - 1, 0) > 0;
 }
 
 
@@ -1098,11 +1116,26 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
              * Win32 port so existing log tooling keeps matching;
              * Win32 names ReadFile() instead of claiming a pread(2)
              * it never issued.
+             *
+             * n >= 0 means the read itself succeeded and simply
+             * returned too few bytes (e.g. a sidecar consisting only
+             * of skippable frames, n == 0 at offset == size); errno is
+             * stale in that case, so log it at ERR with errno 0 rather
+             * than CRIT with a misleading ngx_errno. A genuine read
+             * failure (n < 0) keeps CRIT and the real ngx_errno.
              */
-            ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
-                          "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
-                          "(\"%s\", frame header) returned %z",
-                          path->data, n);
+            if (n >= 0) {
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
+                              "(\"%s\", frame header) returned %z",
+                              path->data, n);
+
+            } else {
+                ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
+                              "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
+                              "(\"%s\", frame header) returned %z",
+                              path->data, n);
+            }
             probe_rc = NGX_DECLINED;
             *malformed = (n >= 0);
             goto probe_done;
