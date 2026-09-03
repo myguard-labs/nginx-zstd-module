@@ -46,7 +46,7 @@ fi
 awk '
     { sub(/\r$/, "") }
     /^static (ngx_inline )?(ngx_int_t|u_char \*)$/ { pending = 1; buf = $0 ORS; next }
-    pending && /^ngx_http_zstd_(skip_quoted|parse_q_fraction|eval_qvalue|coding_weight|chain_coding_weight|request_coding_weight|accept_encoding|accepts)\(/ {
+    pending && /^ngx_http_zstd_(skip_quoted|parse_q_fraction|eval_qvalue|coding_weight_ex|coding_weight|chain_coding_weight|request_coding_weight|accept_encoding|accepts)\(/ {
         capture = 1; pending = 0; print buf; print; next
     }
     pending { pending = 0; buf = "" }
@@ -61,7 +61,8 @@ if ! grep -q 'ngx_http_zstd_chain_coding_weight' "$OUT" ||
 	! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" ||
 	! grep -q 'ngx_http_zstd_parse_q_fraction' "$OUT" ||
 	! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" ||
-	! grep -q 'ngx_http_zstd_coding_weight' "$OUT" ||
+	! grep -Eq '^ngx_http_zstd_coding_weight_ex\(' "$OUT" ||
+	! grep -Eq '^ngx_http_zstd_coding_weight\(' "$OUT" ||
 	! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" ||
 	! grep -q 'ngx_http_zstd_accepts' "$OUT" ||
 	[ "$(tail -n1 "$OUT")" != "}" ]; then
@@ -73,7 +74,8 @@ fi
 
 LINES=$(wc -l <"$OUT")
 echo "✓ extracted ngx_http_zstd_skip_quoted() + ngx_http_zstd_parse_q_fraction()" \
-	"+ ngx_http_zstd_eval_qvalue() + ngx_http_zstd_coding_weight()" \
+	"+ ngx_http_zstd_eval_qvalue() + ngx_http_zstd_coding_weight_ex()" \
+	"+ ngx_http_zstd_coding_weight()" \
 	"+ ngx_http_zstd_chain_coding_weight()" \
 	"+ ngx_http_zstd_request_coding_weight() + ngx_http_zstd_accept_encoding()" \
 	"+ ngx_http_zstd_accepts() — $LINES lines -> $OUT"
