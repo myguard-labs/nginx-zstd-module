@@ -1783,7 +1783,10 @@ jobs:
           JOB_NAME: ${{ github.job }}
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn-${RUN_ID}-${JOB_NAME}"
+          # Strict-path fixtures validate every ancestor. Keep their servroot
+          # under the private checkout rather than world-writable /tmp so the
+          # intended dot/symlink component is the first failing condition.
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/.nginx-servroot-confwarn-${RUN_ID}-${JOB_NAME}"
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"

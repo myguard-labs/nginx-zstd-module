@@ -112,7 +112,7 @@ find "$SRCDIR/objs/addon" -name '*.gcda' -delete
 echo "== coverage: exercising the binary via ci/t/ =="
 export TEST_NGINX_BINARY="$BIN"
 export TEST_NGINX_TIMEOUT="${TEST_NGINX_TIMEOUT:-20}"
-export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-coverage-filter"
+export TEST_NGINX_SERVROOT="$MODULE_DIR/.nginx-servroot-coverage-filter"
 mkdir -p "$TEST_NGINX_SERVROOT"
 # Both dcz and static tests assert validators derived from these fixtures.
 # Normalize before either suite so checkout/build time cannot change the ETag.
