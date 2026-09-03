@@ -5,11 +5,8 @@ use lib 'lib';
 
 my $dirname = dirname(__FILE__);
 # Absolute path to the committed fixture dir (ci/t/suite, holding test +
-# test.zst). TEST 14 serves from here rather than "root ../suite": this
-# suite's servroot is created under /tmp in CI (build-test.yml, confwarn
-# step), so a relative climb out of the servroot escapes the workspace and
-# open() fails. 01-static.t can use ../suite only because its own servroot
-# is placed inside ci/t/.
+# test.zst). TEST 14 uses it so the fixture is independent of which safe,
+# runner-private servroot a local, PR, deep, or coverage invocation selects.
 our $suite_dir = File::Spec->rel2abs("$dirname/suite");
 # local: this process is the test run, but perlcritic is right that a bare
 # assignment to %ENV leaks into anything that runs after it.
@@ -467,11 +464,8 @@ Vary: Accept-Encoding
 # the same arm WITH gzip_vary on.
 #
 # The fixture dir is addressed by ABSOLUTE path ($::suite_dir), not as
-# "root ../suite": this suite's servroot is created under /tmp in CI
-# (build-test.yml, the confwarn step), so a relative climb out of the
-# servroot escapes the workspace entirely and open() fails with ENOENT.
-# 01-static.t can use ../suite only because its own servroot is placed
-# inside ci/t/ (build-test.yml:1307 vs :1290).
+# "root ../suite", so this assertion is independent of the suite's
+# runner-private servroot location.
 --- config eval
 "    location /test {
         zstd_static on;
@@ -624,6 +618,10 @@ Vary: Accept-Encoding
 --- user_files
 >>> zstd.dict
 the quick brown fox jumps over the lazy dog
+--- post_setup_server_root eval
+'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";'
 --- config
     location /d {
         zstd on;
@@ -649,6 +647,8 @@ contains a "." or ".." component; refused by "zstd_dict_strict_path on"
     zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/current/zstd.dict;"
 --- post_setup_server_root eval
 'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";
 my $real = "$root/html/real-release";
 mkdir $real or die "mkdir $real: $!";
 open my $fh, ">", "$real/zstd.dict" or die "open zstd.dict: $!";
