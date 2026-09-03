@@ -50,9 +50,11 @@ LEGACY_BIN="$DIR/test_accept_encoding_legacy"
 CHAIN_BIN="$DIR/test_accept_encoding_chain"
 PROBE_BIN="$DIR/test_static_probe"
 VERSION_BIN="$DIR/test_version_policy"
+VARY_BIN="$DIR/test_vary_fusion"
+NGINX_TREE="$ROOT/.build/nginx-1.31.4"
 
 if [ "${1:-}" = "clean" ]; then
-	rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$PROBE_BIN" "$VERSION_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
+	rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$PROBE_BIN" "$VERSION_BIN" "$VARY_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
 	echo "unit test binary removed"
 	exit 0
 fi
@@ -146,3 +148,33 @@ $CC "${LINK_EXTRA[@]}" -o "$VERSION_BIN" "$DIR/test_version_policy.o"
 
 echo "==> Running libzstd version policy checks"
 timeout 60s "$VERSION_BIN"
+
+# ---------------------------------------------------------------------------
+# Vary walk fusion (src/ngx_http_zstd_common.h:
+# ngx_http_zstd_vary_ae_dcz()). Unlike the parser suite above this links the
+# real nginx headers directly (no extraction step -- the Vary helpers are
+# not part of the sliced fuzz surface), so it needs the built nginx tree at
+# .build/nginx-1.31.4 (the same one ci/fuzz and the module TUs build
+# against). Skipped, not failed, when that tree is absent: it is a 28 MB
+# gitignored copy this cheapest layer does not fetch on its own.
+# ---------------------------------------------------------------------------
+
+if [ -d "$NGINX_TREE/objs" ]; then
+	echo "==> Building $VARY_BIN with ${CC}"
+	NGINX_INCLUDES=(-I"$NGINX_TREE/objs")
+	while IFS= read -r inc_dir; do
+		NGINX_INCLUDES+=(-I"$inc_dir")
+	done < <(find "$NGINX_TREE/src" -type d ! -path '*/os/win32*')
+
+	# shellcheck disable=SC2086
+	$CC "${OWN_CFLAGS[@]}" "${NGINX_INCLUDES[@]}" \
+		-c "$DIR/test_vary_fusion.c" -o "$DIR/test_vary_fusion.o"
+	# shellcheck disable=SC2086
+	$CC "${LINK_EXTRA[@]}" -o "$VARY_BIN" "$DIR/test_vary_fusion.o"
+
+	echo "==> Running Vary walk fusion checks"
+	timeout 60s "$VARY_BIN"
+else
+	echo "==> Skipping $VARY_BIN: $NGINX_TREE/objs not found" \
+		"(cp -r <repo>/.build/nginx-1.31.4 .build/ to enable)"
+fi

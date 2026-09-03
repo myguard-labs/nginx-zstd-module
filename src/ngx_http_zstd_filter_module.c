@@ -1675,6 +1675,20 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
      * ABOVE this point declines for a reason invariant in
      * Accept-Encoding (wrong status, wrong content type, header-only,
      * already encoded), so this is the earliest correct place for it.
+     *
+     * NOT fused with the Available-Dictionary/Sec-Fetch-Site push below:
+     * that push runs only after the zstd_bypass predicate return further
+     * down, so a bypassed identity response gets Accept-Encoding in Vary
+     * but not the dcz tokens -- the bypass predicate is Available-
+     * Dictionary-invariant, so omitting those tokens there is correct,
+     * not an oversight. Fusing the two walks here would start adding
+     * dcz Vary tokens to bypassed responses, which is a behaviour
+     * change, not an optimisation; see ci/adoption-findings.md
+     * (perf/vary-walk-fusion) for the measurement this row is scoped
+     * down from. This call site keeps the two separate walks; only the
+     * static_module.c dict_bypass site (which wants both unconditionally,
+     * with no intervening early return) uses the fused
+     * ngx_http_zstd_vary_ae_dcz() helper.
      */
     if (ngx_http_zstd_vary_accept_encoding(r) != NGX_OK) {
         return NGX_ERROR;

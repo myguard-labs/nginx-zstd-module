@@ -1359,9 +1359,15 @@ ngx_http_zstd_static_negotiate(ngx_http_request_t *r,
     if (zscf->dict_bypass && r == r->main
         && ngx_http_zstd_static_should_bypass(r))
     {
-        if (ngx_http_zstd_vary_accept_encoding(r) != NGX_OK
-            || ngx_http_zstd_vary_dcz(r) != NGX_OK)
-        {
+        /*
+         * Both Vary dimensions are wanted unconditionally here, with no
+         * early return in between, so the fused single-walk helper
+         * applies cleanly -- see ngx_http_zstd_vary_ae_dcz() in
+         * ngx_http_zstd_common.h for what it preserves from the two
+         * original calls (duplicate-safety, push shapes, the RFC 9842
+         * SS8.3 / shared-cache poisoning reasoning).
+         */
+        if (ngx_http_zstd_vary_ae_dcz(r, 1) != NGX_OK) {
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
 
