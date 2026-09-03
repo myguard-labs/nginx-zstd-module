@@ -44,7 +44,7 @@ mkdir -p "$OUT"
     echo " * lines $START_LINE-$END_LINE. Do not edit; regenerate by running"
     echo " * the script. */"
     sed -n "${START_LINE},${END_LINE}p" "$SRC"
-} > "$OUT/generated_static_should_bypass.inc"
+} >"$OUT/generated_static_should_bypass.inc"
 
 # Non-vacuity: the extraction must actually contain the header comparison
 # AND the coding-weight call. An empty or mis-ranged .inc would otherwise

@@ -683,6 +683,9 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
                                sizeof("Available-Dictionary") - 1) == 0)
         {
             avail_dict_count++;
+            if (avail_dict_count > 1) {
+                return 0;
+            }
         }
     }
 
@@ -918,6 +921,20 @@ ngx_http_zstd_static_probe_verdict(const u_char *frame, size_t avail,
 }
 
 
+static ngx_uint_t
+ngx_http_zstd_static_probe_read_log_level(ssize_t n, ngx_uint_t directio,
+    ngx_err_t *err)
+{
+    if (n >= 0) {
+        *err = 0;
+        return NGX_LOG_ERR;
+    }
+
+    *err = ngx_errno;
+    return directio ? NGX_LOG_ERR : NGX_LOG_CRIT;
+}
+
+
 static ngx_int_t
 ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     const ngx_http_core_loc_conf_t *clcf, ngx_open_file_info_t *of,
@@ -934,7 +951,8 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     u_char      *hdr, *frame;
     size_t       want, align, frame_off, avail, got, need;
     ssize_t      n;
-    ngx_uint_t   frames, scratch, have_block, reuse;
+    ngx_uint_t   frames, scratch, have_block, reuse, read_log_level;
+    ngx_err_t    read_err;
     off_t        pos, base, have_base;
     ngx_int_t    probe_rc;
 
@@ -1097,8 +1115,11 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
         frame = hdr + frame_off;
 
         if (n < 0 || avail < 4) {
+            read_log_level = ngx_http_zstd_static_probe_read_log_level(
+                                 n, of->is_directio, &read_err);
+
             if (of->is_directio) {
-                ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                ngx_log_error(read_log_level, log, read_err,
                               "zstd static: %uz-byte aligned probe on "
                               "directio file \"%s\" returned %z -- "
                               "declining; check directio_alignment "
@@ -1124,18 +1145,10 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
              * than CRIT with a misleading ngx_errno. A genuine read
              * failure (n < 0) keeps CRIT and the real ngx_errno.
              */
-            if (n >= 0) {
-                ngx_log_error(NGX_LOG_ERR, log, 0,
-                              "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
-                              "(\"%s\", frame header) returned %z",
-                              path->data, n);
-
-            } else {
-                ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
-                              "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
-                              "(\"%s\", frame header) returned %z",
-                              path->data, n);
-            }
+            ngx_log_error(read_log_level, log, read_err,
+                          "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
+                          "(\"%s\", frame header) returned %z",
+                          path->data, n);
             probe_rc = NGX_DECLINED;
             *malformed = (n >= 0);
             goto probe_done;

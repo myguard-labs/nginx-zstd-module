@@ -7,8 +7,9 @@
  * drift from the shipped code and keep passing while the real predicate
  * regressed.
  *
- * What is under test: the predicate must count EVERY Available-Dictionary
- * request header and stand aside only when exactly one is present. The
+ * What is under test: the predicate must detect a second
+ * Available-Dictionary request header and stand aside only when exactly one
+ * is present. The
  * dynamic filter refuses dcz outright on duplicates
  * (avail_dict_count > 1 in ngx_http_zstd_filter_module.c), so a static
  * routing predicate that bypassed on the first line would hand a
@@ -101,8 +102,8 @@ check(const char *name, ngx_uint_t got, ngx_uint_t want)
  *
  * That spread is deliberate. A walk that stops at the first match sees index 0
  * and never reaches the tail entries, so a duplicate case can only pass if the
- * whole list was counted. Split across several list parts, the tail entry also
- * lands in a non-first part, exercising the part-chaining advance. */
+ * duplicate was detected. Split across several list parts, the tail entry
+ * also lands in a non-first part, exercising the part-chaining advance. */
 static void
 fill_headers(ngx_table_elt_t *all, ngx_uint_t total, ngx_uint_t n_avail,
     ngx_uint_t n_noise)
@@ -176,6 +177,7 @@ run_case(ngx_uint_t n_avail, ngx_uint_t n_noise, ngx_uint_t parts,
     ngx_table_elt_t     *all;
     ngx_list_part_t     *chain;
     ngx_uint_t           total = n_avail + n_noise;
+    ngx_uint_t           result;
 
     memset(&r, 0, sizeof(r));
     stub_dcz_weight = weight;
@@ -193,7 +195,11 @@ run_case(ngx_uint_t n_avail, ngx_uint_t n_noise, ngx_uint_t parts,
 
     r.headers_in.headers.part = chain[0];
 
-    return ngx_http_zstd_static_should_bypass(&r);
+    result = ngx_http_zstd_static_should_bypass(&r);
+    free(chain);
+    free(all);
+
+    return result;
 }
 
 int
