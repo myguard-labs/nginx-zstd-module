@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build-and-run wrapper for dcz_refprefix_cost_bench.c (A31b-F2 proof).
+# Build-and-run wrapper for dcz_refprefix_cost_bench.c (A31b-F2 cost proof,
+# A33-F1 byte-identity proof).
 #
 # Measures whether the dcz path's per-request ZSTD_CCtx_refPrefix() call
 # (module :3870/:3874, reached after the unconditional per-request
@@ -7,6 +8,11 @@
 # trained-dictionary CDict path (:3911) avoids by building once at config
 # load. Read dcz_refprefix_cost_bench.c's header comment for the full
 # method, sweep, and noise-floor rationale.
+#
+# It also runs an untimed byte-identity sweep over the level axis in two
+# content modes, which is what shows that swapping refPrefix for a config-time
+# CDict is a wire-format change rather than a transparent optimisation. A
+# mismatch there is reported, not a failure: the wrapper still exits 0.
 #
 # No nginx tree needed: links libzstd directly. Bounded runtime (a few
 # seconds).
