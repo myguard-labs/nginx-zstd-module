@@ -167,6 +167,15 @@ now_ms(void)
     return (double) ts.tv_sec * 1000.0 + (double) ts.tv_nsec / 1e6;
 }
 
+static void
+check_zstd(size_t rc, const char *operation)
+{
+    if (ZSTD_isError(rc)) {
+        fprintf(stderr, "%s failed: %s\n", operation, ZSTD_getErrorName(rc));
+        exit(1);
+    }
+}
+
 /* Runs the dcz-style refPrefix path `iters` times; returns total ms and
  * (via *out_csize) the compressed size of the LAST iteration, for the
  * byte-identity check. *out_dst receives that last iteration's bytes
@@ -187,20 +196,18 @@ bench_prefix(ZSTD_CCtx *cctx, const unsigned char *dict, size_t dictLen,
 
     t0 = now_ms();
     for (i = 0; i < iters; i++) {
-        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
-        ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, LEVEL);
-        ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, (int) wlog);
+        check_zstd(ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters),
+                   "CCtx_reset(prefix)");
+        check_zstd(ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel,
+                                          LEVEL),
+                   "setParameter(prefix level)");
+        check_zstd(ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog,
+                                          (int) wlog),
+                   "setParameter(prefix windowLog)");
         rc = ZSTD_CCtx_refPrefix(cctx, dict, dictLen);
-        if (ZSTD_isError(rc)) {
-            fprintf(stderr, "refPrefix failed: %s\n", ZSTD_getErrorName(rc));
-            exit(1);
-        }
+        check_zstd(rc, "refPrefix");
         rc = ZSTD_compress2(cctx, dst, dstCap, body, bodyLen);
-        if (ZSTD_isError(rc)) {
-            fprintf(stderr, "compress2(prefix) failed: %s\n",
-                    ZSTD_getErrorName(rc));
-            exit(1);
-        }
+        check_zstd(rc, "compress2(prefix)");
     }
     t1 = now_ms();
     *out_csize = rc;
@@ -226,18 +233,12 @@ bench_cdict(ZSTD_CCtx *cctx, ZSTD_CDict *cdict, const unsigned char *body,
 
     t0 = now_ms();
     for (i = 0; i < iters; i++) {
-        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
+        check_zstd(ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters),
+                   "CCtx_reset(cdict)");
         rc = ZSTD_CCtx_refCDict(cctx, cdict);
-        if (ZSTD_isError(rc)) {
-            fprintf(stderr, "refCDict failed: %s\n", ZSTD_getErrorName(rc));
-            exit(1);
-        }
+        check_zstd(rc, "refCDict");
         rc = ZSTD_compress2(cctx, dst, dstCap, body, bodyLen);
-        if (ZSTD_isError(rc)) {
-            fprintf(stderr, "compress2(cdict) failed: %s\n",
-                    ZSTD_getErrorName(rc));
-            exit(1);
-        }
+        check_zstd(rc, "compress2(cdict)");
     }
     t1 = now_ms();
     *out_csize = rc;
@@ -278,11 +279,20 @@ run_noise_floor(ZSTD_CCtx *cctx, unsigned char *scratch, size_t dstCap)
         fill_buf(body, bodyLen, 0xB0D7);
 
         for (w = 0; w < WARMUP_ITERS; w++) {
-            ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
-            ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, LEVEL);
-            ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, (int) wlog);
-            ZSTD_CCtx_refPrefix(cctx, dict, dictLen);
-            ZSTD_compress2(cctx, scratch, dstCap, body, bodyLen);
+            check_zstd(ZSTD_CCtx_reset(cctx,
+                                       ZSTD_reset_session_and_parameters),
+                       "CCtx_reset(noise warmup)");
+            check_zstd(ZSTD_CCtx_setParameter(cctx,
+                                              ZSTD_c_compressionLevel,
+                                              LEVEL),
+                       "setParameter(noise level)");
+            check_zstd(ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog,
+                                              (int) wlog),
+                       "setParameter(noise windowLog)");
+            check_zstd(ZSTD_CCtx_refPrefix(cctx, dict, dictLen),
+                       "refPrefix(noise warmup)");
+            check_zstd(ZSTD_compress2(cctx, scratch, dstCap, body, bodyLen),
+                       "compress2(noise warmup)");
         }
 
         ms_a = bench_prefix(cctx, dict, dictLen, body, bodyLen, wlog,
@@ -330,11 +340,19 @@ run_sweep_point(ZSTD_CCtx *cctx, size_t dictLen, size_t bodyLen,
     fill_buf(body, bodyLen, 0xB0D7 + seed_salt);
 
     for (w = 0; w < WARMUP_ITERS; w++) {
-        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
-        ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, LEVEL);
-        ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, (int) wlog);
-        ZSTD_CCtx_refPrefix(cctx, dict, dictLen);
-        ZSTD_compress2(cctx, dst_a, dstCap, body, bodyLen);
+        check_zstd(ZSTD_CCtx_reset(cctx,
+                                   ZSTD_reset_session_and_parameters),
+                   "CCtx_reset(prefix warmup)");
+        check_zstd(ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel,
+                                          LEVEL),
+                   "setParameter(prefix warmup level)");
+        check_zstd(ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog,
+                                          (int) wlog),
+                   "setParameter(prefix warmup windowLog)");
+        check_zstd(ZSTD_CCtx_refPrefix(cctx, dict, dictLen),
+                   "refPrefix(warmup)");
+        check_zstd(ZSTD_compress2(cctx, dst_a, dstCap, body, bodyLen),
+                   "compress2(prefix warmup)");
     }
 
     ms_prefix = bench_prefix(cctx, dict, dictLen, body, bodyLen, wlog,
@@ -355,9 +373,13 @@ run_sweep_point(ZSTD_CCtx *cctx, size_t dictLen, size_t bodyLen,
     }
 
     for (w = 0; w < WARMUP_ITERS; w++) {
-        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
-        ZSTD_CCtx_refCDict(cctx, cdict);
-        ZSTD_compress2(cctx, dst_b, dstCap, body, bodyLen);
+        check_zstd(ZSTD_CCtx_reset(cctx,
+                                   ZSTD_reset_session_and_parameters),
+                   "CCtx_reset(cdict warmup)");
+        check_zstd(ZSTD_CCtx_refCDict(cctx, cdict),
+                   "refCDict(warmup)");
+        check_zstd(ZSTD_compress2(cctx, dst_b, dstCap, body, bodyLen),
+                   "compress2(cdict warmup)");
     }
 
     ms_cdict = bench_cdict(cctx, cdict, body, bodyLen, TIMED_ITERS, dst_b,
@@ -418,7 +440,10 @@ fill_buf_overlapping(unsigned char *body, size_t bodyLen,
 /* One byte-identity point: compress the same body twice at the same level and
  * windowLog, once via the dcz per-request refPrefix path and once via the
  * hoisted refCDict(dct_rawContent) path the A33-F1 fix direction proposes.
- * Returns 1 on mismatch. Untimed: this is a correctness oracle, not a bench. */
+ * Both paths receive the same fully specified compression parameters, so a
+ * mismatch isolates dictionary-loading behavior rather than parameter
+ * derivation. Returns 1 on mismatch. Untimed: this is a correctness oracle,
+ * not a bench. */
 static int
 run_identity_point(ZSTD_CCtx *cctx, int level, size_t dictLen, size_t bodyLen,
     int overlap, unsigned char *dst_a, unsigned char *dst_b, size_t dstCap)
@@ -445,14 +470,18 @@ run_identity_point(ZSTD_CCtx *cctx, int level, size_t dictLen, size_t bodyLen,
         fill_buf(body, bodyLen, 0xB0D7);
     }
 
-    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
-    ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, level);
-    ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, (int) wlog);
-    ZSTD_CCtx_refPrefix(cctx, dict, dictLen);
-    csz_a = ZSTD_compress2(cctx, dst_a, dstCap, body, bodyLen);
-
     cparams = ZSTD_getCParams(level, (unsigned long long) bodyLen, dictLen);
     cparams.windowLog = wlog;
+
+    check_zstd(ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters),
+               "CCtx_reset(identity prefix)");
+    check_zstd(ZSTD_CCtx_setCParams(cctx, cparams),
+               "setCParams(identity prefix)");
+    check_zstd(ZSTD_CCtx_refPrefix(cctx, dict, dictLen),
+               "refPrefix(identity)");
+    csz_a = ZSTD_compress2(cctx, dst_a, dstCap, body, bodyLen);
+    check_zstd(csz_a, "compress2(identity prefix)");
+
     cdict = ZSTD_createCDict_advanced(dict, dictLen, ZSTD_dlm_byRef,
                                        ZSTD_dct_rawContent, cparams,
                                        ZSTD_defaultCMem);
@@ -461,15 +490,11 @@ run_identity_point(ZSTD_CCtx *cctx, int level, size_t dictLen, size_t bodyLen,
         exit(1);
     }
 
-    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters);
-    ZSTD_CCtx_refCDict(cctx, cdict);
+    check_zstd(ZSTD_CCtx_reset(cctx, ZSTD_reset_session_and_parameters),
+               "CCtx_reset(identity cdict)");
+    check_zstd(ZSTD_CCtx_refCDict(cctx, cdict), "refCDict(identity)");
     csz_b = ZSTD_compress2(cctx, dst_b, dstCap, body, bodyLen);
-
-    if (ZSTD_isError(csz_a) || ZSTD_isError(csz_b)) {
-        fprintf(stderr, "compress2 failed: %s / %s\n",
-                ZSTD_getErrorName(csz_a), ZSTD_getErrorName(csz_b));
-        exit(1);
-    }
+    check_zstd(csz_b, "compress2(identity cdict)");
 
     identical = (csz_a == csz_b) && (memcmp(dst_a, dst_b, csz_a) == 0);
 

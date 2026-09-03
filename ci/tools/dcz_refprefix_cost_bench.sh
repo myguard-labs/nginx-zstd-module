@@ -11,8 +11,9 @@
 #
 # It also runs an untimed byte-identity sweep over the level axis in two
 # content modes, which is what shows that swapping refPrefix for a config-time
-# CDict is a wire-format change rather than a transparent optimisation. A
-# mismatch there is reported, not a failure: the wrapper still exits 0.
+# CDict is a wire-format change rather than a transparent optimisation. An
+# overlap mismatch is reported and exits 0; a disjoint mismatch is a regression
+# and exits 1.
 #
 # No nginx tree needed: links libzstd directly. Bounded runtime (a few
 # seconds).
@@ -30,8 +31,8 @@ if ! pkg-config --exists libzstd 2>/dev/null; then
     exit 0
 fi
 
-read -r -a CFLAGS <<< "$(pkg-config --cflags libzstd) -Wall -Wextra -O2"
-read -r -a LIBS <<< "$(pkg-config --libs libzstd)"
+read -r -a CFLAGS <<<"$(pkg-config --cflags libzstd) -Wall -Wextra -O2"
+read -r -a LIBS <<<"$(pkg-config --libs libzstd)"
 
 "$CC" "${CFLAGS[@]}" -o "$OUT/dcz_refprefix_cost_bench" "$SRC" "${LIBS[@]}"
 
