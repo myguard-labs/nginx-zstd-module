@@ -455,6 +455,25 @@ jobs:
           # directio mount. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_static_pread_unit.sh
 
+      - name: static dictionary-bypass unit fixture
+        run: |
+          # ngx_http_zstd_static_should_bypass() must scan until a second
+          # Available-Dictionary line and stand aside only when exactly one
+          # is present, matching the dynamic filter, which refuses dcz
+          # outright on duplicates. A predicate that returned on the first
+          # match handed duplicate-header requests to a filter that then
+          # declined, forfeiting a usable .zst sidecar for identity -- a
+          # client-triggerable path ci/t/01-static.t cannot reach without a
+          # built nginx. Verbatim extraction, so a regression in the shipped
+          # walk fails here. Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_static_should_bypass_unit.sh
+
+      - name: static probe read-log policy unit fixture
+        run: |
+          # Nonnegative short reads must never attach stale errno; genuine
+          # failures retain it, and only ordinary failures rise to CRIT.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_static_probe_log_unit.sh
+
       - name: static frame-header probe unit fixture
         run: |
           # ngx_http_zstd_static_probe_frame(): pure frame-header arithmetic.

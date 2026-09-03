@@ -1758,3 +1758,32 @@ qr/(?:is not a zstd frame|cached malformed verdict)/
  . "cached malformed verdict\n"]
 --- no_error_log
 [alert]
+
+
+
+=== TEST 59: dictionary bypass fails closed on duplicate Available-Dictionary
+# Regression for TEST 48's row: should_bypass() must count every
+# Available-Dictionary line, not stop at the first, and stand aside only
+# when exactly one is present. Two lines is the ambiguous case the dynamic
+# filter refuses outright (avail_dict_count > 1 in
+# ngx_http_zstd_filter_module.c); the static routing predicate must not
+# bypass to it here either, or the client forfeits a usable .zst sidecar
+# for a filter that then declines and falls back to identity.
+--- config
+    location /test {
+        zstd_static on;
+        zstd_static_dict_bypass on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd, dcz
+Available-Dictionary: :AA==:
+Available-Dictionary: :AA==:
+--- response_headers
+Content-Length: 3717
+ETag: "5be17d33-e85"
+Content-Encoding: zstd
+--- no_error_log
+[error]
