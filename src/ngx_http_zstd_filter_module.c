@@ -950,7 +950,7 @@ static ngx_buf_t *ngx_http_zstd_create_temp_buf(ngx_pool_t *pool, size_t size);
 static ngx_int_t ngx_http_zstd_set_param(ngx_http_request_t *r,
     ZSTD_CCtx *cctx, ZSTD_cParameter param, int value, const char *name);
 static ngx_int_t ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx);
+    ngx_http_zstd_ctx_t *ctx, ngx_http_zstd_loc_conf_t *zlcf);
 static ngx_int_t ngx_http_zstd_filter_compress(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx, ngx_uint_t no_more_input);
 static ngx_int_t ngx_http_zstd_filter_init(ngx_conf_t *cf);
@@ -2317,7 +2317,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
          * explicit flag — do NOT infer this from buffer_in.src == NULL;
          * see the cctx_ready comment in ngx_http_zstd_ctx_t.
          */
-        if (ngx_http_zstd_filter_init_cctx(r, ctx) != NGX_OK) {
+        if (ngx_http_zstd_filter_init_cctx(r, ctx, zlcf) != NGX_OK) {
             goto failed;
         }
 
@@ -3554,13 +3554,10 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
  */
 static ngx_int_t
 ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx)
+    ngx_http_zstd_ctx_t *ctx, ngx_http_zstd_loc_conf_t *zlcf)
 {
-    size_t                      rc;
-    ZSTD_CCtx                  *cctx;
-    ngx_http_zstd_loc_conf_t   *zlcf;
-
-    zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
+    size_t      rc;
+    ZSTD_CCtx  *cctx;
 
     if (ctx->cctx == NULL
         && ngx_http_zstd_acquire_cctx(r, ctx, zlcf) != NGX_OK)
