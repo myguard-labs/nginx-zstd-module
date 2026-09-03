@@ -295,6 +295,17 @@ jobs:
           # through 2^23 included) — needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_ceil_log2_unit.sh
 
+      - name: directio probe log rate limiter unit fixture (A33-F4(b))
+        run: |
+          # PR #314 review: the directio hard-error probe arm in
+          # ngx_http_zstd_static_module.c logged NGX_LOG_ERR on every
+          # request for a misaligned-directio sidecar. static inside the
+          # static module, so this extracts
+          # ngx_http_zstd_static_dio_err_should_log() verbatim by line
+          # range and exercises it against a fake, test-controlled clock —
+          # needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_dio_err_ratelimit_unit.sh
+
       - name: CCtx profile key unit fixture (collision-free + reversible)
         run: |
           # The worker CCtx ring partitions slots on a packed 64-bit key

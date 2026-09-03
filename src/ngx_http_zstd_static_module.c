@@ -156,6 +156,80 @@ static ngx_http_zstd_static_bad_cache_t
     ngx_http_zstd_static_bad_cache[NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS];
 static ngx_uint_t  ngx_http_zstd_static_bad_cache_next;
 
+/*
+ * Log rate limit for the directio hard-error probe arm (see the
+ * `of->is_directio` branch inside ngx_http_zstd_static_probe_file()).
+ *
+ * That arm cannot be cached in the bad-file ring above: the ring is keyed
+ * on path + mtime, and this failure is an operator config mismatch
+ * (`directio_alignment` disagreeing with the device), not a property of
+ * the file. Caching it there would misreport a config problem as a
+ * corrupt sidecar and keep suppressing the log after the operator fixes
+ * `directio_alignment` -- the ring has no config-tied invalidation.
+ * `*malformed` on this arm stays 0 (unchanged) for exactly that reason.
+ *
+ * Instead, this is a bare per-worker window counter: log the first
+ * occurrence immediately (an operator must not lose the first signal),
+ * then suppress for NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW seconds, folding
+ * every suppressed hit into a count reported on the next emitted line --
+ * the standard nginx "N times" idiom (see e.g. core's own
+ * ngx_log_error_core rate-limited messages).
+ *
+ * SAFETY -- same file-scope-static, one-body-at-a-time reasoning as the
+ * directio scratch buffer above: private per worker process, zeroed at
+ * fork, freed with the process image, never touched by two probes at
+ * once because this handler is fully synchronous per worker.
+ *
+ * SAFETY -- ngx_time(): nginx refreshes this cached value once per event
+ * loop iteration and it is monotonically non-decreasing within a worker's
+ * lifetime (nginx does not step it backwards), so `now - window_start`
+ * below never underflows and the comparison is correct without touching
+ * the wall clock or gettimeofday() on this hot path.
+ *
+ * SAFETY -- worker-cycle lifetime: a config reload forks new worker
+ * processes; the old ones drain and exit, so a reload cannot hide a NEW
+ * misalignment behind a stale suppression window -- each new worker
+ * starts this counter at zero and logs the first occurrence again.
+ */
+#define NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW  60
+
+static time_t      ngx_http_zstd_static_dio_err_window_start;
+static ngx_uint_t  ngx_http_zstd_static_dio_err_suppressed;
+
+/*
+ * Returns the number of prior occurrences to report as suppressed (0 on
+ * the first hit in a window, or when a window just rolled over), and
+ * advances the counter/window bookkeeping for the CALLER's hit, which is
+ * always logged. Never allocates; never blocks.
+ */
+static ngx_uint_t
+ngx_http_zstd_static_dio_err_should_log(ngx_log_t *log)
+{
+    time_t      now;
+    ngx_uint_t  suppressed;
+
+    now = ngx_time();
+
+    if (ngx_http_zstd_static_dio_err_window_start == 0
+        || now - ngx_http_zstd_static_dio_err_window_start
+               >= NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW)
+    {
+        suppressed = ngx_http_zstd_static_dio_err_suppressed;
+        ngx_http_zstd_static_dio_err_window_start = now;
+        ngx_http_zstd_static_dio_err_suppressed = 0;
+        return suppressed;
+    }
+
+    ngx_http_zstd_static_dio_err_suppressed++;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+                   "zstd static: directio probe error suppressed "
+                   "(%ui so far this window)",
+                   ngx_http_zstd_static_dio_err_suppressed);
+
+    return (ngx_uint_t) -1;
+}
+
 #endif
 
 
@@ -1080,12 +1154,34 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
 
         if (n < 0 || avail < 4) {
             if (of->is_directio) {
-                ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
-                              "zstd static: %uz-byte aligned probe on "
-                              "directio file \"%s\" returned %z -- "
-                              "declining; check directio_alignment "
-                              "against the device geometry",
-                              align, path->data, n);
+                ngx_uint_t  dio_suppressed;
+
+                dio_suppressed = ngx_http_zstd_static_dio_err_should_log(log);
+
+                if (dio_suppressed != (ngx_uint_t) -1) {
+                    if (dio_suppressed == 0) {
+                        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                                      "zstd static: %uz-byte aligned probe "
+                                      "on directio file \"%s\" returned "
+                                      "%z -- declining; check "
+                                      "directio_alignment against the "
+                                      "device geometry",
+                                      align, path->data, n);
+                    } else {
+                        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                                      "zstd static: %uz-byte aligned probe "
+                                      "on directio file \"%s\" returned "
+                                      "%z -- declining; check "
+                                      "directio_alignment against the "
+                                      "device geometry (%ui more "
+                                      "occurrence%s suppressed in the "
+                                      "last %ds)",
+                                      align, path->data, n, dio_suppressed,
+                                      dio_suppressed == 1 ? "" : "s",
+                                      NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW);
+                    }
+                }
+
                 probe_rc = NGX_DECLINED;
                 *malformed = (n >= 0);
                 goto probe_done;
