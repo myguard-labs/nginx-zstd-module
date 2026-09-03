@@ -88,6 +88,34 @@ echo "✓ baseline: module loads, rejection fixtures are non-vacuous"
 # instead so the whole ancestor chain (/, /home, $HOME, $WORK) is
 # root- or self-owned and non-group/world-writable, matching a real
 # deployment's dictionary directory tree.
+#
+# $HOME is an environment variable, not a trust boundary -- a root-run
+# job can inherit a non-root $HOME, and any job can have a
+# group-writable one, either of which would make strict mode correctly
+# reject every positive fixture through THIS ancestor, for a reason
+# unrelated to what each fixture tests. Validate $HOME itself against
+# the same rule the module now enforces before trusting it as the
+# mktemp base, and fail loudly with a clear precondition error rather
+# than let every downstream fixture misreport.
+if [ -z "${HOME:-}" ] || [ ! -d "$HOME" ]; then
+    echo "❌ \$HOME is unset or not a directory; cannot pick a safe base" \
+         "for the strict-mode fixtures below" >&2
+    exit 1
+fi
+home_owner="$(stat -c '%u' "$HOME")"
+home_mode="$(stat -c '%a' "$HOME")"
+if [ "$home_owner" != "$(id -u)" ] && [ "$home_owner" != "0" ]; then
+    echo "❌ \$HOME ($HOME) is owned by uid $home_owner, neither this" \
+         "job's uid $(id -u) nor root; not a safe ancestor for the" \
+         "strict-mode fixtures below" >&2
+    exit 1
+fi
+if [ $(( 0$home_mode & 0022 )) -ne 0 ]; then
+    echo "❌ \$HOME ($HOME) is mode $home_mode, writable by group or" \
+         "other; not a safe ancestor for the strict-mode fixtures below" >&2
+    exit 1
+fi
+
 WORK="$(mktemp -d --tmpdir="$HOME" zstd-dict-hardening.XXXXXX)"
 cleanup() {
     if [ -n "${NGINX_PID:-}" ]; then
