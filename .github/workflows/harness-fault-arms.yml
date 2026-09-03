@@ -20,7 +20,7 @@ name: Harness Fault Arms
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  HARNESS_NGINX_VERSION: "1.31.4"
+  HARNESS_NGINX_VERSION: "1.31.5"
 
 on:
   workflow_call: {}
