@@ -307,6 +307,20 @@ jobs:
           # refusal of out-of-domain values — needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_cctx_profile_pack.sh
 
+      - name: dcz dict lookup unit fixture (linear/bsearch equivalence)
+        run: |
+          # A33-P4: the dcz dictionary negotiation lookup switches from a
+          # linear ngx_memcmp scan to a binary search over a hash-sorted
+          # array once the configured dictionary count exceeds
+          # NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD. Extracts the lookup, its
+          # sort comparator and the dict struct verbatim from the module
+          # and differentially tests both branches against a brute-force
+          # linear oracle across sizes straddling the threshold, hits on
+          # the first/middle/last element, and misses sorting before,
+          # after and within the configured range — needs only a C
+          # compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_dcz_dict_lookup_unit.sh
+
       - name: dcz window-log unit fixture (clamps + range)
         env:
           # gcc-multilib is installed above, so a missing -m32 toolchain
