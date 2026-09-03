@@ -253,7 +253,10 @@ jobs:
           # ci/t/01-static.t asserts on fixture mtimes (Last-Modified/If-Modified-Since);
           # pin them to a fixed timestamp, same as build-test.yml's tests job.
           touch -d @1541504307 ci/t/suite/test ci/t/suite/test.zst
-          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/.nginx-servroot-$MATRIX_FLAVOR-$MATRIX_VERSION"
+          STRICT_SERVROOT="$HOME/.nginx-servroot-$MATRIX_FLAVOR-$MATRIX_VERSION-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export TEST_NGINX_SERVROOT="$STRICT_SERVROOT"
+          trap 'rm -rf -- "$STRICT_SERVROOT"' EXIT
+          rm -rf -- "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           prove -v ci/t/00-filter.t ci/t/02-conf-warn.t
           prove -v ci/t/03-dcz.t

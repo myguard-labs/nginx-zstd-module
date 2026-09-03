@@ -618,6 +618,10 @@ Vary: Accept-Encoding
 --- user_files
 >>> zstd.dict
 the quick brown fox jumps over the lazy dog
+--- post_setup_server_root eval
+'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";'
 --- config
     location /d {
         zstd on;
@@ -643,6 +647,8 @@ contains a "." or ".." component; refused by "zstd_dict_strict_path on"
     zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/current/zstd.dict;"
 --- post_setup_server_root eval
 'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";
 my $real = "$root/html/real-release";
 mkdir $real or die "mkdir $real: $!";
 open my $fh, ">", "$real/zstd.dict" or die "open zstd.dict: $!";
