@@ -52,9 +52,9 @@ PROBE_BIN="$DIR/test_static_probe"
 VERSION_BIN="$DIR/test_version_policy"
 
 if [ "${1:-}" = "clean" ]; then
-	rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$PROBE_BIN" "$VERSION_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
-	echo "unit test binary removed"
-	exit 0
+    rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$PROBE_BIN" "$VERSION_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
+    echo "unit test binary removed"
+    exit 0
 fi
 
 # Regenerate the extracted parser slice so this binary always links the
@@ -70,16 +70,16 @@ CC="${CC:-cc}"
 OWN_CFLAGS=(-g -O1 -Wall -Wextra -Wshadow -Werror)
 
 if [ "${COVERAGE:-0}" = 1 ]; then
-	OWN_CFLAGS+=(--coverage)
-	LINK_EXTRA=(--coverage)
+    OWN_CFLAGS+=(--coverage)
+    LINK_EXTRA=(--coverage)
 else
-	LINK_EXTRA=()
+    LINK_EXTRA=()
 fi
 
 echo "==> Building $BIN with ${CC}"
 # shellcheck disable=SC2086  # $CC may legitimately carry flags (e.g. "gcc -m32")
 $CC "${OWN_CFLAGS[@]}" -I"$FUZZ_DIR" -c "$DIR/test_accept_encoding.c" \
-	-o "$DIR/test_accept_encoding.o"
+    -o "$DIR/test_accept_encoding.o"
 # shellcheck disable=SC2086
 $CC "${LINK_EXTRA[@]}" -o "$BIN" "$DIR/test_accept_encoding.o"
 
@@ -95,7 +95,7 @@ echo "==> Building $LEGACY_BIN with ${CC} (nginx 1.22.1 header shape)"
 # catches an accidental legacy ->next access as well as exercising the list walk.
 # shellcheck disable=SC2086
 $CC "${OWN_CFLAGS[@]}" -DNGX_ZSTD_LEGACY_SHIM -I"$FUZZ_DIR" \
-	-c "$DIR/test_accept_encoding_legacy.c" -o "$DIR/test_accept_encoding_legacy.o"
+    -c "$DIR/test_accept_encoding_legacy.c" -o "$DIR/test_accept_encoding_legacy.o"
 # shellcheck disable=SC2086
 $CC "${LINK_EXTRA[@]}" -o "$LEGACY_BIN" "$DIR/test_accept_encoding_legacy.o"
 
@@ -107,7 +107,7 @@ echo "==> Building $CHAIN_BIN with ${CC} (nginx 1.23+ chained headers)"
 # ordered duplicate-field contract in both nginx storage layouts.
 # shellcheck disable=SC2086
 $CC "${OWN_CFLAGS[@]}" -I"$FUZZ_DIR" \
-	-c "$DIR/test_accept_encoding_legacy.c" -o "$DIR/test_accept_encoding_chain.o"
+    -c "$DIR/test_accept_encoding_legacy.c" -o "$DIR/test_accept_encoding_chain.o"
 # shellcheck disable=SC2086
 $CC "${LINK_EXTRA[@]}" -o "$CHAIN_BIN" "$DIR/test_accept_encoding_chain.o"
 
@@ -127,7 +127,7 @@ timeout 60s "$CHAIN_BIN"
 echo "==> Building $PROBE_BIN with ${CC}"
 # shellcheck disable=SC2086
 $CC "${OWN_CFLAGS[@]}" -c "$DIR/test_static_probe.c" \
-	-o "$DIR/test_static_probe.o"
+    -o "$DIR/test_static_probe.o"
 # shellcheck disable=SC2086
 $CC "${LINK_EXTRA[@]}" -o "$PROBE_BIN" "$DIR/test_static_probe.o"
 
@@ -140,7 +140,7 @@ timeout 60s "$PROBE_BIN"
 echo "==> Building $VERSION_BIN with ${CC}"
 # shellcheck disable=SC2086
 $CC "${OWN_CFLAGS[@]}" -c "$DIR/test_version_policy.c" \
-	-o "$DIR/test_version_policy.o"
+    -o "$DIR/test_version_policy.o"
 # shellcheck disable=SC2086
 $CC "${LINK_EXTRA[@]}" -o "$VERSION_BIN" "$DIR/test_version_policy.o"
 
