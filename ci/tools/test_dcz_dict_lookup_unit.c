@@ -14,9 +14,9 @@
  *   - a MISS with a key that would sort after the last entry;
  *   - a MISS with a key that would sort in the middle (no entry matches).
  *
- * A deliberately broken comparator (bit-flipped) is used to prove this
- * fixture is ARMED -- see run_all(broken) in main(): it must turn every
- * n > threshold case red (because ngx_http_zstd_dcz_dict_lookup()'s
+ * A deliberately broken comparator is used to prove this fixture is
+ * ARMED -- see main(): it must make at least one above-threshold lookup
+ * diverge (because ngx_http_zstd_dcz_dict_lookup()'s
  * bsearch branch is sorted with the same comparator used to search, a
  * broken order produces wrong verdicts for any input that requires
  * following the correct direction past the first probe).
@@ -44,6 +44,7 @@ typedef struct {
 } ngx_str_t;
 
 #define ngx_memcmp(s1, s2, n)  memcmp(s1, s2, n)
+#define ngx_qsort               qsort
 #define ngx_libc_cdecl
 
 #include "generated_dcz_dict_lookup.inc"
@@ -52,14 +53,17 @@ typedef struct {
 
 static int checks_run = 0;
 static int checks_failed = 0;
+static int quiet_failures = 0;
 
 #define CHECK(cond, msg)                                              \
     do {                                                               \
         checks_run++;                                                  \
         if (!(cond)) {                                                 \
             checks_failed++;                                           \
-            fprintf(stderr, "FAIL: %s (%s:%d)\n", msg, __FILE__,       \
-                    __LINE__);                                         \
+            if (!quiet_failures) {                                      \
+                fprintf(stderr, "FAIL: %s (%s:%d)\n", msg, __FILE__,   \
+                        __LINE__);                                      \
+            }                                                          \
         }                                                               \
     } while (0)
 
@@ -87,17 +91,15 @@ fill_unique_sorted(ngx_http_zstd_dcz_dict_t *dicts, ngx_uint_t n,
     ngx_uint_t  i;
     size_t      j;
 
-    srand(seed);
-
-    /* Fill with random bytes, then force strict ordering by writing the
-     * index into the leading bytes big-endian -- guarantees n distinct,
-     * strictly increasing 32-byte keys with no possible duplicate (the
-     * real merge-time duplicate-hash rejection already guarantees this
-     * invariant on dcz_dicts, so the fixture reproduces it rather than
-     * relying on birthday luck). */
+    /* Fill with deterministic varied bytes, then force strict ordering
+     * by writing the index into the leading bytes big-endian. This
+     * guarantees n distinct, strictly increasing 32-byte keys; the real
+     * merge-time duplicate-hash rejection guarantees the same invariant
+     * on dcz_dicts. */
     for (i = 0; i < n; i++) {
         for (j = 0; j < HLEN; j++) {
-            dicts[i].hash[j] = (unsigned char) rand();
+            dicts[i].hash[j] = (unsigned char)
+                               ((seed + i * 131u + j * 17u) & 0xffu);
         }
 
         dicts[i].hash[0] = (unsigned char) ((i >> 24) & 0xff);
@@ -110,6 +112,19 @@ fill_unique_sorted(ngx_http_zstd_dcz_dict_t *dicts, ngx_uint_t n,
 
         dicts[i].file.len = 0;
         dicts[i].file.data = NULL;
+    }
+}
+
+static void
+reverse_dicts(ngx_http_zstd_dcz_dict_t *dicts, ngx_uint_t n)
+{
+    ngx_http_zstd_dcz_dict_t  tmp;
+    ngx_uint_t                 i;
+
+    for (i = 0; i < n / 2; i++) {
+        tmp = dicts[i];
+        dicts[i] = dicts[n - i - 1];
+        dicts[n - i - 1] = tmp;
     }
 }
 
@@ -133,13 +148,21 @@ run_size(ngx_uint_t n, int (*cmp)(const void *, const void *))
     }
 
     fill_unique_sorted(dicts, n, 0xC0FFEEu + (unsigned) n);
-    qsort(dicts, n, sizeof(*dicts), cmp);
-
     arr.elts = dicts;
     arr.nelts = n;
     arr.size = sizeof(*dicts);
     arr.nalloc = n;
     arr.pool = NULL;
+
+    if (cmp == ngx_http_zstd_dcz_dict_cmp) {
+        /* Exercise the production wrapper with deliberately wrong input
+         * order. Feeding it fill_unique_sorted()'s original ascending
+         * order would let a no-op sort implementation remain green. */
+        reverse_dicts(dicts, n);
+        ngx_http_zstd_dcz_dict_sort(&arr);
+    } else {
+        qsort(dicts, n, sizeof(*dicts), cmp);
+    }
 
     ok = 1;
     before = checks_failed;
@@ -177,7 +200,7 @@ run_size(ngx_uint_t n, int (*cmp)(const void *, const void *))
 
     /* MISS: a key that sorts in the middle of the range but matches
      * nothing -- take the middle element's key and flip a trailing
-     * byte that fill_unique_sorted() randomized (not the forced index
+     * byte that fill_unique_sorted() populated (not the forced index
      * prefix), so it lands near the middle in sort order without
      * colliding with any real entry. */
     if (n > 0) {
@@ -260,9 +283,11 @@ main(void)
         checks_before = checks_run;
         failed_before = checks_failed;
 
+        quiet_failures = 1;
         run_size(NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD + 1, broken_cmp);
         run_size(256, broken_cmp);
         run_size(737, broken_cmp);
+        quiet_failures = 0;
 
         if (checks_failed == failed_before) {
             fprintf(stderr,

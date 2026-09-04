@@ -263,26 +263,9 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
  * linear ngx_memcmp scan to a binary search over zlcf->dcz_dicts (sorted
  * once, at merge-config time, by ngx_http_zstd_dcz_dict_cmp()).
  *
- * Below the threshold the linear scan wins: a handful of 32-byte
- * ngx_memcmp calls over a cache-resident array beats a bsearch's
- * pointer-chasing and harder-to-predict branches. Above it, the scan's
- * O(n) cost dominates and bsearch's O(log n) wins outright. Measured on
- * this host (gcc -O2, pinned core, 2M iterations/case, ns/op):
- *
- *   n     linear(hit) linear(miss) bsearch(hit)  bsearch(miss)
- *     4       5.4          4.9          9.7           6.2
- *     8       4.3          4.0          6.0           6.1
- *    16      14.9         14.5         14.3          13.3
- *    32      17.5         17.6         15.0          16.3
- *    64      44.0         36.0         17.7          19.4
- *   256     129.7        118.2         23.3          24.4
- *   737     327.4        319.1         25.6          27.3
- *
- * The two are roughly tied through n=32 and linear is not worse below
- * 16; from n=64 on bsearch is 2-13x faster. 16 sits just past the
- * crossover with margin, so this never regresses the common small
- * on-disk dictionary set while still winning big for the 737-dictionary
- * configuration this threshold was raised for.
+ * Small arrays retain the simple contiguous linear scan; larger arrays
+ * use O(log n) comparisons. The threshold is deliberately conservative
+ * and is guarded by the differential fixture.
  */
 #define NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD  16
 
@@ -1035,6 +1018,7 @@ static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
     ngx_http_request_t *r, ngx_http_zstd_loc_conf_t *zlcf);
 static int ngx_libc_cdecl ngx_http_zstd_dcz_dict_cmp(const void *one,
     const void *two);
+static void ngx_http_zstd_dcz_dict_sort(ngx_array_t *dcz_dicts);
 static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_dict_lookup(
     ngx_array_t *dcz_dicts, u_char buf[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN]);
 
@@ -2046,6 +2030,17 @@ ngx_http_zstd_dcz_dict_cmp(const void *one, const void *two)
 
     return ngx_memcmp(first->hash, second->hash,
                        NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+}
+
+
+static void
+ngx_http_zstd_dcz_dict_sort(ngx_array_t *dcz_dicts)
+{
+    if (dcz_dicts->nelts > 1) {
+        ngx_qsort(dcz_dicts->elts, (size_t) dcz_dicts->nelts,
+                  sizeof(ngx_http_zstd_dcz_dict_t),
+                  ngx_http_zstd_dcz_dict_cmp);
+    }
 }
 
 
@@ -5243,25 +5238,23 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
     ngx_conf_merge_str_value(conf->bypass_vary, prev->bypass_vary, "");
 
-    /* a location that declares its own zstd_dcz_dict_file list replaces the
-     * inherited one wholesale (standard nginx array-directive semantics) */
-    ngx_conf_merge_ptr_value(conf->dcz_dicts, prev->dcz_dicts, NULL);
-
     /*
-     * Sort once, here, after the last zstd_dcz_dict_file push for this
-     * location (and after inheritance, since a child location may
-     * inherit prev->dcz_dicts wholesale above rather than pushing its
-     * own). No pointer into the array is captured before this point --
+     * Sort an array owned by this location once, after its last
+     * zstd_dcz_dict_file push and before inheritance is resolved. An
+     * inheriting child must not re-sort the parent's shared array. No
+     * pointer into the array is captured before this point --
      * ngx_http_zstd_dcz_negotiate() takes &dicts[i]/&dicts[mid] only at
      * request time, long after config load finishes -- so re-ordering
      * the elements here cannot invalidate anything a caller is holding.
      * See ngx_http_zstd_dcz_dict_cmp() for why the order is unambiguous.
      */
-    if (conf->dcz_dicts != NULL && conf->dcz_dicts->nelts > 1) {
-        ngx_qsort(conf->dcz_dicts->elts, (size_t) conf->dcz_dicts->nelts,
-                  sizeof(ngx_http_zstd_dcz_dict_t),
-                  ngx_http_zstd_dcz_dict_cmp);
+    if (conf->dcz_dicts != NGX_CONF_UNSET_PTR) {
+        ngx_http_zstd_dcz_dict_sort(conf->dcz_dicts);
     }
+
+    /* a location that declares its own zstd_dcz_dict_file list replaces the
+     * inherited one wholesale (standard nginx array-directive semantics) */
+    ngx_conf_merge_ptr_value(conf->dcz_dicts, prev->dcz_dicts, NULL);
 
     ngx_conf_merge_value(conf->dcz_assume_secure, prev->dcz_assume_secure, 0);
 
