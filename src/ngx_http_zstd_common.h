@@ -1049,10 +1049,11 @@ ngx_http_zstd_vary_accept_encoding(ngx_http_request_t *r)
  * ngx_http_zstd_vary_ae_dcz()
  *
  * Fused replacement for the ngx_http_zstd_vary_accept_encoding() +
- * ngx_http_zstd_vary_dcz() pair, for the two call sites that always want
- * both: filter_module's response header path and static_module's
- * dict_bypass path. Both original helpers walk r->headers_out.headers
- * once via ngx_http_zstd_vary_find_tokens() and comma-split every Vary
+ * ngx_http_zstd_vary_dcz() pair at call sites that always want both.
+ * The static module's dict_bypass path has that shape; the filter module's
+ * intervening bypass return deliberately keeps the helpers separate.
+ * Both original helpers walk r->headers_out.headers once via
+ * ngx_http_zstd_vary_find_tokens() and comma-split every Vary
  * value they find; calling them back to back pays for that walk and
  * per-line token scan twice. This helper does it once, for all three
  * tokens ("Accept-Encoding", "Available-Dictionary", "Sec-Fetch-Site"),
@@ -1100,16 +1101,31 @@ ngx_http_zstd_vary_ae_dcz(ngx_http_request_t *r, ngx_uint_t want_dcz)
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
     need_ae = (clcf == NULL || !clcf->gzip_vary);
 
-    ngx_http_zstd_vary_find_tokens(
-        r,
-        "Accept-Encoding", sizeof("Accept-Encoding") - 1,
-        want_dcz ? "Available-Dictionary" : NULL,
-        want_dcz ? sizeof("Available-Dictionary") - 1 : 0,
-        want_dcz ? "Sec-Fetch-Site" : NULL,
-        want_dcz ? sizeof("Sec-Fetch-Site") - 1 : 0,
-        &has_ae,
-        want_dcz ? &has_available_dictionary : NULL,
-        want_dcz ? &has_sec_fetch_site : NULL);
+    if (!need_ae && !want_dcz) {
+        return NGX_OK;
+    }
+
+    if (need_ae) {
+        ngx_http_zstd_vary_find_tokens(
+            r,
+            "Accept-Encoding", sizeof("Accept-Encoding") - 1,
+            want_dcz ? "Available-Dictionary" : NULL,
+            want_dcz ? sizeof("Available-Dictionary") - 1 : 0,
+            want_dcz ? "Sec-Fetch-Site" : NULL,
+            want_dcz ? sizeof("Sec-Fetch-Site") - 1 : 0,
+            &has_ae,
+            want_dcz ? &has_available_dictionary : NULL,
+            want_dcz ? &has_sec_fetch_site : NULL);
+
+    } else {
+        has_ae = 1;
+        ngx_http_zstd_vary_find_tokens(
+            r,
+            "Available-Dictionary", sizeof("Available-Dictionary") - 1,
+            "Sec-Fetch-Site", sizeof("Sec-Fetch-Site") - 1,
+            NULL, 0,
+            &has_available_dictionary, &has_sec_fetch_site, NULL);
+    }
 
     if (need_ae && !has_ae) {
         if (ngx_http_zstd_push_header(r, "Vary", "Accept-Encoding")

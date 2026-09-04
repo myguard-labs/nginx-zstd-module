@@ -562,6 +562,9 @@ jobs:
           echo "NGINX_SRC_TREE=$PWD" >> "$GITHUB_ENV"
           echo "✓ ngx_auto_config.h generated"
 
+      - name: Vary fusion differential fixture
+        run: bash "$GITHUB_WORKSPACE/ci/tools/test_vary_fusion.sh"
+
       - name: cppcheck (static analysis)
         run: |
           set -o pipefail

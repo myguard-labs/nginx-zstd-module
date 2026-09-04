@@ -1699,11 +1699,9 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
      * Dictionary-invariant, so omitting those tokens there is correct,
      * not an oversight. Fusing the two walks here would start adding
      * dcz Vary tokens to bypassed responses, which is a behaviour
-     * change, not an optimisation; see ci/adoption-findings.md
-     * (perf/vary-walk-fusion) for the measurement this row is scoped
-     * down from. This call site keeps the two separate walks; only the
-     * static_module.c dict_bypass site (which wants both unconditionally,
-     * with no intervening early return) uses the fused
+     * change, not an optimisation. This call site keeps the two separate
+     * walks; the static_module.c dict_bypass site (which wants both
+     * unconditionally, with no intervening early return) uses the fused
      * ngx_http_zstd_vary_ae_dcz() helper.
      */
     if (ngx_http_zstd_vary_accept_encoding(r) != NGX_OK) {
