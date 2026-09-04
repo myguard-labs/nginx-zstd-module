@@ -69,22 +69,29 @@ jobs:
       nginx_version: ${{ steps.v.outputs.nginx_version }}
       matrix: ${{ steps.v.outputs.matrix }}
     steps:
-      # `vars.POOL` is unavailable in forks; curl is needed by the very next
-      # step, before any job-specific package installation can run.
+      # The resolver is a repo script, so this job checks out too.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # `vars.POOL` is unavailable in forks; curl and python3 are needed by
+      # the very next step, before any job-specific package installation
+      # can run.
       - name: Install bootstrap dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ca-certificates curl
+          sudo apt-get install -y ca-certificates curl python3
 
       - name: Resolve latest mainline nginx
+        env:
+          GH_TOKEN: ${{ github.token }}
         id: v
         run: |
           set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
+          ver=$(bash "$GITHUB_WORKSPACE/ci/tools/nginx-releases.sh" mainline)
           if [ -z "$ver" ]; then
-            echo "::error::could not resolve mainline nginx version from nginx.org"
+            echo "::error::could not resolve the mainline nginx release (see the log)"
             exit 1
           fi
           echo "Resolved nginx mainline: $ver"
@@ -111,7 +118,7 @@ jobs:
       - name: Install bootstrap dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ca-certificates curl
+          sudo apt-get install -y ca-certificates curl python3
 
       # Lint the workflow files themselves. actionlint validates GitHub
       # Actions expression contexts (e.g. "env is not allowed in a job
@@ -275,6 +282,9 @@ jobs:
 
       - name: bump-versions.sh pin-coverage and fail-loud regressions (A30-F4)
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_bump_versions.sh
+
+      - name: nginx-releases.sh resolver controls
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_nginx_releases.sh
 
       - name: Shell script linting (shellcheck)
         run: |
@@ -554,6 +564,8 @@ jobs:
           bash "$GITHUB_WORKSPACE"/ci/tools/test_freecctxparams_unit.sh
 
       - name: Configure a real nginx source tree (for scan-build headers)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # scan-build needs the COMPLETE nginx headers — including the
           # generated objs/ngx_auto_config.h. The nginx-dev package ships
@@ -565,9 +577,7 @@ jobs:
           # check the build matrix uses, so this download is no less trusted
           # than the one that actually ships in the test binary.
           set -euo pipefail
-          ver=$(curl -fsSL https://nginx.org/en/download.html \
-            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
-            | sort -V | tail -1)
+          ver=$(bash "$GITHUB_WORKSPACE/ci/tools/nginx-releases.sh" mainline)
           echo "Using nginx $ver to generate lint headers"
           "$GITHUB_WORKSPACE/ci/tools/fetch-verified-nginx.sh" "$ver"
           cd "nginx-${ver}"
