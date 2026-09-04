@@ -32,10 +32,9 @@
 #
 # nginx mainline in the build-flavors matrix (label: mainline) and the
 # NGINX_VERSION: "" of build-test.yml / ci-deep.yml are resolved at CI run
-# time by each workflow's own nginx.org scrape (build-test.yml's `resolve`
-# job, ci-deep.yml's per-job "Resolve latest mainline nginx" steps -- those
-# take the highest version on the page, not a section), so they carry no
-# static pin. The harness and Windows jobs pin mainline statically
+# time (build-test.yml's `resolve` job, the per-job "Resolve latest mainline
+# nginx" steps) through ci/tools/nginx-releases.sh, the same feed reader this
+# script uses, so they carry no static pin. The harness and Windows jobs pin mainline statically
 # -- a fault-injection harness and a Windows binary want a build that does
 # not change under them between runs -- and those are the mainline pins
 # bumped here.
@@ -85,102 +84,12 @@ HARNESS_FILES=(".github/workflows/ci-deep.yml" ".github/workflows/harness-fault-
 
 # --- discover latest versions -------------------------------------------
 
-# GET an api.github.com path. The runners share an egress IP, so the
-# unauthenticated API allowance (60/hr) is routinely exhausted and the call
-# 403s; GH_TOKEN, when present, buys the far larger authenticated quota. The
-# header goes in through stdin so the token never appears in curl's process
-# arguments on a shared runner.
-gh_api_json() { # path
-    local json
-    if [ -n "${GH_TOKEN:-}" ]; then
-        json="$(printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" \
-            | curl --config - -fsSL "https://api.github.com/$1")" || json=""
-    else
-        json="$(curl -fsSL "https://api.github.com/$1")" || json=""
-    fi
-    if [ -z "$json" ]; then
-        echo "error: could not query https://api.github.com/$1 (rate limit? set GH_TOKEN)" >&2
-        return 1
-    fi
-    printf '%s\n' "$json"
-}
-
-# nginx publishes every release on GitHub as a Release (not just a tag):
-# `release-X.Y.Z`, non-draft, carrying the same signed tarball nginx.org
-# serves (byte-identical, same .asc, verified by ci/tools/keys). That is a
-# structured feed; nginx.org/en/download.html is HTML whose section
-# headings a parser has to know by name, and a renamed heading is a
-# refusal at best. The stable and mainline lines follow nginx's own
-# versioning rule -- even minor is stable, odd minor is mainline -- so
-# each line's newest release is the newest of its parity. Tarballs and
-# signatures still come from nginx.org (the pinned URLs do not change);
-# only "what is newest" moves here.
-#
-# The feed is paged and ordered by creation time, not by version: a
-# security release of an older line (1.28.x) can be created months after
-# the current stable's last release, so the first even-minor entry seen
-# is not necessarily the newest stable, and a long run of mainline and
-# legacy releases can push the real one to a later page. Every page is
-# read until a short page ends the list, and the newest of each line is
-# the highest version across all of them. The cap bounds a broken feed,
-# not a real one (the feed holds every release since nginx moved to
-# GitHub, 29 as of 2026-09 at roughly fifteen a year, so five pages of
-# thirty is about a decade away); reaching it with a full page is a
-# refusal, never a pick from what was read.
-NGINX_FEED_PAGE=30
-NGINX_FEED_PAGES=5
-
-NGINX_LINE_PY=$(cat <<'PYEOF'
-import json, re, sys
-# argv: current best even, current best odd ("-" when none yet).
-# stdout: "<best even> <best odd> <entries on this page>", "-" when none.
-best = {"even": sys.argv[1], "odd": sys.argv[2]}
-try:
-    releases = json.load(sys.stdin)
-except ValueError:
-    sys.exit("FATAL: the nginx release feed is not JSON -- refusing to guess")
-if not isinstance(releases, list):
-    sys.exit("FATAL: the nginx release feed is not a release list -- refusing to guess")
-def parse(v):
-    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", v)
-    return tuple(int(x) for x in m.groups()) if m else None
-for r in releases:
-    if (not isinstance(r, dict) or r.get("draft") is not False
-            or r.get("prerelease") is not False):
-        continue
-    m = re.fullmatch(r"release-(\d+\.\d+\.\d+)", str(r.get("tag_name", "")))
-    if not m:
-        continue
-    v = parse(m.group(1))
-    line = "even" if v[1] % 2 == 0 else "odd"
-    cur = parse(best[line]) if best[line] != "-" else None
-    if cur is None or v > cur:
-        best[line] = "%d.%d.%d" % v
-print(best["even"], best["odd"], len(releases))
-PYEOF
-)
-
-# Prints "<stable> <mainline>" with "-" for a line the feed did not show,
-# which the blank-version check below reports by name.
-nginx_lines() {
-    local page even="-" odd="-" json count
-    for ((page = 1; page <= NGINX_FEED_PAGES; page++)); do
-        json="$(gh_api_json "repos/nginx/nginx/releases?per_page=${NGINX_FEED_PAGE}&page=${page}")"
-        read -r even odd count < <(printf '%s' "$json" | python3 -c "$NGINX_LINE_PY" "$even" "$odd")
-        if [ "$count" -lt "$NGINX_FEED_PAGE" ]; then
-            break   # a short page is the end of the list
-        fi
-    done
-    # The cap is not an end-of-list marker: a full last page means pages
-    # beyond it were never read and may hold a newer release of either
-    # line, so the answer is unknown, not "the best so far".
-    if [ "$count" -ge "$NGINX_FEED_PAGE" ]; then
-        echo "FATAL: the nginx release feed did not end within ${NGINX_FEED_PAGES} pages" \
-            "of ${NGINX_FEED_PAGE} -- refusing to pick from an incomplete read" >&2
-        return 1
-    fi
-    printf '%s %s\n' "$even" "$odd"
-}
+# nginx stable/mainline come from ci/tools/nginx-releases.sh, the one reader
+# of the GitHub releases feed (the CI workflows and ci-build.sh run the same
+# script to resolve the mainline they build). gh_api_json comes from there
+# too and serves the other five feeds below.
+# shellcheck source=ci/tools/nginx-releases.sh
+. "$SCRIPT_DIR/nginx-releases.sh"
 
 # The version carried by OWNER/REPO's latest GitHub release tag, whatever
 # the tag's prefix (v1.3.2, pcre2-10.48, openssl-4.0.2).
@@ -413,6 +322,16 @@ should_bump() {
     return 1
 }
 
+# bump_wanted LABEL NEW CUR -- 0 to bump, 1 to hold. Any other comparator
+# status is fatal here, in one place, so no call site can turn a broken
+# comparison into a quiet hold by dropping its own check.
+bump_wanted() {
+    local rc=0
+    should_bump "$@" || rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || exit "$rc"
+    return "$rc"
+}
+
 # --- mutators -------------------------------------------------------------
 # Every mutator here writes to a temp file and renames it into place only
 # after the edit is confirmed to have actually matched something -- a no-op
@@ -525,51 +444,39 @@ WIN_NGINX_DIGEST=""
 BUMP_HARNESS=0
 declare -A LIB_DIGEST=()
 
-if should_bump "nginx stable" "$NEW_STABLE" "$CUR_STABLE"; then
+if bump_wanted "nginx stable" "$NEW_STABLE" "$CUR_STABLE"; then
     echo "bump nginx stable: $CUR_STABLE -> $NEW_STABLE"
     CHANGED=1
     if [ "$DRY_RUN" = 0 ]; then
         STABLE_DIGEST="$(sha256_for_nginx "$NEW_STABLE")"
         echo "  sha256 $STABLE_DIGEST"
     fi
-else
-    rc=$?
-    [ "$rc" -eq 1 ] || exit "$rc"
 fi
 
-if should_bump angie "$NEW_ANGIE" "$CUR_ANGIE"; then
+if bump_wanted angie "$NEW_ANGIE" "$CUR_ANGIE"; then
     echo "bump angie: $CUR_ANGIE -> $NEW_ANGIE"
     CHANGED=1
     if [ "$DRY_RUN" = 0 ]; then
         ANGIE_DIGEST="$(sha256_for_angie "$NEW_ANGIE")"
         echo "  sha256 $ANGIE_DIGEST"
     fi
-else
-    rc=$?
-    [ "$rc" -eq 1 ] || exit "$rc"
 fi
 
 # The two static mainline pins are compared on their own, so a hand-bump of
 # one does not hide the other falling behind.
-if should_bump "windows nginx" "$NEW_MAINLINE" "${CUR_WIN[NGINX]}"; then
+if bump_wanted "windows nginx" "$NEW_MAINLINE" "${CUR_WIN[NGINX]}"; then
     echo "bump windows nginx: ${CUR_WIN[NGINX]} -> $NEW_MAINLINE"
     CHANGED=1
     if [ "$DRY_RUN" = 0 ]; then
         WIN_NGINX_DIGEST="$(sha256_for_nginx "$NEW_MAINLINE")"
         echo "  sha256 $WIN_NGINX_DIGEST"
     fi
-else
-    rc=$?
-    [ "$rc" -eq 1 ] || exit "$rc"
 fi
 
-if should_bump "harness nginx" "$NEW_MAINLINE" "$CUR_HARNESS"; then
+if bump_wanted "harness nginx" "$NEW_MAINLINE" "$CUR_HARNESS"; then
     echo "bump harness nginx: $CUR_HARNESS -> $NEW_MAINLINE"
     CHANGED=1
     BUMP_HARNESS=1
-else
-    rc=$?
-    [ "$rc" -eq 1 ] || exit "$rc"
 fi
 
 declare -A NEW_LIB=([PCRE2]="$NEW_PCRE2" [ZLIB]="$NEW_ZLIB" [OPENSSL]="$NEW_OPENSSL" [ZSTD]="$NEW_ZSTD")
@@ -577,13 +484,7 @@ for name in PCRE2 ZLIB OPENSSL ZSTD; do
     new="${NEW_LIB[$name]}"
     cur="${CUR_WIN[$name]}"
     [ "$new" = "$cur" ] && continue
-    if should_bump "windows ${name,,}" "$new" "$cur"; then
-        :
-    else
-        rc=$?
-        [ "$rc" -eq 1 ] || exit "$rc"
-        continue
-    fi
+    bump_wanted "windows ${name,,}" "$new" "$cur" || continue
     echo "bump windows ${name,,}: $cur -> $new"
     CHANGED=1
     if [ "$DRY_RUN" = 0 ]; then

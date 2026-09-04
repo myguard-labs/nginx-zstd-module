@@ -72,14 +72,10 @@ if [ -z "$VERSION" ]; then
         exit 2
     fi
     # Resolve the current mainline release; nginx.org only keeps the newest
-    # mainline tarball, so a hardcoded version eventually 404s.
-    VERSION="$(curl -fsSL https://nginx.org/en/download.html |
-        grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' |
-        sort -V | tail -1)"
-    if [ -z "$VERSION" ]; then
-        echo "ERROR: could not resolve mainline nginx version from nginx.org" >&2
-        exit 1
-    fi
+    # mainline tarball, so a hardcoded version eventually 404s. The same
+    # resolver the workflows use (the GitHub releases feed), fatal by name
+    # when the feed does not show a mainline release.
+    VERSION="$("$SCRIPT_DIR/nginx-releases.sh" mainline)"
 fi
 
 # --- pinned sha256 for angie tarballs we've actually verified ---

@@ -67,7 +67,7 @@ require_before() {
   first_line=$(grep -n -m1 -F -- "$first" "$file" | cut -d: -f1 || true)
   second_line=$(grep -n -m1 -F -- "$second" "$file" | cut -d: -f1 || true)
   if [ -z "$first_line" ] || [ -z "$second_line" ] || [ "$first_line" -ge "$second_line" ]; then
-    echo "FAIL: $file must install curl before resolving nginx" >&2
+    echo "FAIL: $file must install curl and python3 before resolving nginx" >&2
     exit 1
   fi
 }
@@ -98,7 +98,19 @@ for file in \
   .github/workflows/codeql.yml \
   .github/workflows/valgrind.yml; do
   require_before "$file" 'name: Install bootstrap dependencies' \
-    'curl -fsSL https://nginx.org/en/download.html'
+    'ci/tools/nginx-releases.sh'
+done
+
+# The resolver reads the GitHub releases feed with curl and parses it with
+# python3; both must be installed by the bootstrap step, not assumed from
+# the runner image.
+for file in \
+  .github/workflows/asan.yml \
+  .github/workflows/build-test.yml \
+  .github/workflows/ci-deep.yml \
+  .github/workflows/codeql.yml \
+  .github/workflows/valgrind.yml; do
+  require_apt_package "$file" python3
 done
 
 # Detached nginx signatures are verified by these fallback workflows.  Do not

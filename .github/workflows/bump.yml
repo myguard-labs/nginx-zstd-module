@@ -6,8 +6,9 @@ name: Bump versions
 # and harness-fault-arms.yml), and the Windows build's sources in
 # ci/tools/windows-pins.sh. The matrix's own mainline entry is resolved
 # dynamically at CI run time (build-test.yml's `resolve` job / ci-deep.yml's
-# per-job resolve steps) and has no static pin; ci/tools/bump-versions.sh's
-# header lists exactly what is and is not bumped.
+# per-job resolve steps, through ci/tools/nginx-releases.sh) and has no
+# static pin; ci/tools/bump-versions.sh's header lists exactly what is and
+# is not bumped.
 #
 # ci/tools/bump-versions.sh does the actual work (also runnable locally with
 # --dry-run to preview). Opens a PR rather than pushing straight to master --
