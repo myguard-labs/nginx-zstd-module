@@ -75,8 +75,13 @@ if [ "${NGX_ZSTD_NO_LIBCRYPTO:-0}" != 1 ]; then
         if [ -n "${OPENSSL:-}" ]; then
             # Use a prepared source tree when its generated headers already
             # exist. A clean, not-yet-built tree fails this optional probe and
-            # deliberately selects the portable SHA-256 fallback.
-            ngx_feature_path="$ngx_feature_path $OPENSSL/.openssl/include"
+            # deliberately selects the portable SHA-256 fallback. Both install
+            # spellings are named: .openssl/ (auto/lib/openssl/make, Unix) and
+            # openssl/ (makefile.msvc's --prefix, MSVC) -- and named explicitly
+            # because configure runs addon configs (auto/modules) BEFORE
+            # auto/lib/conf appends either directory to CORE_INCS, so at probe
+            # time CORE_INCS does not carry it yet.
+            ngx_feature_path="$ngx_feature_path $OPENSSL/.openssl/include $OPENSSL/openssl/include"
         fi
         ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
                           unsigned int   n;
