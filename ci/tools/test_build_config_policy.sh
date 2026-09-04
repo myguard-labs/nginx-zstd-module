@@ -18,6 +18,7 @@ grep -Fq '${USE_OPENSSL:-NO}' "$root/filter/config"
 if grep -Fq '[ "$USE_OPENSSL" = YES -a ' "$root/filter/config"; then
     exit 1
 fi
+"$root/ci/tools/test_evp_prepared_tree_probe.sh"
 
 # Exercise the authoritative reorder helper and its hard-failure control.
 grep -Fq '. "$_ngx_zstd_root/filter/reorder-static.sh"' "$root/filter/config"
@@ -116,6 +117,8 @@ esac
 zstd_static_next() {
     # $1 = HTTP_FILTER_MODULES, $2 = HTTP_GZIP
     HTTP_FILTER_MODULES=$1
+    # Consumed by the sourced reorder helper.
+    # shellcheck disable=SC2034
     HTTP_GZIP=$2
     ngx_http_zstd_static_next
 }

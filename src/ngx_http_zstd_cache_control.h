@@ -27,9 +27,27 @@
 #define NGX_HTTP_ZSTD_CACHE_CONTROL_H
 
 
+/*
+ * Single-pass replacement for the former two-scan walk (find the
+ * comma-terminated, quote-aware directive end; then re-walk start..end
+ * looking for ';' or '='): this now finds the directive-NAME cut
+ * (first unquoted ';' or '=') and the comma-terminated segment end in
+ * the same left-to-right scan. Quotes still have to be tracked for the
+ * whole segment (a ';' or '=' inside a quoted parameter value must not
+ * cut the name, and a ',' inside one must not end the directive), so
+ * the scan does not stop at the first ';'/'=' — it keeps going, inside
+ * quotes as before, purely to find the segment's real end for the
+ * caller's next iteration, while remembering the first '='/';' cut
+ * position (if any) the moment it is seen outside quotes.
+ */
 static ngx_inline u_char *
-ngx_http_zstd_cache_control_directive_end(u_char *p, u_char *last)
+ngx_http_zstd_cache_control_directive_end(u_char *p, u_char *last,
+    u_char **name_end)
 {
+    ngx_uint_t  cut_seen;
+
+    cut_seen = 0;
+
     while (p < last) {
         if (*p == '"') {
             p++;
@@ -48,9 +66,18 @@ ngx_http_zstd_cache_control_directive_end(u_char *p, u_char *last)
         } else if (*p == ',') {
             break;
 
+        } else if (!cut_seen && (*p == ';' || *p == '=')) {
+            *name_end = p;
+            cut_seen = 1;
+            p++;
+
         } else {
             p++;
         }
+    }
+
+    if (!cut_seen) {
+        *name_end = p;
     }
 
     return p;
@@ -60,7 +87,7 @@ ngx_http_zstd_cache_control_directive_end(u_char *p, u_char *last)
 static ngx_inline ngx_int_t
 ngx_http_zstd_cache_control_value_no_transform(ngx_table_elt_t *cc)
 {
-    u_char  *p, *last, *start, *end, *directive_end, *semi;
+    u_char  *p, *last, *start, *end, *directive_end, *name_end;
 
     if (cc->value.len == 0) {
         return 0;
@@ -75,8 +102,6 @@ ngx_http_zstd_cache_control_value_no_transform(ngx_table_elt_t *cc)
             start++;
         }
 
-        directive_end = ngx_http_zstd_cache_control_directive_end(start, last);
-
         /*
          * Cut at '=' as well as ';': the compared token is then the
          * directive NAME, so "no-transform=arg" -- malformed, since the
@@ -85,11 +110,10 @@ ngx_http_zstd_cache_control_value_no_transform(ngx_table_elt_t *cc)
          * parameter-value control is unaffected: extension="no-transform"
          * cuts to "extension" and still does not match.
          */
-        semi = start;
-        while (semi < directive_end && *semi != ';' && *semi != '=') {
-            semi++;
-        }
-        end = semi;
+        directive_end = ngx_http_zstd_cache_control_directive_end(start, last,
+                                                                    &name_end);
+
+        end = name_end;
 
         while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
             end--;

@@ -155,6 +155,97 @@ typedef struct {
 static ngx_http_zstd_static_bad_cache_t
     ngx_http_zstd_static_bad_cache[NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS];
 static ngx_uint_t  ngx_http_zstd_static_bad_cache_next;
+/*
+ * Count of valid entries ever remembered, capped at SLOTS.  Lets the
+ * common never-populated path (this worker has not yet hit a truncated
+ * or mismatched .zst) skip the ring scan entirely instead of walking
+ * NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS empty slots on every request.
+ */
+static ngx_uint_t  ngx_http_zstd_static_bad_cache_count;
+
+/*
+ * Log rate limit for the directio hard-error probe arm (see the
+ * `of->is_directio` branch inside ngx_http_zstd_static_probe_file()).
+ *
+ * That arm cannot be cached in the bad-file ring above: the ring is keyed
+ * on path + mtime, and this failure is an operator config mismatch
+ * (`directio_alignment` disagreeing with the device), not a property of
+ * the file. Caching it there would misreport a config problem as a
+ * corrupt sidecar and keep suppressing the log after the operator fixes
+ * `directio_alignment` -- the ring has no config-tied invalidation.
+ * `*malformed` on this arm stays 0 (unchanged) for exactly that reason.
+ *
+ * Instead, this is a bare per-worker window counter: log the first
+ * occurrence immediately (an operator must not lose the first signal),
+ * then suppress for NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW seconds, folding
+ * every suppressed hit into a count reported on the next emitted line --
+ * the standard nginx "N times" idiom (see e.g. core's own
+ * ngx_log_error_core rate-limited messages).
+ *
+ * SAFETY -- same file-scope-static, one-body-at-a-time reasoning as the
+ * directio scratch buffer above: private per worker process, zeroed at
+ * fork, freed with the process image, never touched by two probes at
+ * once because this handler is fully synchronous per worker.
+ *
+ * SAFETY -- ngx_time(): nginx refreshes this cached value once per event
+ * loop iteration and it is ordinarily monotonically non-decreasing within
+ * a worker's lifetime, so `now - window_start` below is ordinarily
+ * correct without touching the wall clock or gettimeofday() on this hot
+ * path. An administrative or NTP step backward is still handled
+ * explicitly (`now < window_start` below forces a rollover) rather than
+ * assumed away: a signed `time_t` subtraction under a backward step goes
+ * negative and would otherwise fail the `>=` window test, extending
+ * suppression indefinitely instead of the intended fixed window.
+ *
+ * SAFETY -- worker-cycle lifetime: a config reload forks new worker
+ * processes; the old ones drain and exit, so a reload cannot hide a NEW
+ * misalignment behind a stale suppression window -- each new worker
+ * starts this counter at zero and logs the first occurrence again.
+ */
+#define NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW  60
+
+static time_t      ngx_http_zstd_static_dio_err_window_start;
+static ngx_uint_t  ngx_http_zstd_static_dio_err_suppressed;
+
+/*
+ * Nonnegative short reads are malformed-file results, not directio system
+ * errors: return 0 for those without consuming the worker-wide error window.
+ * For a negative read, return the number of prior worker-wide occurrences to
+ * report as suppressed (0 on the first hit or rollover), or (ngx_uint_t) -1
+ * when this hit is suppressed. Never allocates; never blocks.
+ */
+static ngx_uint_t
+ngx_http_zstd_static_dio_err_should_log(ngx_log_t *log, ssize_t n)
+{
+    time_t      now;
+    ngx_uint_t  suppressed;
+
+    if (n >= 0) {
+        return 0;
+    }
+
+    now = ngx_time();
+
+    if (ngx_http_zstd_static_dio_err_window_start == 0
+        || now < ngx_http_zstd_static_dio_err_window_start
+        || now - ngx_http_zstd_static_dio_err_window_start
+               >= NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW)
+    {
+        suppressed = ngx_http_zstd_static_dio_err_suppressed;
+        ngx_http_zstd_static_dio_err_window_start = now;
+        ngx_http_zstd_static_dio_err_suppressed = 0;
+        return suppressed;
+    }
+
+    ngx_http_zstd_static_dio_err_suppressed++;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+                   "zstd static: directio probe error suppressed "
+                   "(%ui so far this window)",
+                   ngx_http_zstd_static_dio_err_suppressed);
+
+    return (ngx_uint_t) -1;
+}
 
 #endif
 
@@ -657,9 +748,11 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
      * dictionary store here: those are filter-owned policy.  This cheap
      * routing predicate only asks whether the filter should get the request.
      */
-    ngx_uint_t        i;
+    ngx_uint_t        i, avail_dict_count;
     ngx_list_part_t  *part;
     ngx_table_elt_t  *headers;
+
+    avail_dict_count = 0;
 
     part = &r->headers_in.headers.part;
     headers = part->elts;
@@ -667,7 +760,7 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
     for (i = 0; /* void */; i++) {
         if (i >= part->nelts) {
             if (part->next == NULL) {
-                return 0;
+                break;
             }
 
             part = part->next;
@@ -675,15 +768,50 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
             i = 0;
         }
 
-        if (headers[i].key.len == sizeof("Available-Dictionary") - 1
-            && ngx_strncasecmp(headers[i].key.data,
-                               (u_char *) "Available-Dictionary",
-                               sizeof("Available-Dictionary") - 1) == 0)
+        /*
+         * Case-SENSITIVE ngx_memcmp against a lowercase literal when nginx
+         * supplied lowcase_key. Headers inserted by another module may leave
+         * that optional pointer NULL, so retain the case-folding fallback.
+         * Core-parsed headers already carry the folded form (see
+         * ngx_http_zstd_collect_dcz_headers() in the filter module for
+         * the per-protocol citations), so re-folding with
+         * ngx_strncasecmp() would redo work nginx has already done, once
+         * per header per request.
+         */
+        if (headers[i].key.len == sizeof("available-dictionary") - 1
+            && ((headers[i].lowcase_key != NULL
+                 && ngx_memcmp(headers[i].lowcase_key,
+                               "available-dictionary",
+                               sizeof("available-dictionary") - 1) == 0)
+                || (headers[i].lowcase_key == NULL
+                    && ngx_strncasecmp(headers[i].key.data,
+                                       (u_char *) "Available-Dictionary",
+                                       sizeof("Available-Dictionary") - 1)
+                       == 0)))
         {
-            return ngx_http_zstd_request_coding_weight(r, "dcz",
-                       sizeof("dcz") - 1, 0) > 0;
+            avail_dict_count++;
+            if (avail_dict_count > 1) {
+                return 0;
+            }
         }
     }
+
+    /*
+     * Match the filter's fail-closed disposition (see
+     * ngx_http_zstd_collect_dcz_headers() / avail_dict_count > 1 in
+     * ngx_http_zstd_filter_module.c): stand aside only when exactly one
+     * Available-Dictionary header is present. Zero means there is
+     * nothing to serve dcz for; two or more is the ambiguous case the
+     * filter refuses outright, so this routing predicate must not bypass
+     * to it either -- doing so would forfeit a usable .zst sidecar for
+     * dynamic zstd or identity when the filter later declines.
+     */
+    if (avail_dict_count != 1) {
+        return 0;
+    }
+
+    return ngx_http_zstd_request_coding_weight(r, "dcz",
+               sizeof("dcz") - 1, 0) > 0;
 }
 
 
@@ -699,7 +827,11 @@ ngx_http_zstd_static_bad_cached(ngx_str_t *path, ngx_open_file_info_t *of)
         return 0;
     }
 
-    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS; i++) {
+    if (ngx_http_zstd_static_bad_cache_count == 0) {
+        return 0;
+    }
+
+    for (i = 0; i < ngx_http_zstd_static_bad_cache_count; i++) {
         entry = &ngx_http_zstd_static_bad_cache[i];
 
         if (entry->valid && entry->uniq == of->uniq
@@ -731,7 +863,16 @@ ngx_http_zstd_static_bad_remember(ngx_str_t *path, ngx_open_file_info_t *of)
     entry->size = of->size;
     entry->len = path->len;
     ngx_memcpy(entry->path, path->data, path->len);
-    entry->valid = 1;
+
+    if (!entry->valid) {
+        entry->valid = 1;
+
+        if (ngx_http_zstd_static_bad_cache_count
+            < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS)
+        {
+            ngx_http_zstd_static_bad_cache_count++;
+        }
+    }
 
     ngx_http_zstd_static_bad_cache_next++;
     if (ngx_http_zstd_static_bad_cache_next
@@ -900,6 +1041,20 @@ ngx_http_zstd_static_probe_verdict(const u_char *frame, size_t avail,
 }
 
 
+static ngx_uint_t
+ngx_http_zstd_static_probe_read_log_level(ssize_t n, ngx_uint_t directio,
+    ngx_err_t *err)
+{
+    if (n >= 0) {
+        *err = 0;
+        return NGX_LOG_ERR;
+    }
+
+    *err = ngx_errno;
+    return directio ? NGX_LOG_ERR : NGX_LOG_CRIT;
+}
+
+
 static ngx_int_t
 ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     const ngx_http_core_loc_conf_t *clcf, ngx_open_file_info_t *of,
@@ -916,7 +1071,8 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     u_char      *hdr, *frame;
     size_t       want, align, frame_off, avail, got, need;
     ssize_t      n;
-    ngx_uint_t   frames, scratch, have_block, reuse;
+    ngx_uint_t   frames, scratch, have_block, reuse, read_log_level;
+    ngx_err_t    read_err;
     off_t        pos, base, have_base;
     ngx_int_t    probe_rc;
 
@@ -1079,13 +1235,47 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
         frame = hdr + frame_off;
 
         if (n < 0 || avail < 4) {
+            read_log_level = ngx_http_zstd_static_probe_read_log_level(
+                                 n, of->is_directio, &read_err);
+
             if (of->is_directio) {
-                ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
-                              "zstd static: %uz-byte aligned probe on "
-                              "directio file \"%s\" returned %z -- "
-                              "declining; check directio_alignment "
-                              "against the device geometry",
-                              align, path->data, n);
+                ngx_uint_t  dio_suppressed;
+
+                if (n >= 0) {
+                    ngx_log_error(NGX_LOG_ERR, log, 0,
+                                  "zstd static: directio probe on \"%s\" "
+                                  "returned %z bytes before a complete "
+                                  "frame header -- treating sidecar as "
+                                  "malformed",
+                                  path->data, n);
+
+                } else {
+                    dio_suppressed =
+                        ngx_http_zstd_static_dio_err_should_log(log, n);
+
+                    if (dio_suppressed == 0) {
+                        ngx_log_error(read_log_level, log, read_err,
+                                      "zstd static: %uz-byte aligned probe "
+                                      "on directio file \"%s\" returned "
+                                      "%z -- declining; check "
+                                      "directio_alignment against the "
+                                      "device geometry",
+                                      align, path->data, n);
+                    } else if (dio_suppressed != (ngx_uint_t) -1) {
+                        ngx_log_error(read_log_level, log, read_err,
+                                      "zstd static: %uz-byte aligned probe "
+                                      "on directio file \"%s\" returned "
+                                      "%z -- declining; check "
+                                      "directio_alignment against the "
+                                      "device geometry (%ui more worker-wide "
+                                      "occurrence%s suppressed in the "
+                                      "last %ds)",
+                                      align, path->data, n, dio_suppressed,
+                                      dio_suppressed == 1 ? "" : "s",
+                                      NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW);
+                    }
+                }
+
                 probe_rc = NGX_DECLINED;
                 *malformed = (n >= 0);
                 goto probe_done;
@@ -1098,8 +1288,15 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
              * Win32 port so existing log tooling keeps matching;
              * Win32 names ReadFile() instead of claiming a pread(2)
              * it never issued.
+             *
+             * n >= 0 means the read itself succeeded and simply
+             * returned too few bytes (e.g. a sidecar consisting only
+             * of skippable frames, n == 0 at offset == size); errno is
+             * stale in that case, so log it at ERR with errno 0 rather
+             * than CRIT with a misleading ngx_errno. A genuine read
+             * failure (n < 0) keeps CRIT and the real ngx_errno.
              */
-            ngx_log_error(NGX_LOG_CRIT, log, ngx_errno,
+            ngx_log_error(read_log_level, log, read_err,
                           "zstd static: " NGX_HTTP_ZSTD_STATIC_PREAD_NAME
                           "(\"%s\", frame header) returned %z",
                           path->data, n);

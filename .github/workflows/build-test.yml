@@ -252,6 +252,12 @@ jobs:
       - name: Build configuration policy regressions
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_build_config_policy.sh
 
+      - name: Windows build policy regressions
+        run: |
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_build_windows_zstd_default.sh
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_build_windows_inputs.sh
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_build_windows_openssl_recovery.sh
+
       - name: Frame-probe header seam regressions
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_probe_header_seam.sh
 
@@ -266,6 +272,9 @@ jobs:
 
       - name: coverage.sh stale-prober rebuild guard regression (A30-F7)
         run: bash "$GITHUB_WORKSPACE"/ci/tools/test_coverage_prober_rebuild.sh
+
+      - name: bump-versions.sh pin-coverage and fail-loud regressions (A30-F4)
+        run: bash "$GITHUB_WORKSPACE"/ci/tools/test_bump_versions.sh
 
       - name: Shell script linting (shellcheck)
         run: |
@@ -294,6 +303,17 @@ jobs:
           # shift-and-count reference over 0..2^24 (every power of two
           # through 2^23 included) — needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_ceil_log2_unit.sh
+
+      - name: directio probe log rate limiter unit fixture (A33-F4(b))
+        run: |
+          # PR #314 review: the directio hard-error probe arm in
+          # ngx_http_zstd_static_module.c logged NGX_LOG_ERR on every
+          # request for a misaligned-directio sidecar. static inside the
+          # static module, so this extracts
+          # ngx_http_zstd_static_dio_err_should_log() verbatim by line
+          # range and exercises it against a fake, test-controlled clock —
+          # needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_dio_err_ratelimit_unit.sh
 
       - name: CCtx profile key unit fixture (collision-free + reversible)
         run: |
@@ -469,6 +489,25 @@ jobs:
           # directio mount. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_static_pread_unit.sh
 
+      - name: static dictionary-bypass unit fixture
+        run: |
+          # ngx_http_zstd_static_should_bypass() must scan until a second
+          # Available-Dictionary line and stand aside only when exactly one
+          # is present, matching the dynamic filter, which refuses dcz
+          # outright on duplicates. A predicate that returned on the first
+          # match handed duplicate-header requests to a filter that then
+          # declined, forfeiting a usable .zst sidecar for identity -- a
+          # client-triggerable path ci/t/01-static.t cannot reach without a
+          # built nginx. Verbatim extraction, so a regression in the shipped
+          # walk fails here. Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_static_should_bypass_unit.sh
+
+      - name: static probe read-log policy unit fixture
+        run: |
+          # Nonnegative short reads must never attach stale errno; genuine
+          # failures retain it, and only ordinary failures rise to CRIT.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_static_probe_log_unit.sh
+
       - name: static frame-header probe unit fixture
         run: |
           # ngx_http_zstd_static_probe_frame(): pure frame-header arithmetic.
@@ -476,6 +515,13 @@ jobs:
           # reserved descriptor bit, a passing small frame and the oversized-
           # window verdict without standing up nginx. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_static_probe_unit.sh
+
+      - name: A33 P7/P9/P10 bounded-scan performance witnesses
+        run: |
+          # Verbatim production helpers checked against independent behavior
+          # oracles plus deterministic work-count/source-shape controls. This
+          # keeps the micro-optimizations falsifiable without wall-clock noise.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_perf_micro_witnesses.sh
 
       - name: freeCCtxParams six-exit unit fixture (config-time leak-on-error)
         run: |
@@ -1778,7 +1824,13 @@ jobs:
           JOB_NAME: ${{ github.job }}
         run: |
           export PERL5LIB="$HOME/perl5/lib/perl5:${PERL5LIB:-}"
-          export TEST_NGINX_SERVROOT="/tmp/nginx-servroot-confwarn-${RUN_ID}-${JOB_NAME}"
+          # Strict-path fixtures validate every ancestor. Keep their servroot
+          # under the runner's private home rather than the group-writable
+          # checkout work area or world-writable /tmp so the
+          # intended dot/symlink component is the first failing condition.
+          STRICT_SERVROOT="$HOME/.nginx-servroot-confwarn-${RUN_ID}-${GITHUB_RUN_ATTEMPT}-${JOB_NAME}"
+          export TEST_NGINX_SERVROOT="$STRICT_SERVROOT"
+          trap 'rm -rf -- "$STRICT_SERVROOT"' EXIT
           rm -rf "$TEST_NGINX_SERVROOT"
           mkdir -p "$TEST_NGINX_SERVROOT"
           cd "$GITHUB_WORKSPACE"
