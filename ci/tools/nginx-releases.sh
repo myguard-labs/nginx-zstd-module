@@ -3,8 +3,8 @@
 # The newest nginx stable and mainline releases, from the GitHub releases
 # feed -- the one place this repo answers "which nginx is current":
 #
-#   ci/tools/nginx-releases.sh mainline    -> 1.31.5
 #   ci/tools/nginx-releases.sh stable      -> 1.30.4
+#   ci/tools/nginx-releases.sh mainline    -> 1.31.5
 #   ci/tools/nginx-releases.sh both        -> 1.30.4 1.31.5
 #
 # The CI workflows resolve the mainline they build with it (a hardcoded
