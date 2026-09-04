@@ -181,7 +181,7 @@ test_vary_behavior(void)
         ngx_http_zstd_vary_find_tokens(
             &r, "Available-Dictionary", sizeof("Available-Dictionary") - 1,
             "Sec-Fetch-Site", sizeof("Sec-Fetch-Site") - 1,
-            &got_a, &got_b);
+            NULL, 0, &got_a, &got_b, NULL);
         check(got_a == want_a && got_b == want_b,
               "Vary helper agrees with independent token oracle");
     }
