@@ -15,9 +15,8 @@
  * shipped implementation, never a hand-copied duplicate.
  *
  * The extracted function calls ngx_time() and ngx_log_debug1(); both are
- * stubbed below — ngx_time() as a test-controlled fake clock (a real
- * nginx build only ever advances ngx_cached_time, matching the
- * monotonic-non-decreasing assumption the .c file's comment documents),
+ * stubbed below — ngx_time() as a test-controlled fake clock, including a
+ * backward-step arm matching the production helper's defensive handling,
  * ngx_log_debug1() as a no-op exactly as it compiles in a non-NGX_DEBUG
  * build (see src/core/ngx_log.h's third #define block).
  */
@@ -45,6 +44,7 @@ static time_t  fake_now;
 #define NOT_SUPPRESSED  ((ngx_uint_t) -1)
 
 static int  failures;
+static int  checks;
 
 static void
 reset_state(void)
@@ -57,6 +57,7 @@ reset_state(void)
 static void
 check(const char *what, ngx_uint_t got, ngx_uint_t want)
 {
+    checks++;
     if (got != want) {
         printf("FAIL - %s: got=%lu want=%lu\n",
                what, (unsigned long) got, (unsigned long) want);
@@ -76,7 +77,7 @@ main(void)
      *    It reports 0 prior occurrences.
      */
     reset_state();
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("first call logs immediately", r, 0);
 
     /*
@@ -86,7 +87,7 @@ main(void)
      *    logged call reports.
      */
     for (i = 0; i < 5; i++) {
-        r = ngx_http_zstd_static_dio_err_should_log(NULL);
+        r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
         check("mid-window call is suppressed", r, NOT_SUPPRESSED);
     }
 
@@ -95,7 +96,7 @@ main(void)
      *    so window_start + WINDOW - 1 is still inside): still suppressed.
      */
     fake_now = 1000 + NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW - 1;
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("last second before rollover still suppressed", r, NOT_SUPPRESSED);
 
     /*
@@ -104,7 +105,7 @@ main(void)
      *    5 from step 2 plus 1 from step 3 = 6.
      */
     fake_now = 1000 + NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW;
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("window rollover reports folded suppressed count", r, 6);
 
     /*
@@ -113,11 +114,11 @@ main(void)
      *    suppressed again with the count restarted at 0 prior — proven by
      *    checking the NEXT rollover reports exactly 1, not 7.
      */
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("call right after rollover is suppressed", r, NOT_SUPPRESSED);
 
     fake_now += NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW;
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("counter did not leak across the rollover", r, 1);
 
     /*
@@ -128,7 +129,12 @@ main(void)
      *    problem behind a stale suppression window.
      */
     reset_state();
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    ngx_http_zstd_static_dio_err_should_log(NULL, -1);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
+    check("old worker has suppressed state", r, NOT_SUPPRESSED);
+
+    reset_state();
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("fresh worker-cycle state logs immediately", r, 0);
 
     /*
@@ -139,12 +145,12 @@ main(void)
      *    underflows.
      */
     reset_state();
-    ngx_http_zstd_static_dio_err_should_log(NULL); /* logs, opens window at 1000 */
+    ngx_http_zstd_static_dio_err_should_log(NULL, -1); /* opens window at 1000 */
     fake_now = 1000 + NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW - 1;
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("boundary-1 still suppressed", r, NOT_SUPPRESSED);
     fake_now = 1000 + NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW;
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("boundary rolls over", r, 1);
 
     /*
@@ -155,20 +161,35 @@ main(void)
      *    `>=` window threshold forever.
      */
     reset_state();
-    ngx_http_zstd_static_dio_err_should_log(NULL); /* logs, opens window at 1000 */
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    ngx_http_zstd_static_dio_err_should_log(NULL, -1); /* opens window at 1000 */
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("mid-window before clock step is suppressed", r, NOT_SUPPRESSED);
 
     fake_now = 500; /* clock stepped backward past window_start */
-    r = ngx_http_zstd_static_dio_err_should_log(NULL);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
     check("backward clock step forces rollover, not extended suppression",
           r, 1);
+
+    /* A malformed short read must not consume the hard-error window. */
+    reset_state();
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, 0);
+    check("zero-byte EOF logs without rate limiting", r, 0);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
+    check("first hard error after zero-byte EOF still logs", r, 0);
+
+    reset_state();
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, 3);
+    check("short malformed read logs without rate limiting", r, 0);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
+    check("first hard error after malformed read still logs", r, 0);
+    r = ngx_http_zstd_static_dio_err_should_log(NULL, -1);
+    check("following hard error is rate limited", r, NOT_SUPPRESSED);
 
     if (failures) {
         printf("FAILED: %d check(s)\n", failures);
         return 1;
     }
 
-    printf("OK: directio probe log rate limiter (%d checks)\n", 8);
+    printf("OK: directio probe log rate limiter (%d checks)\n", checks);
     return 0;
 }

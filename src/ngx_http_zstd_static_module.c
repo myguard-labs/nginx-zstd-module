@@ -201,16 +201,21 @@ static time_t      ngx_http_zstd_static_dio_err_window_start;
 static ngx_uint_t  ngx_http_zstd_static_dio_err_suppressed;
 
 /*
- * Returns the number of prior occurrences to report as suppressed (0 on
- * the first hit in a window, or when a window just rolled over), and
- * advances the counter/window bookkeeping for the CALLER's hit, which is
- * always logged. Never allocates; never blocks.
+ * Nonnegative short reads are malformed-file results, not directio system
+ * errors: return 0 for those without consuming the worker-wide error window.
+ * For a negative read, return the number of prior worker-wide occurrences to
+ * report as suppressed (0 on the first hit or rollover), or (ngx_uint_t) -1
+ * when this hit is suppressed. Never allocates; never blocks.
  */
 static ngx_uint_t
-ngx_http_zstd_static_dio_err_should_log(ngx_log_t *log)
+ngx_http_zstd_static_dio_err_should_log(ngx_log_t *log, ssize_t n)
 {
     time_t      now;
     ngx_uint_t  suppressed;
+
+    if (n >= 0) {
+        return 0;
+    }
 
     now = ngx_time();
 
@@ -1198,12 +1203,43 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
                                  n, of->is_directio, &read_err);
 
             if (of->is_directio) {
-                ngx_log_error(read_log_level, log, read_err,
-                              "zstd static: %uz-byte aligned probe on "
-                              "directio file \"%s\" returned %z -- "
-                              "declining; check directio_alignment "
-                              "against the device geometry",
-                              align, path->data, n);
+                ngx_uint_t  dio_suppressed;
+
+                if (n >= 0) {
+                    ngx_log_error(NGX_LOG_ERR, log, 0,
+                                  "zstd static: directio probe on \"%s\" "
+                                  "returned %z bytes before a complete "
+                                  "frame header -- treating sidecar as "
+                                  "malformed",
+                                  path->data, n);
+
+                } else {
+                    dio_suppressed =
+                        ngx_http_zstd_static_dio_err_should_log(log, n);
+
+                    if (dio_suppressed == 0) {
+                        ngx_log_error(read_log_level, log, read_err,
+                                      "zstd static: %uz-byte aligned probe "
+                                      "on directio file \"%s\" returned "
+                                      "%z -- declining; check "
+                                      "directio_alignment against the "
+                                      "device geometry",
+                                      align, path->data, n);
+                    } else if (dio_suppressed != (ngx_uint_t) -1) {
+                        ngx_log_error(read_log_level, log, read_err,
+                                      "zstd static: %uz-byte aligned probe "
+                                      "on directio file \"%s\" returned "
+                                      "%z -- declining; check "
+                                      "directio_alignment against the "
+                                      "device geometry (%ui more worker-wide "
+                                      "occurrence%s suppressed in the "
+                                      "last %ds)",
+                                      align, path->data, n, dio_suppressed,
+                                      dio_suppressed == 1 ? "" : "s",
+                                      NGX_HTTP_ZSTD_STATIC_DIO_ERR_WINDOW);
+                    }
+                }
+
                 probe_rc = NGX_DECLINED;
                 *malformed = (n >= 0);
                 goto probe_done;
