@@ -328,15 +328,30 @@ done:
  * with the coding name parameterized; the zstd semantics are preserved
  * verbatim by the wrapper below (the fuzz differential oracle depends
  * on that).
+ *
+ * The _ex form additionally reports the two accumulated weights it had to
+ * compute anyway: *explicit_q is the latest explicit `coding` token's
+ * weight and *star_q_out the latest "*" weight, each -1 when that form is
+ * absent from the value. The chain walker needs both to compose duplicate
+ * field lines, and taking them from one pass keeps it from parsing the
+ * same line a second time just to learn which of the two produced the
+ * answer. Both out-params are mandatory; the return value is exactly the
+ * precedence rule applied to them, so ngx_http_zstd_coding_weight() below
+ * stays byte-for-byte the function the fuzz differential oracle asserts.
  */
 static ngx_int_t
-ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
-    size_t coding_len, ngx_uint_t allow_wildcard)
+ngx_http_zstd_coding_weight_ex(const ngx_str_t *ae, const char *coding,
+    size_t coding_len, ngx_uint_t allow_wildcard, ngx_int_t *explicit_q,
+    ngx_int_t *star_q_out)
 {
     u_char        *p   = ae->data;
     const u_char  *end = ae->data + ae->len;
     ngx_int_t      coding_q = -1; /* explicit `coding` weight, -1 = absent */
     ngx_int_t      star_q = -1;   /* "*" wildcard weight,      -1 = absent */
+
+#ifdef NGX_HTTP_ZSTD_TEST_COUNT_CODING_WEIGHT
+    ngx_http_zstd_test_coding_weight_calls++;
+#endif
 
     while (p < end) {
 
@@ -434,6 +449,9 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
         }
     }
 
+    *explicit_q = coding_q;
+    *star_q_out = star_q;
+
     /*
      * An explicit token decides the result (even q=0, which then
      * overrides a permissive "*"). With no explicit token, the "*"
@@ -446,6 +464,23 @@ ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
         return star_q;
     }
     return -1;
+}
+
+
+/*
+ * Effective weight for `coding` in one Accept-Encoding field value, with
+ * the per-form weights discarded. This is the signature the fuzz
+ * differential and the extracted unit suite link against.
+ */
+static ngx_int_t
+ngx_http_zstd_coding_weight(const ngx_str_t *ae, const char *coding,
+    size_t coding_len, ngx_uint_t allow_wildcard)
+{
+    ngx_int_t  explicit_q, star_q;
+
+    return ngx_http_zstd_coding_weight_ex(ae, coding, coding_len,
+                                          allow_wildcard,
+                                          &explicit_q, &star_q);
 }
 
 
@@ -521,39 +556,33 @@ ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
 
     for (/* void */; ae != NULL; ae = NGX_HTTP_ZSTD_AE_NEXT(ae)) {
 
-        ngx_int_t  q;
+        ngx_int_t  line_coding_q, line_star_q;
 
         /*
-         * Ask the single-value parser twice per line: once with the
-         * wildcard suppressed, to learn this line's EXPLICIT weight only,
-         * and once as the caller asked for, to learn the effective weight.
-         * When the two differ the effective answer came from "*", so the
-         * line contributed a wildcard weight and no explicit token.
+         * One pass per line. The single-value parser accumulates the
+         * explicit and the wildcard weight separately anyway, so the _ex
+         * form hands both back and this walker composes them directly.
+         * The earlier shape asked the parser twice per line — once with
+         * the wildcard suppressed to isolate the explicit weight, then
+         * again to learn the effective one — which re-scanned every line
+         * that named no explicit token, i.e. the common case.
          *
-         * Doing it this way keeps ngx_http_zstd_coding_weight() untouched
-         * — it is the fuzzed, extracted-into-the-unit-suite function, and
-         * a second out-parameter would change the slice every one of those
-         * layers links. The header field is at most a handful of short
-         * lines, and this runs once per request on a path that is about to
-         * compress a response body.
+         * ngx_http_zstd_coding_weight() is unchanged as a symbol: it is
+         * the fuzzed, extracted-into-the-unit-suite function, and it is
+         * now the wrapper that drops these two out-params.
          */
-        q = ngx_http_zstd_coding_weight(&ae->value, coding, coding_len, 0);
+        (void) ngx_http_zstd_coding_weight_ex(&ae->value, coding, coding_len,
+                                              allow_wildcard,
+                                              &line_coding_q, &line_star_q);
 
-        if (q >= 0) {
+        if (line_coding_q >= 0) {
             /* Duplicate field lines are comma-joined in received order. */
-            coding_q = q;
+            coding_q = line_coding_q;
             continue;
         }
 
-        if (!allow_wildcard) {
-            continue;
-        }
-
-        q = ngx_http_zstd_coding_weight(&ae->value, coding, coding_len, 1);
-
-        if (q >= 0) {
-            /* Only "*" could have produced an answer here. */
-            star_q = q;
+        if (allow_wildcard && line_star_q >= 0) {
+            star_q = line_star_q;
         }
     }
 
@@ -592,7 +621,7 @@ ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
     ngx_uint_t        i;
     ngx_list_part_t  *part;
     ngx_table_elt_t  *headers;
-    ngx_int_t         q, coding_q, star_q;
+    ngx_int_t         coding_q, star_q, line_coding_q, line_star_q;
 
     coding_q = -1;
     star_q = -1;
@@ -618,21 +647,16 @@ ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
             continue;
         }
 
-        q = ngx_http_zstd_coding_weight(&headers[i].value, coding,
-                                         coding_len, 0);
-        if (q >= 0) {
-            coding_q = q;
+        (void) ngx_http_zstd_coding_weight_ex(&headers[i].value, coding,
+                                              coding_len, allow_wildcard,
+                                              &line_coding_q, &line_star_q);
+        if (line_coding_q >= 0) {
+            coding_q = line_coding_q;
             continue;
         }
 
-        if (!allow_wildcard) {
-            continue;
-        }
-
-        q = ngx_http_zstd_coding_weight(&headers[i].value, coding,
-                                         coding_len, 1);
-        if (q >= 0) {
-            star_q = q;
+        if (allow_wildcard && line_star_q >= 0) {
+            star_q = line_star_q;
         }
     }
 
@@ -827,7 +851,7 @@ ngx_http_zstd_vary_find_tokens(ngx_http_request_t *r,
         }
 
         {
-            u_char  *end, *p, *start;
+            u_char  *end, *p, *start, *tok_end;
 
             p = h[i].value.data;
             end = p + h[i].value.len;
@@ -841,6 +865,14 @@ ngx_http_zstd_vary_find_tokens(ngx_http_request_t *r,
                 while (p < end && *p != ',') {
                     p++;
                 }
+
+                /*
+                 * `p` is the untrimmed token end (the comma, or `end`);
+                 * keep it so the tail advance below can reuse it instead
+                 * of re-walking from the OWS-trimmed pointer to find the
+                 * same comma again.
+                 */
+                tok_end = p;
 
                 while (p > start && (p[-1] == ' ' || p[-1] == '\t')) {
                     p--;
@@ -876,9 +908,7 @@ ngx_http_zstd_vary_find_tokens(ngx_http_request_t *r,
                     return;
                 }
 
-                while (p < end && *p != ',') {
-                    p++;
-                }
+                p = tok_end;
             }
         }
     }

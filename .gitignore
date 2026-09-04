@@ -69,7 +69,10 @@ ci/fuzz/corpus/*
 
 # Unit test build artifacts (source + run.sh IS tracked)
 ci/tests/unit/test_accept_encoding
+ci/tests/unit/test_accept_encoding_chain
+ci/tests/unit/test_accept_encoding_legacy
 ci/tests/unit/test_static_probe
 ci/tests/unit/test_vary_fusion
+ci/tests/unit/test_version_policy
 ci/tests/unit/*.gcda
 ci/tests/unit/*.gcno
