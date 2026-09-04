@@ -258,6 +258,17 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
  */
 #define NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG  10
 
+/*
+ * Threshold for switching the per-request dcz negotiation lookup from a
+ * linear ngx_memcmp scan to a binary search over zlcf->dcz_dicts (sorted
+ * once, at merge-config time, by ngx_http_zstd_dcz_dict_cmp()).
+ *
+ * Small arrays retain the simple contiguous linear scan; larger arrays
+ * use O(log n) comparisons. The threshold is deliberately conservative
+ * and is guarded by the differential fixture.
+ */
+#define NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD  16
+
 
 /*
  * The effective ZSTD_c_windowLog for a dcz (RFC 9842 dictionary-compressed)
@@ -950,7 +961,7 @@ static ngx_buf_t *ngx_http_zstd_create_temp_buf(ngx_pool_t *pool, size_t size);
 static ngx_int_t ngx_http_zstd_set_param(ngx_http_request_t *r,
     ZSTD_CCtx *cctx, ZSTD_cParameter param, int value, const char *name);
 static ngx_int_t ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx);
+    ngx_http_zstd_ctx_t *ctx, ngx_http_zstd_loc_conf_t *zlcf);
 static ngx_int_t ngx_http_zstd_filter_compress(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx, ngx_uint_t no_more_input);
 static ngx_int_t ngx_http_zstd_filter_init(ngx_conf_t *cf);
@@ -1005,6 +1016,11 @@ static void ngx_http_zstd_collect_dcz_headers(ngx_http_request_t *r,
     ngx_table_elt_t **sec_fetch_site_h, ngx_uint_t *sec_fetch_site_count);
 static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_negotiate(
     ngx_http_request_t *r, ngx_http_zstd_loc_conf_t *zlcf);
+static int ngx_libc_cdecl ngx_http_zstd_dcz_dict_cmp(const void *one,
+    const void *two);
+static void ngx_http_zstd_dcz_dict_sort(ngx_array_t *dcz_dicts);
+static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_dict_lookup(
+    ngx_array_t *dcz_dicts, u_char buf[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN]);
 
 
 /*
@@ -1992,6 +2008,106 @@ ngx_http_zstd_dcz_decode_digest(ngx_str_t raw,
 }
 
 
+/*
+ * Orders zlcf->dcz_dicts by hash so the per-request negotiation lookup
+ * can binary-search it once nelts crosses
+ * NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD. Called once, at merge-config
+ * time, after every zstd_dcz_dict_file push for this location is done
+ * (see the ngx_conf_merge_ptr_value(conf->dcz_dicts, ...) call site) --
+ * never at request time, so it cannot race a lookup and never runs
+ * against a still-growing array. The merge-time duplicate-hash check
+ * that runs before each push (see the "has the same hash as" error
+ * above) already guarantees no two entries compare equal, so the sort
+ * order is total and unambiguous.
+ */
+static int ngx_libc_cdecl
+ngx_http_zstd_dcz_dict_cmp(const void *one, const void *two)
+{
+    const ngx_http_zstd_dcz_dict_t  *first, *second;
+
+    first = one;
+    second = two;
+
+    return ngx_memcmp(first->hash, second->hash,
+                       NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+}
+
+
+static void
+ngx_http_zstd_dcz_dict_sort(ngx_array_t *dcz_dicts)
+{
+    if (dcz_dicts->nelts > 1) {
+        ngx_qsort(dcz_dicts->elts, (size_t) dcz_dicts->nelts,
+                  sizeof(ngx_http_zstd_dcz_dict_t),
+                  ngx_http_zstd_dcz_dict_cmp);
+    }
+}
+
+
+/*
+ * Finds the configured dcz dictionary whose SHA-256 equals the 32 bytes
+ * at `buf`, or NULL if none matches. Pulled out of
+ * ngx_http_zstd_dcz_negotiate() as a pure, log-free, allocation-free
+ * function of (dcz_dicts, buf) so it can be extracted and unit-tested
+ * standalone (see ci/tools/test_dcz_dict_lookup_unit.sh) against a
+ * reference brute-force oracle -- this is the function the
+ * NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD tradeoff lives in.
+ *
+ * Below the threshold a linear scan of 32-byte ngx_memcmp calls beats a
+ * bsearch on this array size (see the threshold constant's comment for
+ * the measurements); above it, dcz_dicts is sorted by hash at
+ * merge-config time (ngx_http_zstd_dcz_dict_cmp()) and a binary search
+ * wins. Both branches return a pointer INTO dcz_dicts->elts, never a
+ * copy, and neither mutates the array.
+ */
+static ngx_http_zstd_dcz_dict_t *
+ngx_http_zstd_dcz_dict_lookup(ngx_array_t *dcz_dicts,
+    u_char buf[NGX_HTTP_ZSTD_SHA256_DIGEST_LEN])
+{
+    ngx_uint_t                 i;
+    ngx_http_zstd_dcz_dict_t  *dicts;
+
+    dicts = dcz_dicts->elts;
+
+    if (dcz_dicts->nelts > NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD) {
+        ngx_int_t  lo, hi, mid;
+
+        lo = 0;
+        hi = (ngx_int_t) dcz_dicts->nelts - 1;
+
+        while (lo <= hi) {
+            ngx_int_t  c;
+
+            mid = (lo + hi) / 2;
+            c = ngx_memcmp(dicts[mid].hash, buf,
+                           NGX_HTTP_ZSTD_SHA256_DIGEST_LEN);
+
+            if (c == 0) {
+                return &dicts[mid];
+
+            } else if (c < 0) {
+                lo = mid + 1;
+
+            } else {
+                hi = mid - 1;
+            }
+        }
+
+        return NULL;
+    }
+
+    for (i = 0; i < dcz_dicts->nelts; i++) {
+        if (ngx_memcmp(dicts[i].hash, buf,
+                       NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) == 0)
+        {
+            return &dicts[i];
+        }
+    }
+
+    return NULL;
+}
+
+
 static ngx_http_zstd_dcz_dict_t *
 ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     ngx_http_zstd_loc_conf_t *zlcf)
@@ -1999,9 +2115,9 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
     u_char                     buf[NGX_HTTP_ZSTD_DCZ_DECODE_BUF_LEN];
     ngx_int_t                  rc;
     ngx_uint_t                 secure;
-    ngx_uint_t                 i, avail_dict_count, sec_fetch_site_count;
+    ngx_uint_t                 avail_dict_count, sec_fetch_site_count;
     ngx_table_elt_t           *avail_dict_h, *sec_fetch_site_h;
-    ngx_http_zstd_dcz_dict_t  *dicts;
+    ngx_http_zstd_dcz_dict_t  *dict;
 
     if (zlcf->dcz_dicts == NULL || zlcf->dcz_dicts->nelts == 0) {
         return NULL;
@@ -2156,17 +2272,13 @@ ngx_http_zstd_dcz_negotiate(ngx_http_request_t *r,
         return NULL;
     }
 
-    dicts = zlcf->dcz_dicts->elts;
+    dict = ngx_http_zstd_dcz_dict_lookup(zlcf->dcz_dicts, buf);
 
-    for (i = 0; i < zlcf->dcz_dicts->nelts; i++) {
-        if (ngx_memcmp(dicts[i].hash, buf,
-                       NGX_HTTP_ZSTD_SHA256_DIGEST_LEN) == 0)
-        {
-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                           "zstd dcz: dictionary \"%V\" negotiated",
-                           &dicts[i].file);
-            return &dicts[i];
-        }
+    if (dict != NULL) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "zstd dcz: dictionary \"%V\" negotiated",
+                       &dict->file);
+        return dict;
     }
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -2317,7 +2429,7 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
          * explicit flag — do NOT infer this from buffer_in.src == NULL;
          * see the cctx_ready comment in ngx_http_zstd_ctx_t.
          */
-        if (ngx_http_zstd_filter_init_cctx(r, ctx) != NGX_OK) {
+        if (ngx_http_zstd_filter_init_cctx(r, ctx, zlcf) != NGX_OK) {
             goto failed;
         }
 
@@ -3554,13 +3666,10 @@ ngx_http_zstd_acquire_cctx(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx,
  */
 static ngx_int_t
 ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
-    ngx_http_zstd_ctx_t *ctx)
+    ngx_http_zstd_ctx_t *ctx, ngx_http_zstd_loc_conf_t *zlcf)
 {
-    size_t                      rc;
-    ZSTD_CCtx                  *cctx;
-    ngx_http_zstd_loc_conf_t   *zlcf;
-
-    zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
+    size_t      rc;
+    ZSTD_CCtx  *cctx;
 
     if (ctx->cctx == NULL
         && ngx_http_zstd_acquire_cctx(r, ctx, zlcf) != NGX_OK)
@@ -4086,6 +4195,77 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
  *
  * Returns the leaf fd, or NGX_INVALID_FILE having logged the reason.
  */
+/*
+ * fstat() one directory fd opened during the strict walk and refuse it
+ * under the same rule the leaf ownership/mode checks apply (M4, see
+ * ngx_http_zstd_open_dict_file()): owned by neither root nor the
+ * loading principal, or writable by group or other.
+ *
+ * The walk's whole point is to make resolution of the ENTIRE path
+ * symlink-free and TOCTOU-safe, not just the leaf -- so a directory
+ * component left unvetted is the same class of gap M3 closed for
+ * symlinks. A local user who owns, or can write into, an ancestor
+ * directory can rename() a root-owned 0644 file into the leaf position
+ * and pass both leaf checks while still having fully steered which
+ * bytes strict mode loads. Deliberately NO sticky-bit exemption: a
+ * sticky world-writable ancestor (a /tmp-style directory) still lets an
+ * unprivileged user create the next path component, which is exactly
+ * the steering this function exists to refuse.
+ *
+ * `label` names the component for the diagnostic ("/" for the root fd,
+ * the component bytes otherwise); `path` is the accumulated path
+ * so far, for the same purpose the leaf checks use `path` for.
+ */
+static ngx_int_t
+ngx_http_zstd_check_strict_dir(ngx_conf_t *cf, int fd, const char *label,
+    ngx_str_t *path)
+{
+    struct stat  st;
+
+    if (fstat(fd, &st) < 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           "fstat(\"%s\") failed while resolving \"%V\" "
+                           "under \"zstd_dict_strict_path on\"",
+                           label, path);
+        return NGX_ERROR;
+    }
+
+    if (st.st_uid != 0 && st.st_uid != geteuid()) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "directory component \"%s\" of \"%V\" is owned "
+                           "by uid %uD, neither root nor the loading "
+                           "principal (uid %uD); refused by "
+                           "\"zstd_dict_strict_path on\", because that "
+                           "owner can rename a different file into this "
+                           "directory and steer what a later privileged "
+                           "reload loads. Deploy dictionaries under a "
+                           "directory tree owned and writable only by the "
+                           "deploying principal (the default, "
+                           "\"zstd_dict_strict_path off;\", leaf-checks "
+                           "the file instead)",
+                           label, path, (uint32_t) st.st_uid,
+                           (uint32_t) geteuid());
+        return NGX_ERROR;
+    }
+
+    if (st.st_mode & (S_IWGRP | S_IWOTH)) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "directory component \"%s\" of \"%V\" is "
+                           "writable by group or other (no sticky-bit "
+                           "exemption -- a sticky world-writable directory "
+                           "still lets an unprivileged user create the "
+                           "next component); refused by "
+                           "\"zstd_dict_strict_path on\". Deploy "
+                           "dictionaries under a directory tree owned and "
+                           "writable only by the deploying principal",
+                           label, path);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
 static ngx_fd_t
 ngx_http_zstd_open_dict_strict(ngx_conf_t *cf, ngx_str_t *path, int flags)
 {
@@ -4110,6 +4290,18 @@ ngx_http_zstd_open_dict_strict(ngx_conf_t *cf, ngx_str_t *path, int flags)
         ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                            "open(\"/\") failed while resolving \"%V\" "
                            "under \"zstd_dict_strict_path on\"", path);
+        return NGX_INVALID_FILE;
+    }
+
+    /*
+     * The root fd is a walked component like any other -- vet it with
+     * the same rule before it is trusted as the base of every openat()
+     * below. On most systems "/" is root-owned 0755 and this is a
+     * no-op; a container or chroot base that fails this is exactly the
+     * layout strict mode is meant to refuse.
+     */
+    if (ngx_http_zstd_check_strict_dir(cf, fd, "/", path) != NGX_OK) {
+        ngx_close_file(fd);
         return NGX_INVALID_FILE;
     }
 
@@ -4218,6 +4410,18 @@ ngx_http_zstd_open_dict_strict(ngx_conf_t *cf, ngx_str_t *path, int flags)
 
             if (last) {
                 return fd;
+            }
+
+            /*
+             * `next`/`fd` is a directory fd that will be trusted as the
+             * base for the next openat() -- vet it before it is used
+             * for anything else, same rule as the root fd above.
+             */
+            if (ngx_http_zstd_check_strict_dir(cf, fd, (char *) comp, path)
+                != NGX_OK)
+            {
+                ngx_close_file(fd);
+                return NGX_INVALID_FILE;
             }
 
             start = p;
@@ -5034,9 +5238,24 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
     ngx_conf_merge_str_value(conf->bypass_vary, prev->bypass_vary, "");
 
+    /*
+     * Sort an array owned by this location once, after its last
+     * zstd_dcz_dict_file push and before inheritance is resolved. An
+     * inheriting child must not re-sort the parent's shared array. No
+     * pointer into the array is captured before this point --
+     * ngx_http_zstd_dcz_negotiate() takes &dicts[i]/&dicts[mid] only at
+     * request time, long after config load finishes -- so re-ordering
+     * the elements here cannot invalidate anything a caller is holding.
+     * See ngx_http_zstd_dcz_dict_cmp() for why the order is unambiguous.
+     */
+    if (conf->dcz_dicts != NGX_CONF_UNSET_PTR) {
+        ngx_http_zstd_dcz_dict_sort(conf->dcz_dicts);
+    }
+
     /* a location that declares its own zstd_dcz_dict_file list replaces the
      * inherited one wholesale (standard nginx array-directive semantics) */
     ngx_conf_merge_ptr_value(conf->dcz_dicts, prev->dcz_dicts, NULL);
+
     ngx_conf_merge_value(conf->dcz_assume_secure, prev->dcz_assume_secure, 0);
 
     /* Validate the paired bypass/cache-vary directives after inheritance. */

@@ -15,6 +15,10 @@
  * does not exist to diff against.
  */
 #include "../../fuzz/ngx_shim.h"
+
+#define NGX_HTTP_ZSTD_TEST_COUNT_CODING_WEIGHT
+static ngx_uint_t  ngx_http_zstd_test_coding_weight_calls;
+
 #include "../../fuzz/generated_parser.inc"
 
 #include <stdio.h>
@@ -119,6 +123,12 @@ request_decide(const char *first, const char *second)
 int
 main(void)
 {
+    ngx_http_zstd_test_coding_weight_calls = 0;
+    check(request_decide("gzip", "br") == NGX_DECLINED,
+          "two non-matching fields decline");
+    check(ngx_http_zstd_test_coding_weight_calls == 2,
+          "each field is parsed exactly once");
+
     check(request_decide("gzip", "zstd") == NGX_OK,
           "legacy list: gzip then zstd accepts");
     check(request_decide("*", "zstd;q=0") == NGX_DECLINED,
