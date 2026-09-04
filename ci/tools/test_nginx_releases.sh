@@ -44,6 +44,9 @@ case "$url" in
         case "${NGINX_FEED:-json}" in
             no-even)
                 echo '[{"tag_name": "release-1.31.5", "draft": false, "prerelease": false}]' ;;
+            dead)
+                echo "curl: (22) stub: feed unreachable" >&2
+                exit 22 ;;
             endless)
                 echo "["
                 for i in $(seq 1 30); do
@@ -94,9 +97,13 @@ say "== the page cap is a refusal =="
 run endless mainline
 [ "$rc" -ne 0 ] && [ -z "$out" ] && grep -q 'did not end within' <<<"$err" && ok "endless feed: refused at the cap, nothing printed" || bad "endless: rc=$rc out='$out' $err"
 
-say "== bad argument =="
+say "== bad argument, and an unreachable feed =="
 run json weekly
 [ "$rc" -eq 2 ] && grep -q '^usage:' <<<"$err" && ok "unknown line name: usage, status 2" || bad "usage: rc=$rc $err"
+run dead weekly
+[ "$rc" -eq 2 ] && grep -q '^usage:' <<<"$err" && ok "unknown line name is usage (2) even when the feed is unreachable: the selector is checked first" || bad "usage-dead: rc=$rc $err"
+run dead mainline
+[ "$rc" -eq 1 ] && [ -z "$out" ] && grep -q 'could not query' <<<"$err" && ok "unreachable feed: status 1, named, nothing printed" || bad "dead: rc=$rc out='$out' $err"
 
 say "== GH_TOKEN goes through curl's stdin, never its argv =="
 argv_log="$work/argv"

@@ -102,15 +102,16 @@ for file in \
 done
 
 # The resolver reads the GitHub releases feed with curl and parses it with
-# python3; both must be installed by the bootstrap step, not assumed from
-# the runner image.
+# python3; both must be installed by the BOOTSTRAP step itself (the exact
+# line that step runs), not by a later job-specific install that a
+# package scan of the whole file would also accept.
 for file in \
   .github/workflows/asan.yml \
   .github/workflows/build-test.yml \
   .github/workflows/ci-deep.yml \
   .github/workflows/codeql.yml \
   .github/workflows/valgrind.yml; do
-  require_apt_package "$file" python3
+  require "$file" 'apt-get install -y ca-certificates curl python3'
 done
 
 # Detached nginx signatures are verified by these fallback workflows.  Do not

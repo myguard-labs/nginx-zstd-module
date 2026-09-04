@@ -118,7 +118,8 @@ nginx_lines() {
 # feed did not show is fatal by name.
 nginx_release() {
     local stable mainline
-    read -r stable mainline < <(nginx_lines) || return 1
+    # The selector is checked before the feed is asked, so a bad name is
+    # usage (status 2) whether or not the API is reachable.
     case "$1" in
         stable|mainline|both) ;;
         *)
@@ -126,6 +127,7 @@ nginx_release() {
             return 2
             ;;
     esac
+    read -r stable mainline < <(nginx_lines) || return 1
     if [ "$1" != mainline ] && [ "$stable" = "-" ]; then
         echo "FATAL: the nginx release feed shows no stable (even-minor) release" >&2
         return 1
