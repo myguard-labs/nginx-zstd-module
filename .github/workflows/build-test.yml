@@ -502,6 +502,13 @@ jobs:
           # window verdict without standing up nginx. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_static_probe_unit.sh
 
+      - name: A33 P7/P9/P10 bounded-scan performance witnesses
+        run: |
+          # Verbatim production helpers checked against independent behavior
+          # oracles plus deterministic work-count/source-shape controls. This
+          # keeps the micro-optimizations falsifiable without wall-clock noise.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_perf_micro_witnesses.sh
+
       - name: freeCCtxParams six-exit unit fixture (config-time leak-on-error)
         run: |
           # ngx_http_zstd_estimate_cctx_memory() runs during "nginx -t"

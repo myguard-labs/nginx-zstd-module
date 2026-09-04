@@ -51,6 +51,7 @@ typedef struct {
 typedef struct {
     ngx_str_t         key;
     ngx_str_t         value;
+    u_char           *lowcase_key;
 } ngx_table_elt_t;
 
 typedef struct {
@@ -61,12 +62,30 @@ typedef struct {
     ngx_http_headers_in_t  headers_in;
 } ngx_http_request_t;
 
-#define ngx_strncasecmp(s1, s2, n)  strncasecmp((const char *) (s1),        \
-                                                (const char *) (s2), (n))
+static int  stub_memcmp_calls;
+static int  stub_strncasecmp_calls;
+
+static int
+stub_memcmp(const void *s1, const void *s2, size_t n)
+{
+    stub_memcmp_calls++;
+    return memcmp(s1, s2, n);
+}
+
+static int
+stub_strncasecmp(const u_char *s1, const u_char *s2, size_t n)
+{
+    stub_strncasecmp_calls++;
+    return strncasecmp((const char *) s1, (const char *) s2, n);
+}
+
+#define ngx_strncasecmp(s1, s2, n)  stub_strncasecmp((s1), (s2), (n))
+#define ngx_memcmp(s1, s2, n)       stub_memcmp((s1), (s2), (n))
 
 /* Stubbed: what the dcz coding weight would report. Set per test case. */
 static ngx_uint_t   stub_dcz_weight;
 static int          stub_weight_calls;
+static int          stub_supply_lowcase = 1;
 
 static ngx_uint_t
 ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
@@ -114,10 +133,16 @@ fill_headers(ngx_table_elt_t *all, ngx_uint_t total, ngx_uint_t n_avail,
         if ((n_avail > 0 && i == 0) || i >= first_tail) {
             all[i].key.data = (u_char *) "Available-Dictionary";
             all[i].key.len = sizeof("Available-Dictionary") - 1;
+            all[i].lowcase_key = stub_supply_lowcase
+                                     ? (u_char *) "available-dictionary"
+                                     : NULL;
 
         } else {
             all[i].key.data = (u_char *) "Accept";
             all[i].key.len = sizeof("Accept") - 1;
+            all[i].lowcase_key = stub_supply_lowcase
+                                     ? (u_char *) "accept"
+                                     : NULL;
         }
     }
 }
@@ -182,6 +207,8 @@ run_case(ngx_uint_t n_avail, ngx_uint_t n_noise, ngx_uint_t parts,
     memset(&r, 0, sizeof(r));
     stub_dcz_weight = weight;
     stub_weight_calls = 0;
+    stub_memcmp_calls = 0;
+    stub_strncasecmp_calls = 0;
 
     if (parts < 1) {
         parts = 1;
@@ -198,6 +225,20 @@ run_case(ngx_uint_t n_avail, ngx_uint_t n_noise, ngx_uint_t parts,
     result = ngx_http_zstd_static_should_bypass(&r);
     free(chain);
     free(all);
+
+    return result;
+}
+
+
+static ngx_uint_t
+run_case_without_lowcase(ngx_uint_t n_avail, ngx_uint_t n_noise,
+    ngx_uint_t parts, ngx_uint_t weight)
+{
+    ngx_uint_t  result;
+
+    stub_supply_lowcase = 0;
+    result = run_case(n_avail, n_noise, parts, weight);
+    stub_supply_lowcase = 1;
 
     return result;
 }
@@ -228,6 +269,24 @@ main(void)
           run_case(1, 5, 3, 1), 1);
     check("1 Available-Dictionary, weight==0 -> no bypass",
           run_case(1, 0, 1, 0), 0);
+
+    /* Module-inserted headers may omit lowcase_key; the mixed-case original
+     * key must retain the same case-insensitive behavior on that path. */
+    check("1 Available-Dictionary, NULL lowcase key -> bypass",
+          run_case_without_lowcase(1, 2, 2, 1), 1);
+    check("2 Available-Dictionary, NULL lowcase keys -> no bypass",
+          run_case_without_lowcase(2, 2, 2, 1), 0);
+    check("NULL lowcase path does not use memcmp",
+          (ngx_uint_t) stub_memcmp_calls, 0);
+    check("NULL lowcase path uses case folding",
+          (ngx_uint_t) stub_strncasecmp_calls, 2);
+
+    check("1 populated lowcase key still bypasses",
+          run_case(1, 2, 2, 1), 1);
+    check("populated lowcase path uses memcmp",
+          (ngx_uint_t) stub_memcmp_calls, 1);
+    check("populated lowcase path skips case folding",
+          (ngx_uint_t) stub_strncasecmp_calls, 0);
 
     /* No header at all: nothing to serve dcz for. */
     check("0 Available-Dictionary -> no bypass", run_case(0, 3, 1, 1), 0);
