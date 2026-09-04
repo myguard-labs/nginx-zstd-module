@@ -1787,3 +1787,60 @@ ETag: "5be17d33-e85"
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 60: valid sidecar probe verdict is reused with open_file_cache
+# repeat_each(3) sends the same sidecar through one worker three times. The
+# first request probes; requests two and three must emit the debug witness.
+# Removing the GOOD-cache lookup keeps the response correct but makes this
+# exact-count oracle empty.
+--- config
+    error_log logs/error.log debug;
+    open_file_cache max=10 inactive=60s;
+    open_file_cache_valid 60s;
+    location /test {
+        zstd_static on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- grep_error_log eval
+qr/cached good frame verdict/
+--- grep_error_log_out eval
+["",
+ "cached good frame verdict\n",
+ "cached good frame verdict\ncached good frame verdict\n"]
+--- no_error_log
+[alert]
+
+
+
+=== TEST 61: valid verdict is not retained when open_file_cache is off
+# The standalone unit can pass good_valid=0 directly; this integration arm
+# proves the handler derives that value from nginx's real off sentinel.  A
+# positive verdict surviving here would outlive the fresh descriptor/stat
+# contract that disabling open_file_cache requests.
+--- config
+    error_log logs/error.log debug;
+    open_file_cache off;
+    location /test {
+        zstd_static on;
+        root ../suite;
+    }
+--- request
+GET /test
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- grep_error_log eval
+qr/cached good frame verdict/
+--- grep_error_log_out eval
+["", "", ""]
+--- no_error_log
+[alert]

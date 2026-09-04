@@ -61,11 +61,31 @@ typedef struct {
 #define ngx_memcpy(a, b, n)  memcpy(a, b, n)
 
 /* The extraction carries the declarations, the table and both helpers. */
+#if defined(TEST_EXPIRED_ENTRY_MUTANT)
+#include "generated_verdict_cache_expired_mutant.inc"
+#elif defined(TEST_PATH_COMPARE_MUTANT)
+#include "generated_verdict_cache_path_mutant.inc"
+#else
 #include "generated_verdict_cache.inc"
+#endif
 
 /* --- harness ---------------------------------------------------------- */
 
 static int  failures;
+static time_t now = 1700000100;
+static time_t good_valid = 60;
+
+static ngx_uint_t
+test_cached_verdict(ngx_str_t *path, ngx_open_file_info_t *of)
+{
+    return ngx_http_zstd_static_cached_verdict(path, of, now, good_valid);
+}
+
+static void
+test_remember(ngx_str_t *path, ngx_open_file_info_t *of, ngx_uint_t verdict)
+{
+    ngx_http_zstd_static_remember(path, of, verdict, now, good_valid);
+}
 
 static void
 check(int ok, const char *name)
@@ -90,9 +110,10 @@ mkpath(const char *s)
 static void
 reset_cache(void)
 {
-    memset(ngx_http_zstd_static_bad_cache, 0,
-           sizeof(ngx_http_zstd_static_bad_cache));
-    ngx_http_zstd_static_bad_cache_next = 0;
+    memset(ngx_http_zstd_static_verdict_cache, 0,
+           sizeof(ngx_http_zstd_static_verdict_cache));
+    ngx_http_zstd_static_verdict_cache_next = 0;
+    ngx_http_zstd_static_verdict_cache_count = 0;
 }
 
 int
@@ -104,7 +125,7 @@ main(void)
     char                  buf[64];
 
     p = mkpath("/srv/www/app.js.zst");
-    other = mkpath("/srv/www/other.js.zst");
+    other = mkpath("/srv/www/foo.js.zst");
 
     of.uniq = 0x1122334455667788ULL;
     of.mtime = 1700000000;
@@ -113,14 +134,14 @@ main(void)
     /* --- a cold cache must not answer -------------------------------- */
 
     reset_cache();
-    check(ngx_http_zstd_static_cached_verdict(&p, &of)
+    check(test_cached_verdict(&p, &of)
               == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
           "a cold cache returns VERDICT_NONE, so the probe runs");
 
     /* --- a GOOD verdict is returned verbatim on a hit ----------------- */
 
-    ngx_http_zstd_static_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
-    check(ngx_http_zstd_static_cached_verdict(&p, &of)
+    test_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+    check(test_cached_verdict(&p, &of)
               == NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD,
           "a hit on an unchanged file returns the same GOOD verdict");
 
@@ -129,17 +150,65 @@ main(void)
      * or downgrade the entry. A lookup that mutated state would make the
      * second request on a hot file re-probe.
      */
-    check(ngx_http_zstd_static_cached_verdict(&p, &of)
+    check(test_cached_verdict(&p, &of)
               == NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD,
           "a second lookup returns GOOD too -- the lookup does not consume");
+
+    now += 59;
+    check(test_cached_verdict(&p, &of)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD,
+          "a GOOD verdict remains valid just before open_file_cache_valid");
+    now++;
+    check(test_cached_verdict(&p, &of)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
+          "a GOOD verdict expires at open_file_cache_valid");
+    check(ngx_http_zstd_static_verdict_cache_count == 1,
+          "expiry does not shrink the populated-slot high-water mark");
+
+    test_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+    check(test_cached_verdict(&p, &of)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD,
+          "a fresh verdict is visible after an expired duplicate");
+
+    reset_cache();
+    now = 1700000100;
+    test_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+    now--;
+    check(test_cached_verdict(&p, &of)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
+          "a clock rollback invalidates a future-dated GOOD verdict");
+    test_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+    check(test_cached_verdict(&p, &of)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD,
+          "a fresh verdict is visible after clock-rollback invalidation");
+    now = 1700000100;
+
+    reset_cache();
+    good_valid = 0;
+    test_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+    check(test_cached_verdict(&p, &of)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
+          "a GOOD verdict is not cached when open_file_cache is disabled");
+    check(ngx_http_zstd_static_verdict_cache_next == 0,
+          "disabled positive caching consumes no cache slot");
+    check(ngx_http_zstd_static_verdict_cache_count == 0,
+          "disabled positive caching leaves the high-water mark empty");
+    good_valid = 60;
 
     /* --- BAD and GOOD do not alias ----------------------------------- */
 
     reset_cache();
-    ngx_http_zstd_static_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_BAD);
-    check(ngx_http_zstd_static_cached_verdict(&p, &of)
+    test_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_BAD);
+    check(test_cached_verdict(&p, &of)
               == NGX_HTTP_ZSTD_STATIC_VERDICT_BAD,
           "a BAD verdict comes back as BAD, not as GOOD");
+    good_valid = 0;
+    now += 1000;
+    check(test_cached_verdict(&p, &of)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_BAD,
+          "open_file_cache coupling does not expire established BAD verdicts");
+    good_valid = 60;
+    now = 1700000100;
 
     /* --- every key field invalidates a GOOD verdict -------------------
      *
@@ -149,28 +218,28 @@ main(void)
      */
 
     reset_cache();
-    ngx_http_zstd_static_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+    test_remember(&p, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
     mutated = of;
     mutated.mtime = of.mtime + 1;
-    check(ngx_http_zstd_static_cached_verdict(&p, &mutated)
+    check(test_cached_verdict(&p, &mutated)
               == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
           "a changed mtime invalidates the cached GOOD verdict");
 
     mutated = of;
     mutated.size = of.size + 1;
-    check(ngx_http_zstd_static_cached_verdict(&p, &mutated)
+    check(test_cached_verdict(&p, &mutated)
               == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
           "a changed size invalidates the cached GOOD verdict");
 
     mutated = of;
     mutated.uniq = of.uniq ^ 1;
-    check(ngx_http_zstd_static_cached_verdict(&p, &mutated)
+    check(test_cached_verdict(&p, &mutated)
               == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
           "a changed uniq (inode) invalidates the cached GOOD verdict");
 
-    check(ngx_http_zstd_static_cached_verdict(&other, &of)
+    check(test_cached_verdict(&other, &of)
               == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
-          "a different path does not hit another file's GOOD verdict");
+          "an equal-length different path does not reuse a GOOD verdict");
 
     /*
      * Length, not just prefix. A comparison that memcmp'd only the
@@ -180,7 +249,7 @@ main(void)
     {
         ngx_str_t  prefix = mkpath("/srv/www/app.js");
 
-        check(ngx_http_zstd_static_cached_verdict(&prefix, &of)
+        check(test_cached_verdict(&prefix, &of)
                   == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
               "a path that is a prefix of a cached one does not hit");
     }
@@ -189,7 +258,7 @@ main(void)
 
     reset_cache();
 
-    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS * 3; i++) {
+    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS * 3; i++) {
         ngx_str_t             q;
         ngx_open_file_info_t  qof;
 
@@ -200,8 +269,7 @@ main(void)
         qof.mtime = 1700000000;
         qof.size = 4096 + (off_t) i;
 
-        ngx_http_zstd_static_remember(&q, &qof,
-                                      NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+        test_remember(&q, &qof, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
     }
 
     /*
@@ -211,18 +279,21 @@ main(void)
      * worker-lifetime defect this check exists to catch.
      */
     hits = 0;
-    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS; i++) {
-        if (ngx_http_zstd_static_bad_cache[i].valid
+    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS; i++) {
+        if (ngx_http_zstd_static_verdict_cache[i].valid
             != NGX_HTTP_ZSTD_STATIC_VERDICT_NONE)
         {
             hits++;
         }
     }
 
-    check(hits == NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS,
+    check(hits == NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS,
           "3x SLOTS inserts fill exactly SLOTS entries -- the table is bounded");
-    check(ngx_http_zstd_static_bad_cache_next == 0,
+    check(ngx_http_zstd_static_verdict_cache_next == 0,
           "the round-robin cursor wraps back to 0, it does not run past the end");
+    check(ngx_http_zstd_static_verdict_cache_count
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS,
+          "the populated-slot high-water mark is capped at SLOTS");
 
     /*
      * The LAST SLOTS files inserted are the ones retained; the earliest
@@ -234,14 +305,14 @@ main(void)
         ngx_open_file_info_t  qof;
         unsigned              last;
 
-        last = NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS * 3 - 1;
+        last = NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS * 3 - 1;
         snprintf(buf, sizeof(buf), "/srv/www/f%u.zst", last);
         q = mkpath(buf);
         qof.uniq = 0x1000 + last;
         qof.mtime = 1700000000;
         qof.size = 4096 + (off_t) last;
 
-        check(ngx_http_zstd_static_cached_verdict(&q, &qof)
+        check(test_cached_verdict(&q, &qof)
                   == NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD,
               "the most recently inserted file is still cached after wraparound");
 
@@ -250,7 +321,7 @@ main(void)
         qof.uniq = 0x1000;
         qof.size = 4096;
 
-        check(ngx_http_zstd_static_cached_verdict(&q, &qof)
+        check(test_cached_verdict(&q, &qof)
                   == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
               "the earliest inserted file was evicted, not retained forever");
     }
@@ -266,13 +337,12 @@ main(void)
         longpath[sizeof(longpath) - 1] = '\0';
         q = mkpath(longpath);
 
-        ngx_http_zstd_static_remember(&q, &of,
-                                      NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+        test_remember(&q, &of, NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
 
-        check(ngx_http_zstd_static_bad_cache[0].valid
+        check(ngx_http_zstd_static_verdict_cache[0].valid
                   == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
               "a path at or above NGX_MAX_PATH is not stored (no overflow)");
-        check(ngx_http_zstd_static_cached_verdict(&q, &of)
+        check(test_cached_verdict(&q, &of)
                   == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
               "an overlong path always misses, retaining the uncached path");
     }

@@ -147,15 +147,11 @@
  * non-directio hit is cached too, where it merely saves a buffered read.
  *
  * The exact path plus (uniq, mtime, size) form the identity: changing any of
- * them forces a fresh probe. Deliberately NOT a TTL -- an inode, mtime or
- * size change invalidates immediately, where a TTL would keep serving a
- * stale verdict for its whole window. The one mutation this identity cannot
- * see is an in-place overwrite preserving inode, size AND mtime to the
- * filesystem's timestamp granularity; that requires deliberately restoring
- * the timestamp, is equally invisible to nginx's own open_file_cache (which
- * keys the cached stat and open fd on the same identity and would go on
- * serving the old descriptor regardless of what this cache decided), and the
- * negative side has always accepted the same exposure.
+ * them forces a fresh probe. A positive verdict additionally expires no
+ * later than open_file_cache_valid, and is not cached when open_file_cache is
+ * disabled. This bounds the same-size, same-timestamp in-place rewrite case
+ * that stat identity alone cannot observe. Negative verdicts retain their
+ * established identity-based lifetime.
  *
  * ONE table with a verdict flag rather than two parallel arrays: each entry
  * is NGX_MAX_PATH-dominated, so a second table would double a worker's fixed
@@ -163,7 +159,7 @@
  * avoids an unbounded worker-lifetime allocation surface; overlong paths
  * simply retain the established uncached behaviour.
  */
-#define NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS  64
+#define NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS  64
 
 #if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
 
@@ -174,22 +170,24 @@
 typedef struct {
     ngx_file_uniq_t  uniq;
     time_t      mtime;
+    time_t      checked;
     off_t       size;
     size_t      len;
     ngx_uint_t  valid;      /* NGX_HTTP_ZSTD_STATIC_VERDICT_* */
     u_char      path[NGX_MAX_PATH];
-} ngx_http_zstd_static_bad_cache_t;
+} ngx_http_zstd_static_verdict_cache_t;
 
-static ngx_http_zstd_static_bad_cache_t
-    ngx_http_zstd_static_bad_cache[NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS];
-static ngx_uint_t  ngx_http_zstd_static_bad_cache_next;
+static ngx_http_zstd_static_verdict_cache_t
+    ngx_http_zstd_static_verdict_cache[
+        NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS];
+static ngx_uint_t  ngx_http_zstd_static_verdict_cache_next;
 /*
- * Count of valid entries ever remembered, capped at SLOTS.  Lets the
- * common never-populated path (this worker has not yet hit a truncated
- * or mismatched .zst) skip the ring scan entirely instead of walking
- * NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS empty slots on every request.
+ * High-water mark of slots populated in this worker, capped at SLOTS.
+ * Expiring a GOOD verdict clears its validity but does not decrement this:
+ * the round-robin cursor still fills each slot in order, and a high-water
+ * scan avoids hiding a later refreshed entry behind an expired hole.
  */
-static ngx_uint_t  ngx_http_zstd_static_bad_cache_count;
+static ngx_uint_t  ngx_http_zstd_static_verdict_cache_count;
 
 /*
  * Log rate limit for the directio hard-error probe arm (see the
@@ -274,7 +272,6 @@ ngx_http_zstd_static_dio_err_should_log(ngx_log_t *log, ssize_t n)
 
     return (ngx_uint_t) -1;
 }
-
 #endif
 
 
@@ -854,21 +851,22 @@ ngx_http_zstd_static_should_bypass(ngx_http_request_t *r)
  * inserted at the round-robin cursor like any other.
  */
 static ngx_uint_t
-ngx_http_zstd_static_cached_verdict(ngx_str_t *path, ngx_open_file_info_t *of)
+ngx_http_zstd_static_cached_verdict(ngx_str_t *path, ngx_open_file_info_t *of,
+    time_t now, time_t good_valid)
 {
-    ngx_uint_t                         i;
-    ngx_http_zstd_static_bad_cache_t  *entry;
+    ngx_uint_t                             i;
+    ngx_http_zstd_static_verdict_cache_t  *entry;
 
     if (path->len >= NGX_MAX_PATH) {
         return NGX_HTTP_ZSTD_STATIC_VERDICT_NONE;
     }
 
-    if (ngx_http_zstd_static_bad_cache_count == 0) {
+    if (ngx_http_zstd_static_verdict_cache_count == 0) {
         return NGX_HTTP_ZSTD_STATIC_VERDICT_NONE;
     }
 
-    for (i = 0; i < ngx_http_zstd_static_bad_cache_count; i++) {
-        entry = &ngx_http_zstd_static_bad_cache[i];
+    for (i = 0; i < ngx_http_zstd_static_verdict_cache_count; i++) {
+        entry = &ngx_http_zstd_static_verdict_cache[i];
 
         if (entry->valid != NGX_HTTP_ZSTD_STATIC_VERDICT_NONE
             && entry->uniq == of->uniq
@@ -876,6 +874,21 @@ ngx_http_zstd_static_cached_verdict(ngx_str_t *path, ngx_open_file_info_t *of)
             && entry->len == path->len
             && ngx_memcmp(entry->path, path->data, path->len) == 0)
         {
+            if (entry->valid == NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD
+                && (good_valid == 0 || now < entry->checked
+                    || now - entry->checked >= good_valid))
+            {
+                /*
+                 * Retire the stale entry before continuing.  The caller
+                 * records a freshly probed verdict at the ring cursor; if
+                 * this matching stale entry remained live and returned
+                 * immediately, it could mask that newer duplicate on every
+                 * lookup until the cursor eventually evicted it.
+                 */
+                entry->valid = NGX_HTTP_ZSTD_STATIC_VERDICT_NONE;
+                continue;
+            }
+
             return entry->valid;
         }
     }
@@ -891,36 +904,39 @@ ngx_http_zstd_static_cached_verdict(ngx_str_t *path, ngx_open_file_info_t *of)
  */
 static void
 ngx_http_zstd_static_remember(ngx_str_t *path, ngx_open_file_info_t *of,
-    ngx_uint_t verdict)
+    ngx_uint_t verdict, time_t now, time_t good_valid)
 {
-    ngx_http_zstd_static_bad_cache_t  *entry;
+    ngx_http_zstd_static_verdict_cache_t  *entry;
 
-    if (path->len >= NGX_MAX_PATH) {
+    if (path->len >= NGX_MAX_PATH
+        || (verdict == NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD && good_valid == 0))
+    {
         return;
     }
 
-    entry = &ngx_http_zstd_static_bad_cache[
-                ngx_http_zstd_static_bad_cache_next];
+    entry = &ngx_http_zstd_static_verdict_cache[
+                ngx_http_zstd_static_verdict_cache_next];
     entry->uniq = of->uniq;
     entry->mtime = of->mtime;
+    entry->checked = now;
     entry->size = of->size;
     entry->len = path->len;
     ngx_memcpy(entry->path, path->data, path->len);
     if (entry->valid == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE) {
-        if (ngx_http_zstd_static_bad_cache_count
-            < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS)
+        if (ngx_http_zstd_static_verdict_cache_count
+            < NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS)
         {
-            ngx_http_zstd_static_bad_cache_count++;
+            ngx_http_zstd_static_verdict_cache_count++;
         }
     }
 
     entry->valid = verdict;
 
-    ngx_http_zstd_static_bad_cache_next++;
-    if (ngx_http_zstd_static_bad_cache_next
-        == NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS)
+    ngx_http_zstd_static_verdict_cache_next++;
+    if (ngx_http_zstd_static_verdict_cache_next
+        == NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS)
     {
-        ngx_http_zstd_static_bad_cache_next = 0;
+        ngx_http_zstd_static_verdict_cache_next = 0;
     }
 }
 
@@ -1653,6 +1669,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     ngx_int_t                     rc;
     ngx_uint_t                    accepts, malformed, verdict;
     ngx_uint_t                    level;
+    time_t                        good_valid;
     size_t                        root;
     ngx_str_t                     path;
     ngx_log_t                    *log;
@@ -1780,7 +1797,10 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 #endif /* !NGX_WIN32 */
 
 #if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
-    verdict = ngx_http_zstd_static_cached_verdict(&path, &of);
+    good_valid = clcf->open_file_cache == NULL
+                     ? 0 : clcf->open_file_cache_valid;
+    verdict = ngx_http_zstd_static_cached_verdict(&path, &of, ngx_time(),
+                                                   good_valid);
 
     if (verdict == NGX_HTTP_ZSTD_STATIC_VERDICT_BAD) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
@@ -1820,13 +1840,14 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         if (rc != NGX_OK) {
             if (malformed) {
                 ngx_http_zstd_static_remember(&path, &of,
-                                          NGX_HTTP_ZSTD_STATIC_VERDICT_BAD);
+                    NGX_HTTP_ZSTD_STATIC_VERDICT_BAD, ngx_time(), good_valid);
             }
             return rc;
         }
 
         ngx_http_zstd_static_remember(&path, &of,
-                                      NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD);
+                                      NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD,
+                                      ngx_time(), good_valid);
     }
 #endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */
 

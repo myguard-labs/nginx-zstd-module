@@ -57,22 +57,27 @@ typedef struct {
 #define ngx_strncasecmp(s1, s2, n)  \
     strncasecmp((const char *) (s1), (const char *) (s2), (n))
 
-#define NGX_MAX_PATH                           256
-#define NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS  64
+#define NGX_MAX_PATH                               256
+#define NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS  64
+#define NGX_HTTP_ZSTD_STATIC_VERDICT_NONE         0
+#define NGX_HTTP_ZSTD_STATIC_VERDICT_BAD          1
+#define NGX_HTTP_ZSTD_STATIC_VERDICT_GOOD         2
 
 typedef struct {
     ngx_file_uniq_t  uniq;
     time_t           mtime;
+    time_t           checked;
     off_t            size;
     size_t           len;
     ngx_uint_t       valid;
     u_char           path[NGX_MAX_PATH];
-} ngx_http_zstd_static_bad_cache_t;
+} ngx_http_zstd_static_verdict_cache_t;
 
-static ngx_http_zstd_static_bad_cache_t
-    ngx_http_zstd_static_bad_cache[NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS];
-static ngx_uint_t  ngx_http_zstd_static_bad_cache_next;
-static ngx_uint_t  ngx_http_zstd_static_bad_cache_count;
+static ngx_http_zstd_static_verdict_cache_t
+    ngx_http_zstd_static_verdict_cache[
+        NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS];
+static ngx_uint_t  ngx_http_zstd_static_verdict_cache_next;
+static ngx_uint_t  ngx_http_zstd_static_verdict_cache_count;
 static ngx_uint_t  memcmp_calls;
 
 static int
@@ -85,10 +90,10 @@ counted_memcmp(const void *a, const void *b, size_t n)
 #define ngx_memcmp  counted_memcmp
 #define ngx_memcpy  memcpy
 
-#ifdef TEST_BAD_CACHE_MUTANT
-#include "generated_bad_cache_mutant.inc"
+#ifdef TEST_VERDICT_CACHE_MUTANT
+#include "generated_verdict_cache_work_mutant.inc"
 #else
-#include "generated_bad_cache.inc"
+#include "generated_verdict_cache_work.inc"
 #endif
 
 #include "generated_vary_find_tokens.inc"
@@ -268,26 +273,27 @@ test_cache_control_behavior(void)
 }
 
 static void
-fill_bad_entry(ngx_uint_t i, const ngx_str_t *path,
+fill_verdict_entry(ngx_uint_t i, const ngx_str_t *path,
     const ngx_open_file_info_t *of)
 {
-    ngx_http_zstd_static_bad_cache[i].valid = 1;
-    ngx_http_zstd_static_bad_cache[i].uniq = of->uniq;
-    ngx_http_zstd_static_bad_cache[i].mtime = of->mtime;
-    ngx_http_zstd_static_bad_cache[i].size = of->size;
-    ngx_http_zstd_static_bad_cache[i].len = path->len;
-    memcpy(ngx_http_zstd_static_bad_cache[i].path, "other", path->len);
+    ngx_http_zstd_static_verdict_cache[i].valid =
+        NGX_HTTP_ZSTD_STATIC_VERDICT_BAD;
+    ngx_http_zstd_static_verdict_cache[i].uniq = of->uniq;
+    ngx_http_zstd_static_verdict_cache[i].mtime = of->mtime;
+    ngx_http_zstd_static_verdict_cache[i].size = of->size;
+    ngx_http_zstd_static_verdict_cache[i].len = path->len;
+    memcpy(ngx_http_zstd_static_verdict_cache[i].path, "other", path->len);
 }
 
 static void
-test_bad_cache_work_count(void)
+test_verdict_cache_work_count(void)
 {
     ngx_open_file_info_t  of;
     ngx_str_t             path;
     ngx_uint_t            i;
 
-    memset(ngx_http_zstd_static_bad_cache, 0,
-           sizeof(ngx_http_zstd_static_bad_cache));
+    memset(ngx_http_zstd_static_verdict_cache, 0,
+           sizeof(ngx_http_zstd_static_verdict_cache));
     path.data = (u_char *) "target";
     path.len = sizeof("target") - 1;
     of.uniq = 7;
@@ -296,32 +302,36 @@ test_bad_cache_work_count(void)
 
     /* Poison every slot beyond count. A count-bounded implementation must
      * not inspect them; the former fixed-64 walk makes 64 memcmp calls. */
-    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS; i++) {
-        fill_bad_entry(i, &path, &of);
+    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS; i++) {
+        fill_verdict_entry(i, &path, &of);
     }
-    ngx_http_zstd_static_bad_cache_count = 0;
+    ngx_http_zstd_static_verdict_cache_count = 0;
     memcmp_calls = 0;
-    check(ngx_http_zstd_static_bad_cached(&path, &of) == 0,
-          "empty bad-cache misses");
-    check(memcmp_calls == 0, "empty bad-cache inspects zero slots");
+    check(ngx_http_zstd_static_cached_verdict(&path, &of, 100, 60)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
+          "empty verdict cache misses");
+    check(memcmp_calls == 0, "empty verdict cache inspects zero slots");
 
-    ngx_http_zstd_static_bad_cache_count = 3;
+    ngx_http_zstd_static_verdict_cache_count = 3;
     memcmp_calls = 0;
-    check(ngx_http_zstd_static_bad_cached(&path, &of) == 0,
-          "partially populated bad-cache misses");
-    check(memcmp_calls == 3, "partial bad-cache inspects only populated slots");
+    check(ngx_http_zstd_static_cached_verdict(&path, &of, 100, 60)
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_NONE,
+          "partially populated verdict cache misses");
+    check(memcmp_calls == 3,
+          "partial verdict cache inspects only populated slots");
 
-    memset(ngx_http_zstd_static_bad_cache, 0,
-           sizeof(ngx_http_zstd_static_bad_cache));
-    ngx_http_zstd_static_bad_cache_count = 0;
-    ngx_http_zstd_static_bad_cache_next = 0;
-    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS + 2; i++) {
-        ngx_http_zstd_static_bad_remember(&path, &of);
+    memset(ngx_http_zstd_static_verdict_cache, 0,
+           sizeof(ngx_http_zstd_static_verdict_cache));
+    ngx_http_zstd_static_verdict_cache_count = 0;
+    ngx_http_zstd_static_verdict_cache_next = 0;
+    for (i = 0; i < NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS + 2; i++) {
+        ngx_http_zstd_static_remember(&path, &of,
+            NGX_HTTP_ZSTD_STATIC_VERDICT_BAD, 100, 60);
     }
-    check(ngx_http_zstd_static_bad_cache_count
-              == NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS,
+    check(ngx_http_zstd_static_verdict_cache_count
+              == NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS,
           "remember count saturates at the ring bound");
-    check(ngx_http_zstd_static_bad_cache_next == 2,
+    check(ngx_http_zstd_static_verdict_cache_next == 2,
           "remember cursor wraps independently of populated count");
 }
 
@@ -330,7 +340,7 @@ main(void)
 {
     test_vary_behavior();
     test_cache_control_behavior();
-    test_bad_cache_work_count();
+    test_verdict_cache_work_count();
 
     if (failures != 0) {
         fprintf(stderr, "FAILED: %d performance witness check(s)\n", failures);

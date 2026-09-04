@@ -37,11 +37,11 @@ extract_function src/ngx_http_zstd_common.h \
     'ngx_http_zstd_vary_find_tokens(ngx_http_request_t \*r,' \
     "$OUT/generated_vary_find_tokens.inc"
 extract_function src/ngx_http_zstd_static_module.c \
-    'ngx_http_zstd_static_bad_cached(ngx_str_t \*path, ngx_open_file_info_t \*of)' \
-    "$OUT/generated_bad_cache.inc"
+    'ngx_http_zstd_static_cached_verdict(ngx_str_t \*path, ngx_open_file_info_t \*of,' \
+    "$OUT/generated_verdict_cache_work.inc"
 extract_function src/ngx_http_zstd_static_module.c \
-    'ngx_http_zstd_static_bad_remember(ngx_str_t \*path, ngx_open_file_info_t \*of)' \
-    "$OUT/generated_bad_cache.inc"
+    'ngx_http_zstd_static_remember(ngx_str_t \*path, ngx_open_file_info_t \*of,' \
+    "$OUT/generated_verdict_cache_work.inc"
 
 check_vary_single_scan() {
     local input=$1 count
@@ -102,19 +102,20 @@ fi
 # P7 control: compile the same fixture with the old 64-slot loop bound. The
 # poison entries beyond count make that redundant walk observable as extra
 # ngx_memcmp calls without timing noise.
-sed 's/i < ngx_http_zstd_static_bad_cache_count/i < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS/' \
-    "$OUT/generated_bad_cache.inc" >"$OUT/generated_bad_cache_mutant.inc"
-if ! grep -Fq 'i < NGX_HTTP_ZSTD_STATIC_BAD_CACHE_SLOTS' \
-    "$OUT/generated_bad_cache_mutant.inc"; then
-    echo "FAIL: bad-cache loop-bound control did not apply" >&2
+sed 's/i < ngx_http_zstd_static_verdict_cache_count/i < NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS/' \
+    "$OUT/generated_verdict_cache_work.inc" \
+    >"$OUT/generated_verdict_cache_work_mutant.inc"
+if ! grep -Fq 'i < NGX_HTTP_ZSTD_STATIC_VERDICT_CACHE_SLOTS' \
+    "$OUT/generated_verdict_cache_work_mutant.inc"; then
+    echo "FAIL: verdict-cache loop-bound control did not apply" >&2
     exit 1
 fi
 "$CC" -std=c99 -Wall -Wextra -Wshadow -Werror -O2 -I"$OUT" \
-    -DTEST_BAD_CACHE_MUTANT \
+    -DTEST_VERDICT_CACHE_MUTANT \
     -o "$OUT/test_perf_micro_witnesses_mutant" \
     ci/tools/test_perf_micro_witnesses.c
 if "$OUT/test_perf_micro_witnesses_mutant" >/dev/null 2>&1; then
-    echo "FAIL: 64-slot bad-cache mutant passed the call-count witness" >&2
+    echo "FAIL: 64-slot verdict-cache mutant passed the call-count witness" >&2
     exit 1
 fi
 
