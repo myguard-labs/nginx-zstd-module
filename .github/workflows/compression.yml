@@ -1,0 +1,639 @@
+# CI for the unified compression module (compression/). Phase-3
+# wiring: the module was deliberately outside root CI through the
+# prototype phases; these jobs cover what the WSL loop covered —
+# the eight Test::Nginx suites, both proxy-backed tools, the gzip-less
+# no-compat build (the --with-compat masking lesson), the reduced
+# backend shapes through the REAL auto/detect opt-outs, the genuine
+# not-found detection path (a runner without libbrotli-dev), and the
+# clang-tidy analysis WRINKLES 20 recorded as not-running-yet.
+#
+# NGINX_VERSION is pinned here; when the module joins the root config
+# this workflow should join the resolve chain in build-test.yml
+# instead.
+
+name: compression
+
+permissions:
+  contents: read
+
+on:
+  # push is scoped to the LIVING BRANCH, not removed (round-4 follow-up
+  # with data): the base repo creates no workflow runs for an outside
+  # collaborator's pull_request synchronizes on #117 — its last
+  # compression run there predates this branch's entire catch-up — so
+  # the fork-side push run is the only CI these pushes actually get.
+  # The branch filter keeps the round-3 concern satisfied: a push to
+  # master (base repo included) fires nothing, so there is no
+  # double-run anywhere.
+  push:
+    branches:
+      - phase0
+    paths:
+      - 'compression/**'
+      - '.github/workflows/compression.yml'
+  pull_request:
+    paths:
+      - 'compression/**'
+      - '.github/workflows/compression.yml'
+
+concurrency:
+  group: compression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned, unlike the parent's build-test.yml (whose resolve job scrapes
+  # nginx.org for the current mainline at run time): a version bump here
+  # should be a deliberate, blameable commit while phase0 is a prototype.
+  # Adopt the parent's resolve+verify machinery at productization.
+  NGINX_VERSION: "1.31.5"
+
+jobs:
+  suites:
+    name: Suites and proxy tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # 19200/19300/19330 are taken by ci-deep; this job gets its own band so
+      # two runtime jobs on one runner cannot land on the same port.
+      TEST_BASE_PORT: 19400
+      # Test::Nginx reads TEST_NGINX_PORT, not TEST_BASE_PORT; the band above
+      # is what the port-band policy checker looks for.
+      TEST_NGINX_PORT: 19400
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y \
+            build-essential libzstd-dev libbrotli-dev libpcre2-dev \
+            zlib1g-dev zstd brotli wget curl cpanminus
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        # the shared verifier from the parent's #267 (downloads the .asc,
+        # vendored keys, temp GNUPGHOME) -- replaces seven inline copies
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Install Test::Nginx
+        # Pinned per upstream #214 + #249: the @0.32 pin alone still
+        # trusts the CPAN index at run time, so the install script also
+        # asserts the version->dist resolution and diffs the resolver's
+        # dependency graph against the committed lock before installing.
+        run: |
+          TEST_NGINX_SOCKET_VERSION=0.32 \
+            bash compression/tools/install_test_nginx_socket.sh --sudo
+
+      - name: Configure and build (debug, both backends)
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure --with-debug \
+            --with-http_sub_module --with-http_addition_module \
+            --add-module="$GITHUB_WORKSPACE/compression" > configure.log
+          grep -q "ZStandard" configure.log
+          make -j"$(nproc)"
+          # ZSTD_STATIC_LINKING_ONLY contract (parent #250 analog): the
+          # only ZSTDLIB_STATIC_API import is ZSTD_getCParams
+          bash "$GITHUB_WORKSPACE/compression/tools/check_zstd_linkage.sh" \
+            objs/nginx
+
+      - name: Run the Test::Nginx suites
+        run: |
+          set -euo pipefail
+          export TEST_NGINX_BINARY="$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx"
+          # Test::Nginx resolves its server root to $CWD/t/servroot (or
+          # t/servroot_<port> under prove -j) and does not create the parent.
+          # The suites live in compression/t/, so the repo root has no t/ and
+          # the mkdir bails out before a single test runs.
+          export TEST_NGINX_SERVROOT="$GITHUB_WORKSPACE/compression/t/servroot"
+          mkdir -p "$GITHUB_WORKSPACE/compression/t"
+          prove compression/t/00-election.t compression/t/01-dict-store.t \
+                compression/t/02-dict-negotiation.t compression/t/03-static.t \
+                compression/t/04-roundtrip.t compression/t/05-tuning.t \
+                compression/t/06-buffers.t compression/t/07-bypass.t \
+                compression/t/08-filter-order.t compression/t/09-ae-parser.t
+
+      - name: Mid-stream flush paths (unbuffered proxy)
+        run: |
+          python3 compression/tools/test_flush_paths.py \
+            --nginx-binary "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx"
+
+      - name: Slow-drain backpressure + data-less flush (genuine recycling pause)
+        run: |
+          python3 compression/tools/test_slow_drain.py \
+            --nginx-binary "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx"
+
+      - name: Dictionary read-completeness unit test (short reads / EINTR / EOF)
+        run: bash compression/tools/test_read_dict_file_unit.sh
+
+      - name: Input-chain cursor unit oracle (ownership, ordering, alloc failure)
+        # The parent's test_input_chain_cursor_unit shape: the extracted
+        # production helpers against a pool shim -- the retained-before-
+        # cursor drain order is not wire-testable (round 5 blocker).
+        run: bash compression/tools/test_input_chain_cursor_unit.sh
+
+      - name: Ratio scaling unit oracle (overflow-safe $compression_ratio)
+        run: bash compression/tools/test_ratio_scaling_unit.sh
+
+      - name: max_length abort diagnostics contract (declared vs unknown length)
+        run: bash compression/tools/test_max_length_diagnostics.sh
+
+      - name: directio hard-error log rate limiter (parent #320)
+        run: bash compression/tools/test_dio_err_ratelimit_unit.sh
+
+      - name: Static filter-order policy (anchor after the last compressor)
+        run: sh compression/tools/test_static_filter_order.sh
+
+      - name: Shared-header seam (parent headers consumed, no local copies)
+        run: sh compression/tools/test_shared_header_seam.sh
+
+  gzipless:
+    name: Build without the gzip module (no compat)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y \
+            build-essential libzstd-dev libbrotli-dev libpcre2-dev \
+            zlib1g-dev wget curl
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        # the shared verifier from the parent's #267 (downloads the .asc,
+        # vendored keys, temp GNUPGHOME) -- replaces seven inline copies
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Build gzip-less (the compat-mask lesson — NO --with-compat)
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure --without-http_gzip_module \
+            --add-module="$GITHUB_WORKSPACE/compression" > /dev/null
+          make -j"$(nproc)"
+          if grep -q ngx_http_gzip_filter_module objs/ngx_modules.c; then
+            echo "::error::gzip module present in a gzip-less build"
+            exit 1
+          fi
+
+      - name: Assert the gzip order token is rejected educationally
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+          mkdir -p gprefix/logs
+          printf 'events {}\nhttp { server { listen 127.0.0.1:18099;\n  location / { compression_order gzip; } } }\n' \
+            > gprefix/g.conf
+          out=$(objs/nginx -p "$PWD/gprefix" -c g.conf -t 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "requires nginx built with ngx_http_gzip_module"
+
+  shapes:
+    name: Reduced backend shape (${{ matrix.shape }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shape: no-brotli
+            no_zstd: ""
+            no_brotli: "1"
+            reject_token: br
+            reject_msg: built without brotli support
+          - shape: no-zstd
+            no_zstd: "1"
+            no_brotli: ""
+            reject_token: zstd
+            reject_msg: built without zstd support
+          - shape: neither
+            no_zstd: "1"
+            no_brotli: "1"
+            reject_token: zstd
+            reject_msg: built without zstd support
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y \
+            build-essential libzstd-dev libbrotli-dev libpcre2-dev \
+            zlib1g-dev wget curl
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        # the shared verifier from the parent's #267 (downloads the .asc,
+        # vendored keys, temp GNUPGHOME) -- replaces seven inline copies
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Build the shape through the real opt-outs
+        env:
+          NGX_HTTP_COMPRESSION_NO_ZSTD: ${{ matrix.no_zstd }}
+          NGX_HTTP_COMPRESSION_NO_BROTLI: ${{ matrix.no_brotli }}
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure --add-module="$GITHUB_WORKSPACE/compression" \
+            > configure.log
+          if [ -n "$NGX_HTTP_COMPRESSION_NO_ZSTD" ]; then
+            grep -q "#define NGX_HTTP_COMPRESSION_HAVE_ZSTD  0" objs/ngx_auto_config.h
+            if grep -q -- "-lzstd" objs/Makefile; then
+              echo "opted-out zstd still in the link line" >&2
+              exit 1
+            fi
+          fi
+          if [ -n "$NGX_HTTP_COMPRESSION_NO_BROTLI" ]; then
+            grep -q "#define NGX_HTTP_COMPRESSION_HAVE_BROTLI  0" objs/ngx_auto_config.h
+            if grep -q -- "brotlienc" objs/Makefile; then
+              echo "opted-out brotli still in the link line" >&2
+              exit 1
+            fi
+          fi
+          make -j"$(nproc)"
+
+      - name: Absent coding fails with the build-line pointer
+        env:
+          REJECT_TOKEN: ${{ matrix.reject_token }}
+          REJECT_MSG: ${{ matrix.reject_msg }}
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+          mkdir -p sprefix/logs
+          printf 'events {}\nhttp { server { listen 127.0.0.1:18099;\n  location / { compression_order %s; } } }\n' \
+            "$REJECT_TOKEN" > sprefix/s.conf
+          out=$(objs/nginx -p "$PWD/sprefix" -c s.conf -t 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -qF "$REJECT_MSG"
+
+      - name: Static sidecar serving survives every shape
+        run: |
+          set -euo pipefail
+          cd "nginx-${NGINX_VERSION}"
+          mkdir -p wprefix/logs wprefix/html/f
+          # crafted valid zstd frame: magic, FHD 0x00, 1 KB window,
+          # raw last-block "hi\n" — the probe parses it without libzstd
+          printf '\x28\xB5\x2F\xFD\x00\x00\x19\x00\x00hi\n' \
+            > wprefix/html/f/a.txt.zst
+          printf 'brotli-bytes-need-no-magic' > wprefix/html/f/a.txt.br
+          printf 'identity body\n' > wprefix/html/f/a.txt
+          cat > wprefix/w.conf <<'CONF'
+          events {}
+          http {
+            server {
+              listen 127.0.0.1:18098;
+              location /f/ { compression_static on; gzip_vary on; root html; }
+            }
+          }
+          CONF
+          objs/nginx -p "$PWD/wprefix" -c w.conf
+          trap 'objs/nginx -p "$PWD/wprefix" -c w.conf -s stop' EXIT
+          sleep 0.5
+          ce=$(curl -s -o body.zst -D- -H 'Accept-Encoding: zstd' \
+               http://127.0.0.1:18098/f/a.txt | grep -i '^Content-Encoding:' | tr -d '\r')
+          [ "$ce" = "Content-Encoding: zstd" ]
+          cmp body.zst wprefix/html/f/a.txt.zst
+          ce=$(curl -s -o /dev/null -D- -H 'Accept-Encoding: br' \
+               http://127.0.0.1:18098/f/a.txt | grep -i '^Content-Encoding:' | tr -d '\r')
+          [ "$ce" = "Content-Encoding: br" ]
+
+  detection:
+    name: Auto-detection on a brotli-less system
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies (libbrotli-dev DELIBERATELY absent)
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y \
+            build-essential libzstd-dev libpcre2-dev zlib1g-dev wget curl
+          # runner images may preinstall brotli dev files; the genuine
+          # not-found path needs them gone
+          sudo apt-get -o DPkg::Lock::Timeout=120 remove -y libbrotli-dev 2>/dev/null || true
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        # the shared verifier from the parent's #267 (downloads the .asc,
+        # vendored keys, temp GNUPGHOME) -- replaces seven inline copies
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Configure detects the absence and builds anyway
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure --add-module="$GITHUB_WORKSPACE/compression" \
+            > configure.log
+          grep -q "Brotli encoder library not found" configure.log
+          grep -q "#define NGX_HTTP_COMPRESSION_HAVE_BROTLI  0" objs/ngx_auto_config.h
+          make -j"$(nproc)"
+          mkdir -p dprefix/logs
+          printf 'events {}\nhttp { server { listen 127.0.0.1:18099;\n  location / { compression_order br; } } }\n' \
+            > dprefix/d.conf
+          out=$(objs/nginx -p "$PWD/dprefix" -c d.conf -t 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "built without brotli support"
+
+  clang-tidy:
+    name: clang-tidy (analyzer checks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y \
+            build-essential clang-tidy libzstd-dev libbrotli-dev \
+            libpcre2-dev zlib1g-dev pkg-config wget curl
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        # the shared verifier from the parent's #267 (downloads the .asc,
+        # vendored keys, temp GNUPGHOME) -- replaces seven inline copies
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Analyze compression/*.c with nginx include paths
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          # configure generates objs/ngx_auto_config.h — the include
+          # path gap WRINKLES 20 recorded (clang-tidy was silently not
+          # analyzing these files at all)
+          ./configure --add-module="$GITHUB_WORKSPACE/compression" > /dev/null
+          # The DeprecatedOrUnsafeBufferHandling exclusion is the C11
+          # Annex-K memcpy/memset advisory every nginx module trips
+          # through the ngx_memcpy/ngx_memzero macros — noise, not
+          # analysis. Everything else is strict.
+          read -ra codec_cflags \
+            <<< "$(pkg-config --cflags libzstd libbrotlienc 2>/dev/null || true)"
+          clang-tidy --quiet \
+            --checks='-*,clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
+            --warnings-as-errors='*' \
+            "$GITHUB_WORKSPACE"/compression/ngx_http_compression_*.c -- \
+            -I src/core -I src/event -I src/event/modules -I src/os/unix \
+            -I src/http -I src/http/modules -I objs \
+            "${codec_cflags[@]}"
+
+  # ── Testkit consumer scenarios (per-request allocation neutrality) ──
+  # The first slice of the #192-style leak effort, via the parent's
+  # nginx-module-testkit (the ci/t/harness submodule master carries;
+  # same pin): cycle-pool and fd deltas across one extra served
+  # compressed request, asserted from INSIDE the worker — the assertion
+  # the Perl suites structurally cannot make, and the leak class ASan
+  # (which runs with detect_leaks=0 below) never sees. ZERO-HOOK: the
+  # harness's reference probe module supplies the probe endpoint as its
+  # own .so; the compression module carries no probe C. Both directions
+  # run per the harness import-prompt's rule: the staged tree must
+  # produce real assertions AND an unstaged tree must SKIP cleanly —
+  # a permanently-skipping leg reads green in a job summary, which is
+  # exactly the vacuous pass the rule exists to prevent. The oracle's
+  # ability to fail is control-mutation-proven (a planted one-fd-per-
+  # request leak reds oracle 5; see the adopting commit).
+  testkit:
+    name: Testkit scenarios (alloc-neutral)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # 19400 suites, 19500 asan; this job gets its own band (the
+      # harness engine picks its own port; the band reserves headroom)
+      TEST_BASE_PORT: 19600
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Fetch the harness submodule
+        # Only this one — submodules: true would also pull the brotli
+        # graft's google/brotli gitlink, which this job never builds.
+        run: git submodule update --init ci/t/harness
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y \
+            build-essential libzstd-dev libbrotli-dev libpcre2-dev \
+            zlib1g-dev wget libssl-dev libnghttp2-dev
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        # the shared verifier from the parent's #267 (downloads the .asc,
+        # vendored keys, temp GNUPGHOME) -- replaces seven inline copies
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Configure and build (harness-enabled, module + reference probe)
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          # TEST_HARNESS=1 + the CFLAGS define together are what compile
+          # the probe non-empty; either alone yields a loadable,
+          # probe-free .so (the requires gate checks symbols, not env)
+          TEST_HARNESS=1 CFLAGS="-DNGX_TEST_HARNESS" ./configure --with-debug \
+            --add-dynamic-module="$GITHUB_WORKSPACE/compression" \
+            --add-dynamic-module="$GITHUB_WORKSPACE/ci/t/harness/t/module" \
+            > configure.log
+          grep -q "ZStandard" configure.log
+          make -j"$(nproc)"
+
+      - name: Build the prober
+        # OpenSSL-3.0 compatibility now comes from the submodule itself
+        # (testkit #235: openssl_compat.h's guarded protocol-arithmetic
+        # define, in the pin since 61c6906) -- no working-copy patch.
+        run: |
+          set -euo pipefail
+          cd ci/t/harness
+          bash ci/prober/build.sh
+
+      - name: Run scenarios (staged tree must produce real assertions)
+        run: |
+          bash compression/tools/run_testkit_scenarios.sh \
+            --build "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}" \
+            --version "${NGINX_VERSION}"
+
+      - name: Unstaged direction (must SKIP cleanly, not fail)
+        run: |
+          mkdir -p /tmp/testkit-empty-tree/objs
+          bash compression/tools/run_testkit_scenarios.sh \
+            --build /tmp/testkit-empty-tree \
+            --version "${NGINX_VERSION}" --expect-skip
+
+  # ── ASan+UBSan over the chain-state paths ────────────────────────────
+  # Round-4 review: compression/ never ran under a sanitizer on any job
+  # (the root asan.yml builds the repo root as its addon). The three
+  # proxy tools are the drivers because they exercise exactly the
+  # buffer/chain lifecycle — mid-stream flushes, forced backpressure
+  # with reclaim, FINISH parked on ob->end — where a stale pointer or
+  # a UB pointer advance would hide behind green functional asserts.
+  # Leak checking is deliberately OFF here: LSan's exit-time check is
+  # the flaky ptrace-dependent machinery the root repo wraps in its
+  # verdict scripts (#111), and per-request leak coverage lives in the
+  # testkit job above (the #192-style alloc-neutral oracle, landed).
+  # This job is about heap errors and UB, halting on the first finding.
+  asan:
+    name: ASan+UBSan (proxy tools)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TEST_BASE_PORT: 19500
+      ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+      UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y \
+            build-essential libzstd-dev libbrotli-dev libpcre2-dev \
+            zlib1g-dev zstd brotli wget curl
+
+      - name: Cache nginx source tarball
+        id: nginx-tarball
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: nginx-src-${{ env.NGINX_VERSION }}
+
+      - name: Download nginx source tarball
+        if: steps.nginx-tarball.outputs.cache-hit != 'true'
+        run: wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Verify nginx tarball PGP signature
+        # the shared verifier from the parent's #267 (downloads the .asc,
+        # vendored keys, temp GNUPGHOME) -- replaces seven inline copies
+        run: ci/tools/verify-nginx-tarball.sh "nginx-${NGINX_VERSION}.tar.gz"
+
+      - name: Configure and build (ASan+UBSan, both backends)
+        run: |
+          set -euo pipefail
+          tar -xzf "nginx-${NGINX_VERSION}.tar.gz"
+          cd "nginx-${NGINX_VERSION}"
+          ./configure --with-debug \
+            --with-http_sub_module --with-http_addition_module \
+            --with-cc-opt='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all' \
+            --with-ld-opt='-fsanitize=address,undefined' \
+            --add-module="$GITHUB_WORKSPACE/compression" > configure.log
+          grep -q "ZStandard" configure.log
+          make -j"$(nproc)"
+
+      - name: Mid-stream flush paths (unbuffered proxy, sanitized)
+        run: |
+          python3 compression/tools/test_flush_paths.py \
+            --nginx-binary "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx"
+
+      - name: Slow-drain backpressure + data-less flush (sanitized)
+        # --log-level warn: the tool's own sanitizer mode, built for
+        # exactly this job. At debug log level, stock nginx's OWN
+        # logging traps UBSan on every query-less request
+        # (ngx_http_output_filter's "%V?%V" hands ngx_sprintf_str a
+        # NULL r->args.data — the site family nginx PRs #1671/#1672
+        # and #1679-#1682 address upstream, not yet in the pinned
+        # version; caught by this job's first run). At warn the forced
+        # backpressure paths still run and the byte-exact oracles
+        # still gate; only the debug-line witness assertions are
+        # skipped, and the non-sanitized suites job still asserts
+        # those. Full UB coverage stays on for the module's own code.
+        run: |
+          python3 compression/tools/test_slow_drain.py \
+            --nginx-binary "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" \
+            --log-level warn
+
+      - name: Exact FINISH-on-buffer-end boundary (sanitized)
+        # Same sanitizer mode as slow-drain above, same reason: the
+        # tool's witness needs debug logging, debug logging trips
+        # core's nonnull UB. The boundary is still forced by the
+        # measured sizing and the decode oracles still gate.
+        run: |
+          python3 compression/tools/test_exact_boundary.py \
+            --nginx-binary "$GITHUB_WORKSPACE/nginx-${NGINX_VERSION}/objs/nginx" \
+            --log-level warn

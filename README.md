@@ -4,6 +4,7 @@
 [![Security Scanners](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/security-scanners.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/security-scanners.yml)
 [![CI Deep](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/ci-deep.yml)
 [![Windows build](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/windows-build.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/windows-build.yml)
+[![compression](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/compression.yml/badge.svg)](https://github.com/myguard-labs/nginx-zstd-module/actions/workflows/compression.yml)
 
 📖 **Background reading:**
 
@@ -1376,6 +1377,7 @@ documented `ubuntu-latest` fallback instead.
 | **Valgrind** ([`valgrind.yml`](.github/workflows/valgrind.yml)) | manual | Provides a targeted Memcheck-lite run. CI Deep runs its own full Memcheck and Helgrind soaks. |
 | **CodeQL** ([`codeql.yml`](.github/workflows/codeql.yml)) | manual/reusable; weekly via CI Deep | Runs GitHub's semantic C/C++ `security-extended` analysis. |
 | **A/UBSan** ([`asan.yml`](.github/workflows/asan.yml)) | manual/reusable; weekly via CI Deep | Runs a native mixed-load ASAN/UBSAN soak, complementing Build&Test's sanitizer suite. |
+| **compression** ([`compression.yml`](.github/workflows/compression.yml)) | `phase0` pushes + relevant PRs | Builds and tests the unified [nginx-compression module](compression/) independently of the root orchestrator: Test::Nginx and proxy tools, gzip-less and reduced-backend shapes, Brotli-less detection, clang-tidy, an allocation-neutral testkit scenario, and ASAN/UBSAN. |
 | **Bump** ([`bump.yml`](.github/workflows/bump.yml)) | weekly + manual dispatch | Checks the GitHub release feeds (nginx, Angie, pcre2, zlib, OpenSSL, zstd) for newer releases than what's pinned — nginx-stable/Angie in CI Deep's `build-flavors` matrix, the harness jobs' mainline pin, and the Windows build's sources in [`ci/tools/windows-pins.sh`](ci/tools/windows-pins.sh) — and opens a PR (never pushes directly to protected `master`) with the updated pins + freshly-computed sha256 digests (nginx tarballs PGP-verified first). Does not gate merges itself — normal required checks review the PR. |
 
 The test suite includes a dedicated regression test for every known

@@ -1,0 +1,98 @@
+# nginx-compression build glue: TWO modules, one addon (the parent
+# repo's filter/static pattern, and core nginx's own gzip /
+# gzip_static split).
+#
+# auto/detect probes libzstd and libbrotlienc with the parent's
+# hardened patterns and treats a missing library as a SHAPE, not an
+# error (see the file). The libraries — and libcrypto's EVP, when
+# found — attach to the FILTER module only: the static module links
+# NOTHING by design. Static serving is file serving for every coding
+# (its .zst probe reads RFC 8878 format constants, not the libzstd
+# API), so a static-only deployment — a CDN edge, an internal
+# artifact host — loads a .so whose ldd shows nothing but libc, and
+# never installs the compression libraries at all.
+
+ngx_addon_name=ngx_http_compression_module
+
+if test -n "$ngx_module_link"; then
+
+    . $ngx_addon_dir/auto/detect
+
+    ngx_module_type=HTTP_FILTER
+    ngx_module_name=ngx_http_compression_filter_module
+    ngx_module_incs="$ngx_compression_incs"
+    ngx_module_deps="$ngx_addon_dir/ngx_http_compression.h \
+                     $ngx_addon_dir/ngx_http_compression_ae.h \
+                     $ngx_addon_dir/ngx_http_compression_dict.h \
+                     $ngx_addon_dir/../src/ngx_http_zstd_sha256.h \
+                     $ngx_addon_dir/../src/ngx_http_zstd_version.h \
+                     $ngx_addon_dir/../src/ngx_http_zstd_cache_control.h \
+                     $ngx_addon_dir/../src/ngx_http_zstd_ratio.h"
+    ngx_module_srcs="$ngx_addon_dir/ngx_http_compression_module.c \
+                     $ngx_addon_dir/ngx_http_compression_dict.c \
+                     $ngx_addon_dir/ngx_http_compression_zstd.c \
+                     $ngx_addon_dir/ngx_http_compression_brotli.c"
+    ngx_module_libs="$ngx_compression_libs"
+
+    # Filter ORDER (the parent's f4ba115 class, rediscovered by the
+    # first suite block to combine this filter with SSI): without an
+    # explicit order the addon registers late and runs FIRST in the
+    # body chain — compressing the raw .shtml/sub_filter input before
+    # the transforming filters ever see it. The filter must run after
+    # every content-transforming filter, like core gzip does.
+    ngx_module_order="$ngx_module_name \
+                      ngx_pagespeed \
+                      ngx_http_postpone_filter_module \
+                      ngx_http_ssi_filter_module \
+                      ngx_http_charset_filter_module \
+                      ngx_http_xslt_filter_module \
+                      ngx_http_image_filter_module \
+                      ngx_http_sub_filter_module \
+                      ngx_http_addition_filter_module \
+                      ngx_http_gunzip_filter_module \
+                      ngx_http_userid_filter_module \
+                      ngx_http_headers_filter_module \
+                      ngx_http_copy_filter_module \
+                      ngx_http_range_body_filter_module \
+                      ngx_http_not_modified_filter_module \
+                      ngx_http_slice_filter_module"
+
+    . auto/module
+
+    if [ "$ngx_module_link" != DYNAMIC ]; then
+        # ngx_module_order only works for dynamic modules; static
+        # builds re-order HTTP_FILTER_MODULES by hand. The anchor
+        # selector and the reorder helper are the parent filter's,
+        # shared verbatim (#286/#303), with one layer of our own on
+        # top (auto/reorder.sh): anchor after the parent's standalone
+        # zstd filter when it is built alongside, so this module runs
+        # first among the compressors and supersedes them. The helper
+        # refuses an absent anchor and verifies the final order, so a
+        # core filter-chain rename fails the build loudly instead of
+        # leaving this filter mis-ordered.
+        . "$ngx_addon_dir/../filter/reorder-static.sh"
+        . "$ngx_addon_dir/auto/reorder.sh"
+        next=`ngx_http_compression_static_next`
+        ngx_http_zstd_reorder_static_filter || exit 1
+    fi
+
+    ngx_module_type=HTTP
+    ngx_module_name=ngx_http_compression_static_module
+    ngx_module_incs=
+    ngx_module_deps="$ngx_addon_dir/ngx_http_compression.h \
+                     $ngx_addon_dir/ngx_http_compression_ae.h \
+                     $ngx_addon_dir/../src/ngx_http_zstd_frame_probe.h"
+    ngx_module_srcs="$ngx_addon_dir/ngx_http_compression_static.c"
+    ngx_module_libs=
+
+    . auto/module
+else
+    cat << END
+
+$0: error: nginx-compression requires nginx >= 1.23.0
+(list-linked headers; the header additionally enforces this with a
+compile-time version check).
+
+END
+    exit 1
+fi

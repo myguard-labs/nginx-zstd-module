@@ -1,0 +1,402 @@
+# compression/auto/detect — library discovery for the unified module.
+#
+# Modeled on the parent's hardened auto/zstd (bare-directory
+# ngx_module_incs — the never-applied-include lesson; link flags flow
+# only through ngx_module_libs, never NGX_LD_OPT, which is build-global
+# and would leak DT_NEEDEDs onto unrelated dynamic modules; MSVC
+# cygpath normalization for explicit paths), with ONE deliberate
+# difference: a library that is not found is NOT fatal. The backend
+# roster is a build-time variable (NGX_HTTP_COMPRESSION_HAVE_*): the
+# missing backend's TU compiles to nothing, its coding tokens fail at
+# config load with "built without X support", and static sidecar
+# serving keeps working for EVERY coding — it reads format constants,
+# not library APIs. Even the zero-library build is legal (it still
+# subsumes gzip_static and serves .zst/.br byte-exact).
+#
+# Explicit requests stay fatal: if the operator set ZSTD_INC/ZSTD_LIB
+# (or BROTLI_INC/BROTLI_LIB) and the probe fails, that is a broken
+# build line, not a preference.
+#
+# Opt-outs for shape testing and packaging:
+#   NGX_HTTP_COMPRESSION_NO_ZSTD=1 / NGX_HTTP_COMPRESSION_NO_BROTLI=1
+# skip the probe entirely and build without that backend.
+#
+# Exports:
+#   ngx_compression_incs — bare include DIRECTORIES for ngx_module_incs
+#   ngx_compression_libs — link flags for ngx_module_libs
+
+ngx_compression_incs=
+ngx_compression_libs=
+
+ngx_compression_pkgconf=
+if command -v pkgconf > /dev/null 2>&1; then
+    ngx_compression_pkgconf=pkgconf
+elif command -v pkg-config > /dev/null 2>&1; then
+    ngx_compression_pkgconf=pkg-config
+fi
+
+
+# ── zstd ────────────────────────────────────────────────────────────
+
+ngx_compression_zstd_found=no
+
+if [ "$NGX_HTTP_COMPRESSION_NO_ZSTD" = 1 ]; then
+    echo " + compression: zstd backend disabled by request"
+else
+
+ngx_feature_incs="#include <zstd.h>"
+# ZSTD_compressStream2 / ZSTD_CCtx_setParameter establish the same
+# hard 1.4.0 floor the parent enforces — an older library must fail
+# the probe, not the module compile.
+ngx_feature_test="
+#if ZSTD_VERSION_NUMBER < 10400
+#error libzstd 1.4.0 or newer is required
+#endif
+(void) ZSTD_compressStream2;"
+ngx_feature_run=no
+ngx_feature_libs=
+
+if [ -n "$ZSTD_INC" ] || [ -n "$ZSTD_LIB" ]; then
+
+    if [ "$NGX_CC_NAME" = "msvc" ] && command -v cygpath > /dev/null 2>&1; then
+        # cl reads MSYS /c/... paths as \c\... on the current drive
+        # (C1083); normalize absolute POSIX spellings to mixed C:/...
+        case "$ZSTD_INC" in
+            /*) ZSTD_INC=`cygpath -m "$ZSTD_INC"` ;;
+        esac
+        case "$ZSTD_LIB" in
+            /*) ZSTD_LIB=`cygpath -m "$ZSTD_LIB"` ;;
+        esac
+    fi
+
+    if [ "$NGX_CC_NAME" = "msvc" ]; then
+        ngx_compression_zstd_archive="zstd_static.lib"
+    else
+        ngx_compression_zstd_archive="libzstd.a"
+    fi
+
+    ngx_feature="ZStandard static library in $ZSTD_INC and $ZSTD_LIB"
+    ngx_feature_path=$ZSTD_INC
+    ngx_compression_zstd_I="-I$ZSTD_INC -DZSTD_STATIC_LINKING_ONLY"
+    ngx_compression_zstd_L="$ZSTD_LIB/$ngx_compression_zstd_archive"
+
+    SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+    CC_TEST_FLAGS="$ngx_compression_zstd_I $CC_TEST_FLAGS"
+    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+    NGX_TEST_LD_OPT="$ngx_compression_zstd_L $NGX_TEST_LD_OPT"
+    . auto/feature
+    CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+    if [ $ngx_found = no ] && [ "$NGX_CC_NAME" != "msvc" ]; then
+        # dynamic retry (gcc-spelled flags; cl drops -L/-l with D9002)
+        ngx_feature="ZStandard dynamic library in $ZSTD_INC and $ZSTD_LIB"
+        if [ "${NGX_PLATFORM:-}" = win32 ]; then
+            # MinGW emits PE/COFF: no ELF runtime search path to encode,
+            # and -rpath is rejected or ignored by binutils depending on
+            # version (parent's 211844a). The DLL must be beside
+            # nginx.exe or on the DLL search path at runtime.
+            ngx_compression_zstd_L="-L$ZSTD_LIB -lzstd"
+        else
+            ngx_compression_zstd_L="-L$ZSTD_LIB -lzstd -Wl,-rpath,$ZSTD_LIB"
+        fi
+
+        SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+        CC_TEST_FLAGS="$ngx_compression_zstd_I $CC_TEST_FLAGS"
+        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+        NGX_TEST_LD_OPT="$ngx_compression_zstd_L $NGX_TEST_LD_OPT"
+        . auto/feature
+        CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+    fi
+
+    if [ $ngx_found = no ]; then
+        cat << END
+
+$0: error: ZSTD_INC/ZSTD_LIB are set but no usable ZStandard library
+was found there. An explicit path is a promise: fix the path or unset
+the variables to fall back to auto-discovery.
+
+END
+        exit 1
+    fi
+
+    # NO -DZSTD_STATIC_LINKING_ONLY on CFLAGS (the parent's #237, taken
+    # one step further here): committing it unconditionally both leaked
+    # it into every nginx TU's compile and mislabeled the dynamic-retry
+    # build as a static one. This module needs the define in exactly one
+    # translation unit — ngx_http_compression_zstd.c self-defines it for
+    # its single, documented static-API import (ZSTD_getCParams; see the
+    # ABI note there) — so the flag context carries nothing.
+    ngx_compression_incs="$ngx_compression_incs $ZSTD_INC"
+    ngx_compression_libs="$ngx_compression_libs $ngx_compression_zstd_L"
+    ngx_compression_zstd_found=yes
+
+else
+    # auto-discovery: dynamic first (a system libzstd.a lacks -fPIC and
+    # cannot join a shared dynamic module), then pkg-config.
+    ngx_feature="ZStandard dynamic library"
+    ngx_compression_zstd_L="-lzstd"
+
+    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+    NGX_TEST_LD_OPT="$ngx_compression_zstd_L $NGX_TEST_LD_OPT"
+    . auto/feature
+    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+    if [ $ngx_found = no ] && [ -n "$ngx_compression_pkgconf" ] \
+        && $ngx_compression_pkgconf --exists libzstd 2>/dev/null
+    then
+        ngx_feature="ZStandard library via pkg-config"
+        ngx_compression_zstd_I="$($ngx_compression_pkgconf --cflags libzstd)"
+        ngx_compression_zstd_L="$($ngx_compression_pkgconf --libs libzstd)"
+
+        SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+        CC_TEST_FLAGS="$ngx_compression_zstd_I $CC_TEST_FLAGS"
+        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+        NGX_TEST_LD_OPT="$ngx_compression_zstd_L $NGX_TEST_LD_OPT"
+        . auto/feature
+        CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+        if [ $ngx_found = yes ]; then
+            ngx_compression_incs="$ngx_compression_incs \
+$($ngx_compression_pkgconf --cflags-only-I libzstd | sed -e 's/-I *//g')"
+        fi
+    fi
+
+    if [ $ngx_found = yes ]; then
+        ngx_compression_libs="$ngx_compression_libs $ngx_compression_zstd_L"
+        ngx_compression_zstd_found=yes
+    fi
+fi
+
+fi  # NGX_HTTP_COMPRESSION_NO_ZSTD
+
+if [ $ngx_compression_zstd_found = no ]; then
+    cat << END
+ + compression: ZStandard library not found — building WITHOUT the
+   zstd backend. The "zstd"/"dcz" codings will be rejected at config
+   load; static .zst sidecar serving keeps working (it needs no
+   library). Install libzstd-dev / zstd-devel, or set ZSTD_INC and
+   ZSTD_LIB, to enable the backend.
+END
+    have=NGX_HTTP_COMPRESSION_HAVE_ZSTD value=0 . auto/define
+fi
+
+
+# ── brotli ──────────────────────────────────────────────────────────
+
+ngx_compression_brotli_found=no
+
+if [ "$NGX_HTTP_COMPRESSION_NO_BROTLI" = 1 ]; then
+    echo " + compression: brotli backend disabled by request"
+else
+
+ngx_feature_incs="#include <brotli/encode.h>"
+ngx_feature_test="(void) BrotliEncoderCompressStream;"
+ngx_feature_run=no
+ngx_feature_libs=
+
+if [ -n "$BROTLI_INC" ] || [ -n "$BROTLI_LIB" ]; then
+
+    if [ "$NGX_CC_NAME" = "msvc" ] && command -v cygpath > /dev/null 2>&1; then
+        case "$BROTLI_INC" in
+            /*) BROTLI_INC=`cygpath -m "$BROTLI_INC"` ;;
+        esac
+        case "$BROTLI_LIB" in
+            /*) BROTLI_LIB=`cygpath -m "$BROTLI_LIB"` ;;
+        esac
+    fi
+
+    if [ "$NGX_CC_NAME" = "msvc" ]; then
+        # brotli's cmake emits brotlienc.lib / brotlicommon.lib
+        ngx_compression_brotli_L="$BROTLI_LIB/brotlienc.lib $BROTLI_LIB/brotlicommon.lib"
+    else
+        ngx_compression_brotli_L="$BROTLI_LIB/libbrotlienc.a $BROTLI_LIB/libbrotlicommon.a"
+    fi
+
+    ngx_feature="Brotli static libraries in $BROTLI_INC and $BROTLI_LIB"
+    ngx_feature_path=$BROTLI_INC
+    ngx_compression_brotli_I="-I$BROTLI_INC"
+
+    SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+    CC_TEST_FLAGS="$ngx_compression_brotli_I $CC_TEST_FLAGS"
+    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+    NGX_TEST_LD_OPT="$ngx_compression_brotli_L $NGX_TEST_LD_OPT"
+    . auto/feature
+    CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+    if [ $ngx_found = no ] && [ "$NGX_CC_NAME" != "msvc" ]; then
+        ngx_feature="Brotli dynamic libraries in $BROTLI_INC and $BROTLI_LIB"
+        if [ "${NGX_PLATFORM:-}" = win32 ]; then
+            # same MinGW PE/COFF rule as the zstd branch above
+            ngx_compression_brotli_L="-L$BROTLI_LIB -lbrotlienc -lbrotlicommon"
+        else
+            ngx_compression_brotli_L="-L$BROTLI_LIB -lbrotlienc -lbrotlicommon -Wl,-rpath,$BROTLI_LIB"
+        fi
+
+        SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+        CC_TEST_FLAGS="$ngx_compression_brotli_I $CC_TEST_FLAGS"
+        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+        NGX_TEST_LD_OPT="$ngx_compression_brotli_L $NGX_TEST_LD_OPT"
+        . auto/feature
+        CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+    fi
+
+    if [ $ngx_found = no ]; then
+        cat << END
+
+$0: error: BROTLI_INC/BROTLI_LIB are set but no usable Brotli encoder
+library was found there. An explicit path is a promise: fix the path
+or unset the variables to fall back to auto-discovery.
+
+END
+        exit 1
+    fi
+
+    ngx_compression_incs="$ngx_compression_incs $BROTLI_INC"
+    ngx_compression_libs="$ngx_compression_libs $ngx_compression_brotli_L"
+    ngx_compression_brotli_found=yes
+
+else
+    ngx_feature="Brotli encoder dynamic library"
+    ngx_compression_brotli_L="-lbrotlienc -lbrotlicommon"
+
+    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+    NGX_TEST_LD_OPT="$ngx_compression_brotli_L $NGX_TEST_LD_OPT"
+    . auto/feature
+    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+    if [ $ngx_found = no ] && [ -n "$ngx_compression_pkgconf" ] \
+        && $ngx_compression_pkgconf --exists libbrotlienc 2>/dev/null
+    then
+        ngx_feature="Brotli encoder via pkg-config"
+        ngx_compression_brotli_I="$($ngx_compression_pkgconf --cflags libbrotlienc)"
+        ngx_compression_brotli_L="$($ngx_compression_pkgconf --libs libbrotlienc)"
+
+        SAVED_CC_TEST_FLAGS=$CC_TEST_FLAGS
+        CC_TEST_FLAGS="$ngx_compression_brotli_I $CC_TEST_FLAGS"
+        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
+        NGX_TEST_LD_OPT="$ngx_compression_brotli_L $NGX_TEST_LD_OPT"
+        . auto/feature
+        CC_TEST_FLAGS=$SAVED_CC_TEST_FLAGS
+        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
+
+        if [ $ngx_found = yes ]; then
+            ngx_compression_incs="$ngx_compression_incs \
+$($ngx_compression_pkgconf --cflags-only-I libbrotlienc | sed -e 's/-I *//g')"
+        fi
+    fi
+
+    if [ $ngx_found = yes ]; then
+        ngx_compression_libs="$ngx_compression_libs $ngx_compression_brotli_L"
+        ngx_compression_brotli_found=yes
+    fi
+fi
+
+fi  # NGX_HTTP_COMPRESSION_NO_BROTLI
+
+if [ $ngx_compression_brotli_found = no ]; then
+    cat << END
+ + compression: Brotli encoder library not found — building WITHOUT
+   the brotli backend. The "br"/"dcb" codings will be rejected at
+   config load; static .br sidecar serving keeps working (it needs no
+   library). Install libbrotli-dev / brotli-devel, or set BROTLI_INC
+   and BROTLI_LIB, to enable the backend.
+END
+    have=NGX_HTTP_COMPRESSION_HAVE_BROTLI value=0 . auto/define
+fi
+
+
+if [ $ngx_compression_zstd_found = no ] \
+    && [ $ngx_compression_brotli_found = no ]; then
+    cat << END
+ + compression: building with NO dynamic backends — the filter
+   directives load but every coding token is rejected; static sidecar
+   serving (compression_static) remains fully functional for
+   .zst/.br/.gz. This is a supported shape, but probably not the one
+   you wanted.
+END
+fi
+
+# ── libcrypto EVP SHA-256 (dictionary hashing acceleration) ─────────
+#
+# The store computes the SHA-256 of EVERY registered dictionary at
+# config load — including supplied-hash entries, whose mandated
+# compute doubles as the free audit (WRINKLES 15) — so nginx -t and
+# every reload pay the hashing bill in full. libcrypto's EVP SHA-256
+# is roughly an order of magnitude faster than the portable fallback
+# and turns seconds into a blip at hundreds-of-dictionaries scale.
+# Feature-tested, never required.
+#
+# The macro keeps the PARENT'S name (NGX_HTTP_ZSTD_HAVE_LIBCRYPTO):
+# the sha256 implementation is ../ngx_http_zstd_sha256.h verbatim —
+# the unification dividend — and that header keys on it.
+#
+# NGX_HTTP_COMPRESSION_NO_LIBCRYPTO=1 skips detection (CI keeps the
+# portable path covered with it; also the escape hatch for builds
+# that must not link libcrypto).
+
+if [ "${NGX_HTTP_COMPRESSION_NO_LIBCRYPTO:-0}" != 1 ]; then
+    if [ "${USE_OPENSSL:-NO}" = YES ] && [ "$ngx_module_link" != DYNAMIC ]; then
+        # nginx itself links OpenSSL, so for a static addon libcrypto
+        # is already on the final link line and its headers are in
+        # CORE_INCS. Covers --with-openssl=source trees (the
+        # Windows/MSVC default) where the library does not exist at
+        # configure time and a link probe cannot succeed — and the
+        # module uses the same OpenSSL nginx was built with. The
+        # headers are still PROBED before asserting the macro (#286):
+        # a clean, not-yet-built --with-openssl source tree has no
+        # generated headers yet, and blindly defining HAVE_LIBCRYPTO
+        # there breaks the compile — the probe failing selects the
+        # portable SHA-256 instead.
+        ngx_feature="OpenSSL EVP SHA-256 headers"
+        ngx_feature_name="NGX_HTTP_ZSTD_HAVE_LIBCRYPTO"
+        ngx_feature_run=no
+        ngx_feature_incs="#include <openssl/evp.h>"
+        ngx_feature_path="$CORE_INCS"
+        if [ -n "${OPENSSL:-}" ]; then
+            # A prepared --with-openssl source tree keeps its installed
+            # headers under .openssl/ (auto/lib/openssl/make) on Unix and
+            # under openssl/ (makefile.msvc's --prefix) on MSVC. Named
+            # explicitly because configure runs addon configs
+            # (auto/modules) BEFORE auto/lib/conf appends either directory
+            # to CORE_INCS, so at probe time CORE_INCS does not carry it
+            # yet -- on MSVC the probe could never succeed without this.
+            ngx_feature_path="$ngx_feature_path $OPENSSL/.openssl/include $OPENSSL/openssl/include"
+        fi
+        ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
+                          unsigned int   n;
+                          (void) md;
+                          (void) n;
+                          (void) EVP_sha256"
+        ngx_feature_libs=
+        . auto/feature
+
+        if [ "$ngx_found" = yes ]; then
+            echo " + compression: dictionary hashing uses nginx's OpenSSL"
+        else
+            echo " + compression: dictionary hashing uses portable SHA-256"
+        fi
+    else
+        ngx_feature="OpenSSL EVP SHA-256 (libcrypto)"
+        ngx_feature_name="NGX_HTTP_ZSTD_HAVE_LIBCRYPTO"
+        ngx_feature_run=no
+        ngx_feature_incs="#include <openssl/evp.h>"
+        ngx_feature_path=
+        ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
+                          unsigned int   n;
+                          if (EVP_Digest(\"x\", 1, md, &n, EVP_sha256(), NULL) != 1)
+                              return 1"
+        ngx_feature_libs="-lcrypto"
+        . auto/feature
+
+        if [ $ngx_found = yes ]; then
+            ngx_compression_libs="$ngx_compression_libs -lcrypto"
+        fi
+    fi
+else
+    echo " + compression: libcrypto detection disabled by request (portable SHA-256)"
+fi

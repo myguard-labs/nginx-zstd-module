@@ -1,0 +1,20 @@
+# CI-only stub module that registers under the exact name
+# "ngx_http_compression_vary_filter_module" (HanadaLee's Vary-flattening
+# filter) and does nothing else. When a module by that name is loaded,
+# the per-location gzip_vary-off warnings collapse into one summary
+# warning per module — see ngx_http_brotli_vary_handled_externally() in
+# ngx_http_brotli_common.h — and the CI witness loads this stub to
+# assert exactly that, then omits it to assert the per-location
+# warnings still fire. Never ship or install this module: it claims a
+# real third-party module's name.
+
+ngx_addon_name=ngx_http_compression_vary_filter_module
+ngx_module_type=HTTP
+ngx_module_name=ngx_http_compression_vary_filter_module
+ngx_module_incs=
+ngx_module_deps=
+ngx_module_srcs="$ngx_addon_dir/ngx_http_compression_vary_filter_module.c"
+ngx_module_libs=
+ngx_module_order=
+
+. auto/module

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# ZERO-HOOK GATE. The scenario conf ALWAYS load_modules two .so files out of
+# the tree run-scenario.sh is about to boot: the harness's reference probe
+# module (via @LOAD@) and this repo's compression filter (via @BUILD_OBJS@).
+# A tree missing either would fail `nginx -t` and red the scenario for a
+# build reason rather than a module one -- exiting nonzero here makes
+# run-scenario.sh emit a clean SKIP instead.
+#
+# THE GATE MUST CHECK THE TREE THAT WILL ACTUALLY BE BOOTED -- recompute the
+# same path lib.sh will ($PROBER_BUILD if set, else the .build fallback),
+# never glob other staged trees (the standalone repo's consumer-zstd gate
+# documents that trap: a matching .so in ANY tree passed the gate, then
+# nginx -t died on dlopen in the one being booted).
+set -euo pipefail
+
+FLAVOR="${2:-nginx}"
+VERSION="${3:-1.31.3}"
+BUILD="${PROBER_BUILD:-${PROBER_ROOT:-$(cd ../.. && pwd)}/.build/${FLAVOR}-${VERSION}}"
+
+CONSUMER="$BUILD/objs/ngx_http_compression_filter_module.so"
+PROBE="$BUILD/objs/ngx_http_test_ref_module.so"
+
+if [ ! -f "$CONSUMER" ]; then
+    echo "ngx_http_compression_filter_module.so not found at $CONSUMER -- build the tree with --add-dynamic-module=<repo>/compression first"
+    exit 1
+fi
+
+if [ ! -f "$PROBE" ]; then
+    echo "ngx_http_test_ref_module.so not found at $PROBE -- build the tree with --add-dynamic-module=<repo>/ci/t/harness/t/module first"
+    exit 1
+fi
+
+# Non-vacuity gate the standalone repo's gates carry: TEST_HARNESS=1 alone
+# compiles the probe sources to nothing and still yields a loadable,
+# probe-free .so. Gate on the symbol count, not the env var, so that trap
+# cannot silently return. "Cannot look" is separated from "looked and
+# found nothing" (CodeRabbit round 5): a missing or non-GNU nm must not
+# report a probe-free build and send someone rebuilding a good .so.
+if ! syms="$(nm -D "$PROBE" 2>&1)"; then
+    echo "cannot inspect $PROBE: nm -D failed (${syms:0:120}) -- GNU binutils nm required for this gate"
+    exit 1
+fi
+if ! grep -q ' ngx_test_probe_' <<<"$syms"; then
+    echo "$PROBE carries no ngx_test_probe_* symbols -- this is a probe-free build; configure with TEST_HARNESS=1 CFLAGS=\"\$CFLAGS -DNGX_TEST_HARNESS\" first"
+    exit 1
+fi
+
+exit 0

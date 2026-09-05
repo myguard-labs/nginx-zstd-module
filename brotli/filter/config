@@ -1,0 +1,208 @@
+# Copyright (C) 2015-2016 Google Inc.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+
+if [ "$ngx_addon_name" = "ngx_brotli" ]; then
+  BROTLI_MODULE_SRC_DIR="$ngx_addon_dir/filter"
+else
+  BROTLI_MODULE_SRC_DIR="$ngx_addon_dir"
+fi
+
+ngx_addon_name=ngx_brotli_filter
+
+if [ -z "$ngx_module_link" ]; then
+cat << END
+
+$0: error: Brotli module requires recent version of NGINX (1.9.11+).
+
+END
+    exit 1
+fi
+
+ngx_module_type=HTTP_FILTER
+ngx_module_name=ngx_http_brotli_filter_module
+
+use_system_brotli=no
+brotli_prefix=""
+
+if pkg-config --exists libbrotlienc 2>/dev/null ; then
+    brotli_prefix=$(pkg-config --variable=prefix libbrotlienc)
+    if [ -f "$brotli_prefix/include/brotli/encode.h" ]; then
+        use_system_brotli=yes
+    fi
+fi
+
+if [ "$use_system_brotli" = no ]; then
+    brotli="$ngx_addon_dir/deps/brotli/c"
+    if [ ! -f "$brotli/include/brotli/encode.h" ]; then
+cat <<END
+
+$0: error:
+Brotli library not found – neither a system installation detected
+(tried \`pkg-config libbrotlienc\`) nor the bundled sub‑module present.
+
+If you want to use the bundled copy, run:
+
+    cd $ngx_addon_dir && git submodule update --init && cd $PWD
+
+END
+        exit 1
+    fi
+fi
+
+ngx_module_srcs="$BROTLI_MODULE_SRC_DIR/ngx_http_brotli_filter_module.c"
+
+# Shared inline headers included by the module sources: declare them as
+# build dependencies so incremental builds rebuild the objects when they
+# change instead of leaving stale .o files behind.
+BROTLI_COMMON_H="$BROTLI_MODULE_SRC_DIR/../ngx_http_brotli_common.h \
+                 $BROTLI_MODULE_SRC_DIR/../ngx_http_brotli_sha256.h"
+
+if [ "$use_system_brotli" = yes ]; then
+    # Bare directories only: nginx's auto/make prefixes every incs token
+    # with the compiler's include option, so "-I/x" here would come out
+    # as the mangled "-I -I/x" (silently a no-op under gcc, C1083 under
+    # MSVC). Usually empty — a system libbrotli needs no -I at all.
+    ngx_module_incs="$(pkg-config --cflags-only-I libbrotlienc \
+                       | sed -e 's/-I *//g')"
+    ngx_module_libs="$(pkg-config --libs libbrotlienc) -lm"
+    ngx_module_deps="$BROTLI_COMMON_H"
+else
+    BROTLI_OUTPUT_DIRECTORY="$brotli/../out"
+    BROTLI_ENC_H="$brotli/include/brotli/encode.h \
+                  $brotli/include/brotli/port.h \
+                  $brotli/include/brotli/types.h"
+
+    ngx_module_incs="$brotli/include"
+    ngx_module_deps="$BROTLI_ENC_H $BROTLI_COMMON_H"
+
+    if [ "$NGX_CC_NAME" = "msvc" ]; then
+        # cl/link drop gcc-style -L/-l with a D9002 "ignoring unknown
+        # option" warning, so the libraries silently vanish and every
+        # BrotliEncoder* symbol comes back unresolved at the final
+        # link. Name the .lib files outright (brotli >= 1.1's cmake
+        # emits brotlienc.lib/brotlicommon.lib for a static build; see
+        # the README's Windows section for the cmake invocation — the
+        # static-CRT runtime flag there matters). No -lm equivalent:
+        # there is no separate math library on Windows.
+        ngx_module_libs="$BROTLI_OUTPUT_DIRECTORY/brotlienc.lib \
+                         $BROTLI_OUTPUT_DIRECTORY/brotlicommon.lib"
+    else
+        ngx_module_libs="-L$BROTLI_OUTPUT_DIRECTORY -lbrotlienc -lbrotlicommon -lm"
+    fi
+fi
+
+# Optional acceleration for dcb dictionary hashing: RFC 9842 keys
+# negotiation on the SHA-256 of every registered dictionary, computed at
+# config load — so nginx -t and every reload pay it. libcrypto's EVP
+# SHA-256 (hardware-accelerated where available) is roughly an order of
+# magnitude faster than the portable fallback in
+# ngx_http_brotli_sha256.h, which turns seconds into a blip at
+# hundreds-of-dictionaries scale. Feature-tested, never required: with
+# no libcrypto the portable implementation is used and nothing changes.
+# The -lcrypto goes through ngx_module_libs so it stays scoped to this
+# module (never build-global NGX_LD_OPT).
+#
+# NGX_BROTLI_NO_LIBCRYPTO=1 in the configure environment skips the
+# detection entirely (used by CI to keep the portable path covered;
+# also the escape hatch if a build must not link libcrypto).
+if [ "${NGX_BROTLI_NO_LIBCRYPTO:-0}" != 1 ]; then
+    if [ "$USE_OPENSSL" = YES -a "$ngx_module_link" != DYNAMIC ]; then
+        # nginx itself links OpenSSL (--with-http_ssl_module et al), so
+        # for a static addon libcrypto is already on the final link line
+        # and its headers are in CORE_INCS. That covers
+        # --with-openssl=source trees (the Windows/MSVC default), where
+        # the library does not even exist at configure time and a link
+        # probe CANNOT succeed — and it also means the module uses the
+        # same OpenSSL nginx was built with, rather than probing
+        # whatever the system ships. Nothing to add to ngx_module_libs.
+        have=NGX_HTTP_BROTLI_HAVE_LIBCRYPTO . auto/have
+        echo " + brotli dcb dictionary hashing uses nginx's OpenSSL"
+    else
+        ngx_feature="OpenSSL EVP SHA-256 (libcrypto)"
+        ngx_feature_name="NGX_HTTP_BROTLI_HAVE_LIBCRYPTO"
+        ngx_feature_run=no
+        ngx_feature_incs="#include <openssl/evp.h>"
+        ngx_feature_path=
+        ngx_feature_test="unsigned char  md[EVP_MAX_MD_SIZE];
+                          unsigned int   n;
+                          if (EVP_Digest(\"x\", 1, md, &n, EVP_sha256(), NULL) != 1)
+                              return 1"
+        ngx_feature_libs="-lcrypto"
+        . auto/feature
+
+        if [ $ngx_found = yes ]; then
+            ngx_module_libs="$ngx_module_libs -lcrypto"
+        fi
+    fi
+fi
+
+ngx_module_order="$ngx_module_name \
+                  ngx_pagespeed \
+                  ngx_http_postpone_filter_module \
+                  ngx_http_ssi_filter_module \
+                  ngx_http_charset_filter_module \
+                  ngx_http_xslt_filter_module \
+                  ngx_http_image_filter_module \
+                  ngx_http_sub_filter_module \
+                  ngx_http_addition_filter_module \
+                  ngx_http_gunzip_filter_module \
+                  ngx_http_userid_filter_module \
+                  ngx_http_headers_filter_module \
+                  ngx_http_copy_filter_module \
+                  ngx_http_range_body_filter_module \
+                  ngx_http_not_modified_filter_module \
+                  ngx_http_slice_filter_module"
+
+. auto/module
+
+if [ "$ngx_module_link" != DYNAMIC ]; then
+    # ngx_module_order doesn't work with static modules,
+    # so we must re-order filters here.
+
+    if [ "$HTTP_GZIP" = YES ]; then
+        next=ngx_http_gzip_filter_module
+    elif echo $HTTP_FILTER_MODULES | grep pagespeed_etag_filter >/dev/null; then
+        next=ngx_pagespeed_etag_filter
+    else
+        next=ngx_http_range_header_filter_module
+    fi
+
+    HTTP_FILTER_MODULES=`echo $HTTP_FILTER_MODULES \
+                         | sed "s/$ngx_module_name//" \
+                         | sed "s/$next/$next $ngx_module_name/"`
+fi
+
+# Branch on NGX_CC_NAME, not the historical NGX_MSVC_VER: nginx removed
+# that variable from configure years ago, so the old test was always
+# true — an MSVC build got the gcc flag and died with
+# "D8021: invalid numeric argument '/Wno-deprecated-declarations'".
+# auto/cc/name sets NGX_CC_NAME=msvc reliably on every supported nginx.
+if [ "$NGX_CC_NAME" = "msvc" ]; then
+    CFLAGS="$CFLAGS -Y- -wd4127 -wd4189 -wd4201 -wd4334 -wd4702"
+else
+    CFLAGS="$CFLAGS -Wno-deprecated-declarations"
+fi
+
+have=NGX_HTTP_BROTLI_FILTER . auto/have
+have=NGX_HTTP_BROTLI_FILTER_MODULE . auto/have  # deprecated
