@@ -747,3 +747,198 @@ GET /ok
 --- error_code: 200
 --- no_error_log eval
 [qr/zstd_static_dict_bypass on. but ngx_http_zstd_filter_module/, qr/\[emerg\]/]
+
+
+
+=== TEST 26: zstd_dict_strict_path refuses a path that names a directory
+# "/" is absolute, so the walk starts, vets the root, and then finds no
+# component left to open: there is no leaf. Refused as naming a
+# directory rather than opened and rejected later as not a regular
+# file, so the operator hears what is wrong with the PATH.
+--- http_config
+    zstd_dict_file_unsafe on;
+    zstd_dict_strict_path on;
+    zstd_dict_file /;
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+"/" names a directory, not a dictionary file; refused by "zstd_dict_strict_path on"
+--- no_error_log
+[alert]
+
+
+
+=== TEST 27: zstd_dict_strict_path opens the last component as the leaf even with a trailing separator
+# A trailing "/" does not add a component: the walk opens "html" as the
+# leaf, with the file flags rather than O_DIRECTORY, and hands it back.
+# The loader's own regular-file check then refuses the directory, so the
+# rejection comes from the leaf checks, not from the walk.
+--- http_config eval
+"    zstd_dict_file_unsafe on;
+    zstd_dict_strict_path on;
+    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/;"
+--- post_setup_server_root eval
+'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";'
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log eval
+qr{"[^"]+/html/" is not a regular file}
+--- no_error_log
+[alert]
+
+
+
+=== TEST 28: zstd_dict_strict_path refuses a world-writable intermediate directory
+# A33-F2: every directory the walk opens is vetted before it is trusted
+# as the base of the next openat(). A mode-0777 ancestor lets any local
+# user rename a file into place, so it is refused by name even though
+# the leaf itself is self-owned 0644.
+--- http_config eval
+"    zstd_dict_file_unsafe on;
+    zstd_dict_strict_path on;
+    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/loose/zstd.dict;"
+--- post_setup_server_root eval
+'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";
+my $dir = "$root/html/loose";
+mkdir $dir or die "mkdir $dir: $!";
+open my $fh, ">", "$dir/zstd.dict" or die "open zstd.dict: $!";
+print $fh "the quick brown fox jumps over the lazy dog";
+close $fh;
+chmod(0644, "$dir/zstd.dict") == 1 or die "chmod zstd.dict: $!";
+chmod(0777, $dir) == 1 or die "chmod loose: $!";'
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+directory component "loose" of
+writable by group or other
+--- no_error_log
+[alert]
+
+
+
+=== TEST 29: zstd_dict_strict_path grants no sticky-bit exemption to a world-writable intermediate directory
+# A sticky world-writable ancestor (the /tmp layout) still lets an
+# unprivileged user CREATE the next component; it only stops them
+# renaming someone else's entry away, which is not the attack. Refused
+# exactly like the plain 0777 case, and the diagnostic says so.
+--- http_config eval
+"    zstd_dict_file_unsafe on;
+    zstd_dict_strict_path on;
+    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/sticky/zstd.dict;"
+--- post_setup_server_root eval
+'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";
+my $dir = "$root/html/sticky";
+mkdir $dir or die "mkdir $dir: $!";
+open my $fh, ">", "$dir/zstd.dict" or die "open zstd.dict: $!";
+print $fh "the quick brown fox jumps over the lazy dog";
+close $fh;
+chmod(0644, "$dir/zstd.dict") == 1 or die "chmod zstd.dict: $!";
+chmod(01777, $dir) == 1 or die "chmod sticky: $!";'
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+directory component "sticky" of
+no sticky-bit exemption
+--- no_error_log
+[alert]
+
+
+
+=== TEST 30: zstd_dict_strict_path refuses a group-writable intermediate directory
+# The group bit alone is enough: the rule is S_IWGRP | S_IWOTH, the
+# same one the leaf check applies, not world-writable only.
+--- http_config eval
+"    zstd_dict_file_unsafe on;
+    zstd_dict_strict_path on;
+    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/shared/zstd.dict;"
+--- post_setup_server_root eval
+'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";
+my $dir = "$root/html/shared";
+mkdir $dir or die "mkdir $dir: $!";
+open my $fh, ">", "$dir/zstd.dict" or die "open zstd.dict: $!";
+print $fh "the quick brown fox jumps over the lazy dog";
+close $fh;
+chmod(0644, "$dir/zstd.dict") == 1 or die "chmod zstd.dict: $!";
+chmod(0775, $dir) == 1 or die "chmod shared: $!";'
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+directory component "shared" of
+writable by group or other
+--- no_error_log
+[alert]
+
+
+
+=== TEST 31: zstd_dict_strict_path loads a real nested path and serves
+# The complement every refusal above needs: two self-owned 0755
+# directories below html and a 0644 leaf walk clean, the dictionary
+# loads, and the location serves. Without this block a walk that
+# refused everything would pass TESTs 21, 22 and 26-30.
+--- http_config eval
+"    zstd_dict_file_unsafe on;
+    zstd_dict_strict_path on;
+    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/releases/7/zstd.dict;"
+--- post_setup_server_root eval
+'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
+chmod(0755, $root, "$root/html") == 2
+    or die "chmod strict-path fixture: $!";
+for my $dir ("$root/html/releases", "$root/html/releases/7") {
+    mkdir $dir or die "mkdir $dir: $!";
+    chmod(0755, $dir) == 1 or die "chmod $dir: $!";
+}
+open my $fh, ">", "$root/html/releases/7/zstd.dict" or die "open zstd.dict: $!";
+print $fh "the quick brown fox jumps over the lazy dog";
+close $fh;
+chmod(0644, "$root/html/releases/7/zstd.dict") == 1 or die "chmod zstd.dict: $!";'
+--- config
+    location /d {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again and again";
+    }
+--- request
+GET /d
+--- more_headers
+Accept-Encoding: zstd
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[emerg]
+[error]
+[alert]

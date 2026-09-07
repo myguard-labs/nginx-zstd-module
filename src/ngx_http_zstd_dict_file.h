@@ -287,6 +287,79 @@ ngx_http_zstd_dict_file_check_dir(int fd, ngx_http_zstd_dict_walk_t *walk)
 
 
 /*
+ * Cut the next path component out of [*start, end) for the walk: skip
+ * the run of separators in front of it, copy it NUL-terminated into
+ * walk->component, and report through *last whether only separators
+ * follow it (so it is the leaf). Advances *start to the byte after the
+ * component. Three refusals the walk used to make inline are reported
+ * here, in the order the walk made them: nothing but separators left
+ * (the path names a directory, not a file), a component too long for
+ * the buffer, and a "." or ".." component.
+ *
+ * openat() needs a NUL-terminated component. The component is COPIED
+ * into the report's buffer rather than NUL-terminated in place:
+ * path->data is nginx's own config string, and writing into it -- even
+ * a byte restored immediately afterwards -- would mutate shared config
+ * memory that other directives and the error log still read. A
+ * component longer than the buffer cannot name a file any filesystem
+ * will accept, so it is refused rather than silently truncated
+ * (truncation would open a DIFFERENT name).
+ *
+ * "." and ".." are refused rather than resolved: ".." would climb back
+ * above a component already verified, which makes the walk's guarantee
+ * unstatable, and neither has a legitimate place in a deployed
+ * dictionary path.
+ */
+static ngx_inline ngx_http_zstd_dict_walk_rc_t
+ngx_http_zstd_dict_file_next_component(u_char **start, u_char *end,
+    ngx_http_zstd_dict_walk_t *walk, int *last)
+{
+    u_char  *s, *p, *q;
+    size_t   complen;
+
+    s = *start;
+
+    /* skip any run of separators; a trailing one means no leaf */
+    while (s < end && *s == '/') {
+        s++;
+    }
+
+    if (s >= end) {
+        return NGX_HTTP_ZSTD_DICT_WALK_DIRECTORY;
+    }
+
+    for (p = s; p < end && *p != '/'; p++) { /* void */ }
+
+    complen = (size_t) (p - s);
+
+    if (complen >= sizeof(walk->component)) {
+        return NGX_HTTP_ZSTD_DICT_WALK_COMPONENT_LONG;
+    }
+
+    ngx_memcpy(walk->component, s, complen);
+    walk->component[complen] = '\0';
+
+    *last = 1;
+    for (q = p; q < end; q++) {
+        if (*q != '/') {
+            *last = 0;
+            break;
+        }
+    }
+
+    if (ngx_strcmp(walk->component, ".") == 0
+        || ngx_strcmp(walk->component, "..") == 0)
+    {
+        return NGX_HTTP_ZSTD_DICT_WALK_DOT;
+    }
+
+    *start = p;
+
+    return NGX_HTTP_ZSTD_DICT_WALK_OK;
+}
+
+
+/*
  * Strict-mode component-by-component open (M3).
  *
  * O_NOFOLLOW on the full path guards ONLY the leaf: the kernel resolves
@@ -315,8 +388,8 @@ static ngx_inline ngx_fd_t
 ngx_http_zstd_dict_file_open_strict(ngx_str_t *path, int flags,
     ngx_http_zstd_dict_walk_t *walk)
 {
-    u_char  *p, *start, *end;
-    int      fd, next, oflags;
+    u_char  *start, *end;
+    int      fd, next, oflags, last;
 
     walk->rc = NGX_HTTP_ZSTD_DICT_WALK_OK;
     walk->err = 0;
@@ -361,108 +434,51 @@ ngx_http_zstd_dict_file_open_strict(ngx_str_t *path, int flags,
     end = path->data + path->len;
 
     for ( ;; ) {
-        /* skip any run of separators; only a path with nothing but
-         * separators left has no leaf (separators AFTER the last
-         * component do not add one: "/srv/a.dict/" opens a.dict) */
-        while (start < end && *start == '/') {
-            start++;
-        }
-
-        if (start >= end) {
-            walk->rc = NGX_HTTP_ZSTD_DICT_WALK_DIRECTORY;
+        walk->rc = ngx_http_zstd_dict_file_next_component(&start, end, walk,
+                                                          &last);
+        if (walk->rc != NGX_HTTP_ZSTD_DICT_WALK_OK) {
             ngx_close_file(fd);
             return NGX_INVALID_FILE;
         }
 
-        for (p = start; p < end && *p != '/'; p++) { /* void */ }
-
         /*
-         * openat() needs a NUL-terminated component. The component is
-         * COPIED into the report's buffer rather than NUL-terminated in
-         * place: path->data is nginx's own config string, and writing
-         * into it -- even a byte restored immediately afterwards -- would
-         * mutate shared config memory that other directives and the
-         * error log still read. A component longer than the buffer
-         * cannot name a file any filesystem will accept, so it is
-         * refused rather than silently truncated (truncation would open
-         * a DIFFERENT name).
+         * O_CLOEXEC is applied to BOTH arms deliberately. Folding it
+         * into the ternary via a bare "#ifdef ... | O_CLOEXEC" would
+         * bind it to the else-branch alone by C's precedence rules,
+         * silently leaving the leaf fd inheritable across an exec.
          */
-        {
-            u_char  *comp = walk->component;
-            size_t   complen = (size_t) (p - start);
-            int      last;
-            u_char  *q;
-
-            if (complen >= sizeof(walk->component)) {
-                walk->rc = NGX_HTTP_ZSTD_DICT_WALK_COMPONENT_LONG;
-                ngx_close_file(fd);
-                return NGX_INVALID_FILE;
-            }
-
-            ngx_memcpy(comp, start, complen);
-            comp[complen] = '\0';
-
-            last = 1;
-            for (q = p; q < end; q++) {
-                if (*q != '/') {
-                    last = 0;
-                    break;
-                }
-            }
-
-            /*
-             * "." and ".." are refused rather than resolved: ".." would
-             * climb back above a component already verified, which
-             * makes the walk's guarantee unstatable, and neither has a
-             * legitimate place in a deployed dictionary path.
-             */
-            if (ngx_strcmp(comp, ".") == 0 || ngx_strcmp(comp, "..") == 0) {
-                walk->rc = NGX_HTTP_ZSTD_DICT_WALK_DOT;
-                ngx_close_file(fd);
-                return NGX_INVALID_FILE;
-            }
-
-            /*
-             * O_CLOEXEC is applied to BOTH arms deliberately. Folding it
-             * into the ternary via a bare "#ifdef ... | O_CLOEXEC" would
-             * bind it to the else-branch alone by C's precedence rules,
-             * silently leaving the leaf fd inheritable across an exec.
-             */
-            oflags = last ? (flags | O_NOFOLLOW)
-                          : (O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        oflags = last ? (flags | O_NOFOLLOW)
+                      : (O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
 #ifdef O_CLOEXEC
-            oflags |= O_CLOEXEC;
+        oflags |= O_CLOEXEC;
 #endif
 
-            next = openat(fd, (char *) comp, oflags);
+        next = openat(fd, (char *) walk->component, oflags);
 
-            if (next < 0) {
-                /* errno first: the close below is free to clobber it */
-                walk->err = ngx_errno;
-                walk->rc = NGX_HTTP_ZSTD_DICT_WALK_OPENAT;
-                ngx_close_file(fd);
-                return NGX_INVALID_FILE;
-            }
-
+        if (next < 0) {
+            /* errno first: the close below is free to clobber it */
+            walk->err = ngx_errno;
+            walk->rc = NGX_HTTP_ZSTD_DICT_WALK_OPENAT;
             ngx_close_file(fd);
-            fd = next;
+            return NGX_INVALID_FILE;
+        }
 
-            if (last) {
-                return fd;
-            }
+        ngx_close_file(fd);
+        fd = next;
 
-            /*
-             * `next`/`fd` is a directory fd that will be trusted as the
-             * base for the next openat() -- vet it before it is used
-             * for anything else, same rule as the root fd above.
-             */
-            walk->rc = ngx_http_zstd_dict_file_check_dir(fd, walk);
-            if (walk->rc != NGX_HTTP_ZSTD_DICT_WALK_OK) {
-                ngx_close_file(fd);
-                return NGX_INVALID_FILE;
-            }
+        if (last) {
+            return fd;
+        }
 
-            start = p;
+        /*
+         * `next`/`fd` is a directory fd that will be trusted as the
+         * base for the next openat() -- vet it before it is used for
+         * anything else, same rule as the root fd above.
+         */
+        walk->rc = ngx_http_zstd_dict_file_check_dir(fd, walk);
+        if (walk->rc != NGX_HTTP_ZSTD_DICT_WALK_OK) {
+            ngx_close_file(fd);
+            return NGX_INVALID_FILE;
         }
     }
 }

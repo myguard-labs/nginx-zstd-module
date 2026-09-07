@@ -74,7 +74,8 @@ if ! grep -Fq '#include "ngx_http_zstd_dict_file.h"' \
 	exit 1
 fi
 for fn in ngx_http_zstd_dict_file_read ngx_http_zstd_hex_nibble \
-	ngx_http_zstd_dict_file_check_dir ngx_http_zstd_dict_file_open_strict; do
+	ngx_http_zstd_dict_file_check_dir ngx_http_zstd_dict_file_next_component \
+	ngx_http_zstd_dict_file_open_strict; do
 	check_definition "$root/src/ngx_http_zstd_dict_file.h" "$fn" "$root"
 done
 
