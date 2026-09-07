@@ -19,6 +19,7 @@
 #include "ngx_http_zstd_sha256.h"
 #include "ngx_http_zstd_version.h"
 #include "ngx_http_zstd_ratio.h"
+#include "ngx_http_zstd_dict_file.h"
 
 #ifdef NGX_TEST_HARNESS
 #include "ngx_http_zstd_probe_hooks.h"
@@ -151,25 +152,6 @@ ngx_http_zstd_ceil_log2(size_t x)
 
     return wlog;
 #endif
-}
-
-
-static ngx_inline u_char
-ngx_http_zstd_hex_nibble(u_char c)
-{
-    u_char  lower;
-
-    if (c >= '0' && c <= '9') {
-        return (u_char) (c - '0');
-    }
-
-    lower = (u_char) (c | 0x20);
-
-    if (lower >= 'a' && lower <= 'f') {
-        return (u_char) (lower - 'a' + 10);
-    }
-
-    return 0xff;
 }
 
 
@@ -4668,31 +4650,18 @@ ngx_http_zstd_open_dict_file(ngx_conf_t *cf, ngx_str_t *path,
 /*
  * Read exactly `size` bytes of a dictionary file into `buf`, or fail.
  *
- * Both dictionary loaders (zstd_dict_file and the dcz loader) previously
- * issued ONE ngx_read_fd() and treated any short count as fatal. That is
- * wrong twice over:
- *
- *   - read() on a regular file is permitted to return fewer bytes than
- *     requested. It usually does not on a local ext4/xfs file, which is
- *     why the single-read form survived, but it is not a guarantee the
- *     kernel makes. A 9p/drvfs mount (a WSL /mnt/c dictionary, a Plan 9
- *     export) returns a short count on a regular file as normal
- *     behaviour, and a large enough dictionary then fails config load.
- *   - EINTR. A signal delivered mid-read returns early with no bytes
- *     lost and nothing wrong; the caller is expected to reissue. The
- *     master is parsing configuration here, so it is squarely in a
- *     window where signals arrive. This one is independent of the file
- *     system AND of O_NONBLOCK -- clearing that flag (which the opener
- *     does, and should) does not remove it.
- *
- * Loop until the buffer is full, treating a short count as "continue"
- * rather than "fail", and reissue on EINTR. Two failures remain fatal
- * and are reported distinctly, because they mean different things to an
- * operator: a read error (the file became unreadable) and early EOF (the
- * file shrank between fstat() and here, so the dictionary on disk is not
- * the dictionary whose size we validated and allocated for). Neither may
- * be silently tolerated -- a partially-populated buffer handed to
- * ZSTD_createCDict() is a dictionary made partly of uninitialised heap.
+ * The loop itself -- short counts resumed, EINTR reissued, early EOF
+ * surfaced -- is ngx_http_zstd_dict_file_read() in
+ * ngx_http_zstd_dict_file.h, THE authoritative copy shared with the
+ * compression branch (see the header for the short-read and EINTR
+ * argument in full). This is the module's logging shell around it: the
+ * two failure outcomes are reported distinctly, because they mean
+ * different things to an operator -- a read error (the file became
+ * unreadable) and early EOF (the file shrank between fstat() and here,
+ * so the dictionary on disk is not the dictionary whose size we
+ * validated and allocated for). Neither may be silently tolerated -- a
+ * partially-populated buffer handed to ZSTD_createCDict() is a
+ * dictionary made partly of uninitialised heap.
  *
  * Callers have already validated `size` (non-zero, <= MAX_DICT_SIZE) and
  * allocated `buf` for exactly that many bytes.
@@ -4702,52 +4671,22 @@ ngx_http_zstd_read_dict_file(ngx_conf_t *cf, ngx_fd_t fd, ngx_str_t *path,
     u_char *buf, size_t size)
 {
     ssize_t  n;
-    size_t   done;
 
-    for (done = 0; done < size; /* void */) {
+    n = ngx_http_zstd_dict_file_read(fd, buf, size);
 
-        n = ngx_read_fd(fd, (void *) (buf + done), size - done);
+    if (n < 0) {
+        /* ngx_errno is the failing read's: the loop returns straight out */
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_read_fd_n " \"%V\" failed", path);
+        return NGX_ERROR;
+    }
 
-        if (n < 0) {
-
-#if !(NGX_WIN32)
-            /*
-             * Interrupted before transferring anything: not an error,
-             * reissue. ngx_errno is read immediately so nothing between
-             * here and the test can clobber it.
-             *
-             * POSIX only, and NGX_WIN32 rather than a "does NGX_EINTR
-             * exist" test because that is the actual reason: win32's
-             * ngx_errno.h defines no NGX_EINTR at all, because ReadFile()
-             * on a synchronous handle is not interruptible -- there is no
-             * such error to retry. Guarding on the platform says so;
-             * guarding on the macro would read as a portability
-             * workaround for a value that is merely spelled differently.
-             */
-            if (ngx_errno == NGX_EINTR) {
-                continue;
-            }
-#endif
-
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
-                               ngx_read_fd_n " \"%V\" failed", path);
-            return NGX_ERROR;
-        }
-
-        if (n == 0) {
-            /*
-             * EOF with bytes still owed. The file is shorter than the
-             * fstat() that sized this buffer said it was -- it was
-             * truncated or replaced underneath us mid-load.
-             */
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "dictionary file \"%V\" ended after %uz of "
-                               "%uz bytes; it changed size during config "
-                               "load", path, done, size);
-            return NGX_ERROR;
-        }
-
-        done += (size_t) n;
+    if ((size_t) n != size) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "dictionary file \"%V\" ended after %uz of "
+                           "%uz bytes; it changed size during config "
+                           "load", path, (size_t) n, size);
+        return NGX_ERROR;
     }
 
     return NGX_OK;

@@ -361,9 +361,10 @@ jobs:
           # field the profile packer refuses to mask. Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_dcz_window_log_unit.sh
 
-          # ngx_http_zstd_read_dict_file(): the shared read-to-completion
-          # loop both dictionary loaders use. Extracts the helper verbatim
-          # and drives it against a scripted ngx_read_fd stub, because the
+          # ngx_http_zstd_dict_file_read(): the shared read-to-completion
+          # loop both dictionary loaders use, included from its header,
+          # plus the module's logging shell around it extracted verbatim.
+          # Drives both against a scripted ngx_read_fd stub, because the
           # three behaviours that matter -- a short count is resumed, EINTR
           # is retried without losing progress, and early EOF is fatal --
           # are not reachable from a config-level fixture on a local
