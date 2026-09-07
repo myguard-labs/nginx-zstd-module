@@ -417,14 +417,35 @@ main(void)
     check("repeated separators: same three calls", ncalls, 3);
     check_hygiene("repeated separators", fd);
 
-    /* a trailing separator still opens the last component as the leaf */
+    /*
+     * A trailing separator names a directory, as it does for open(2)
+     * (ENOTDIR on a regular file): the last component is never opened
+     * as a leaf. The intermediate directories before it are still
+     * walked and vetted, so the refusal comes after "dicts" is opened.
+     */
     layout_happy();
     path = str("/srv/dicts/a.dict/");
     fd = ngx_http_zstd_dict_file_open_strict(&path, FILE_FLAGS, &walk);
-    check("trailing separator: last component is the leaf", fd, 103);
-    check("trailing separator: leaf opened with the file flags",
-          calls[2].flags, FILE_FLAGS | O_NOFOLLOW | CLOEXEC);
+    check("trailing separator: refused", fd, NGX_INVALID_FILE);
+    check("trailing separator: rc DIRECTORY", walk.rc,
+          NGX_HTTP_ZSTD_DICT_WALK_DIRECTORY);
+    check("trailing separator: the last component is never opened",
+          ncalls, 2);
     check_hygiene("trailing separator", fd);
+
+    layout_happy();
+    path = str("/srv/dicts/a.dict///");
+    fd = ngx_http_zstd_dict_file_open_strict(&path, FILE_FLAGS, &walk);
+    check("repeated trailing separators: rc DIRECTORY", walk.rc,
+          NGX_HTTP_ZSTD_DICT_WALK_DIRECTORY);
+    check_hygiene("repeated trailing separators", fd);
+
+    /* a separator run BETWEEN components is still just a separator */
+    layout_happy();
+    path = str("/srv//dicts/a.dict");
+    fd = ngx_http_zstd_dict_file_open_strict(&path, FILE_FLAGS, &walk);
+    check("separator run between components: leaf opens", fd, 103);
+    check_hygiene("separator run between components", fd);
 
     printf("# refusals before any file is touched\n");
 

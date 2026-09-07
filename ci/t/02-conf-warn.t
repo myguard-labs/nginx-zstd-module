@@ -773,15 +773,20 @@ GET /ok
 
 
 
-=== TEST 27: zstd_dict_strict_path opens the last component as the leaf even with a trailing separator
-# A trailing "/" does not add a component: the walk opens "html" as the
-# leaf, with the file flags rather than O_DIRECTORY, and hands it back.
-# The loader's own regular-file check then refuses the directory, so the
-# rejection comes from the leaf checks, not from the walk.
+=== TEST 27: zstd_dict_strict_path refuses a trailing separator as naming a directory
+# open(2) on "/x/dict.zdict/" fails with ENOTDIR: the trailing separator
+# requires a directory. The walk used to open the last component as the
+# leaf anyway, accepting a regular file the kernel would have refused;
+# it now stops after vetting the directories before it and refuses the
+# path as naming a directory. The fixture's leaf IS a regular file, so
+# the old behaviour would have loaded it and served.
 --- http_config eval
 "    zstd_dict_file_unsafe on;
     zstd_dict_strict_path on;
-    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/;"
+    zstd_dict_file \$TEST_NGINX_SERVER_ROOT/html/zstd.dict/;"
+--- user_files
+>>> zstd.dict
+the quick brown fox jumps over the lazy dog
 --- post_setup_server_root eval
 'my $root = $ENV{TEST_NGINX_SERVER_ROOT} or die "TEST_NGINX_SERVER_ROOT unset";
 chmod(0755, $root, "$root/html") == 2
@@ -794,7 +799,7 @@ chmod(0755, $root, "$root/html") == 2
     }
 --- must_die
 --- error_log eval
-qr{"[^"]+/html/" is not a regular file}
+qr{"[^"]+/html/zstd\.dict/" names a directory, not a dictionary file; refused by "zstd_dict_strict_path on"}
 --- no_error_log
 [alert]
 

@@ -291,10 +291,17 @@ ngx_http_zstd_dict_file_check_dir(int fd, ngx_http_zstd_dict_walk_t *walk)
  * the run of separators in front of it, copy it NUL-terminated into
  * walk->component, and report through *last whether only separators
  * follow it (so it is the leaf). Advances *start to the byte after the
- * component. Three refusals the walk used to make inline are reported
- * here, in the order the walk made them: nothing but separators left
- * (the path names a directory, not a file), a component too long for
- * the buffer, and a "." or ".." component.
+ * component. Four refusals are reported here: nothing but separators
+ * left (the path names a directory, not a file), a component too long
+ * for the buffer, a "." or ".." component, and separators after the
+ * final component.
+ *
+ * That last one is what "a trailing separator means no leaf" has always
+ * said and the walk never did: "/srv/dict.zdict/" opened dict.zdict as
+ * the leaf and accepted a regular file, where open(2) on that path
+ * fails with ENOTDIR because the trailing separator requires a
+ * directory. Strict mode now agrees with the kernel and refuses it as
+ * naming a directory.
  *
  * openat() needs a NUL-terminated component. The component is COPIED
  * into the report's buffer rather than NUL-terminated in place:
@@ -339,20 +346,23 @@ ngx_http_zstd_dict_file_next_component(u_char **start, u_char *end,
     ngx_memcpy(walk->component, s, complen);
     walk->component[complen] = '\0';
 
-    *last = 1;
-    for (q = p; q < end; q++) {
-        if (*q != '/') {
-            *last = 0;
-            break;
-        }
-    }
-
     if (ngx_strcmp(walk->component, ".") == 0
         || ngx_strcmp(walk->component, "..") == 0)
     {
         return NGX_HTTP_ZSTD_DICT_WALK_DOT;
     }
 
+    /*
+     * Only separators after this component: it was meant as a
+     * directory, so there is no leaf to open (see above).
+     */
+    for (q = p; q < end && *q == '/'; q++) { /* void */ }
+
+    if (p < end && q == end) {
+        return NGX_HTTP_ZSTD_DICT_WALK_DIRECTORY;
+    }
+
+    *last = (p == end);
     *start = p;
 
     return NGX_HTTP_ZSTD_DICT_WALK_OK;
