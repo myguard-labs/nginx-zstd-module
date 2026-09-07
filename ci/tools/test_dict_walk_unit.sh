@@ -41,8 +41,16 @@ fi
 
 # Every refusal the walk can report must have a message in the module's
 # switch: a code added to the header without a case is a silent refusal.
-for code in $(sed -n '/^typedef enum {$/,/^} ngx_http_zstd_dict_walk_rc_t;$/p' "$HDR" \
-              | grep -o 'NGX_HTTP_ZSTD_DICT_WALK_[A-Z_]*' | sort -u); do
+# The extraction itself is checked first: renamed or reformatted enum
+# markers would yield no codes, and a loop over nothing passes.
+codes=$(sed -n '/^typedef enum {$/,/^} ngx_http_zstd_dict_walk_rc_t;$/p' "$HDR" \
+        | grep -o 'NGX_HTTP_ZSTD_DICT_WALK_[A-Z_]*' | sort -u || true)
+ncodes=$(printf '%s\n' "$codes" | grep -c . || true)
+if [ "$ncodes" -lt 2 ]; then
+    echo "FAIL: could not extract the walk refusal codes from $HDR (found $ncodes); the enum was renamed or reformatted" >&2
+    exit 1
+fi
+for code in $codes; do
     if ! grep -q "case $code:" "$SRC"; then
         echo "FAIL: $SRC has no diagnostic for $code" >&2
         exit 1

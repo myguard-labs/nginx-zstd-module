@@ -25,11 +25,15 @@
  *     #define ngx_memcpy               memcpy
  *     #define ngx_strcmp(a, b)         strcmp((const char *) (a), ...)
  *     #define ngx_close_file           close        (or a stub)
- * The strict walk calls open(), openat(), fstat() and geteuid() by their
- * libc names; a fixture that includes the system headers first may
- * redefine those four as function-like macros over scripted fakes
- * (ci/tools/test_dict_walk_unit.c does), so every exit is reachable
- * without a filesystem. When nginx has not defined ngx_inline it expands
+ * A consumer that defines NGX_WIN32 to 0 (rather than leaving it
+ * undefined) gets the same POSIX build: both guards below test the value.
+ * ssize_t and uid_t come from <sys/types.h>, which the header includes
+ * on that build. The strict walk calls open(), openat(), fstat() and
+ * geteuid() by their libc names; a fixture that includes the system
+ * headers first may redefine those four as function-like macros over
+ * scripted fakes (ci/tools/test_dict_walk_unit.c does), so every exit
+ * is reachable without a filesystem. When nginx has not defined
+ * ngx_inline it expands
  * to nothing: the definitions are already `static`, and an empty
  * fallback keeps a conforming C89 compile valid, where `inline` is not
  * a keyword -- a fixture that uses only part of the family defines
@@ -53,8 +57,8 @@
 #define NGX_HTTP_ZSTD_DICT_FILE_H
 
 #include <stddef.h>
-#ifndef NGX_WIN32
-#include <sys/types.h>   /* ssize_t */
+#if !(NGX_WIN32)
+#include <sys/types.h>   /* ssize_t, uid_t; the same test as the walk's */
 #endif
 
 #ifndef ngx_inline

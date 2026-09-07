@@ -68,8 +68,11 @@ check_definition "$root/src/ngx_http_zstd_ratio.h" \
 # each keep exactly one definition. The module's logging shell around
 # the loop (ngx_http_zstd_read_dict_file) keeps its name and stays in
 # the module; it is not part of the family.
-grep -Fq '#include "ngx_http_zstd_dict_file.h"' \
-	"$root/src/ngx_http_zstd_filter_module.c"
+if ! grep -Fq '#include "ngx_http_zstd_dict_file.h"' \
+	"$root/src/ngx_http_zstd_filter_module.c"; then
+	echo 'probe seam: src/ngx_http_zstd_filter_module.c no longer includes ngx_http_zstd_dict_file.h' >&2
+	exit 1
+fi
 for fn in ngx_http_zstd_dict_file_read ngx_http_zstd_hex_nibble \
 	ngx_http_zstd_dict_file_check_dir ngx_http_zstd_dict_file_open_strict; do
 	check_definition "$root/src/ngx_http_zstd_dict_file.h" "$fn" "$root"

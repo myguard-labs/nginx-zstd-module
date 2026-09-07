@@ -203,6 +203,7 @@ main(void)
     ngx_conf_t  cf;
     ssize_t     n;
     ngx_int_t   rc;
+    int         read_errno;
 
     path.len = 4;
     path.data = (u_char *) "d.dc";
@@ -273,8 +274,10 @@ main(void)
     errno = 0;
     push(500, 0); push(-1, EIO);
     n = ngx_http_zstd_dict_file_read(3, buf, 1024);
+    read_errno = errno;     /* before check() prints: stdio may set errno */
     check("read error returns -1", (long) n, -1);
-    check("read error leaves the failing read's errno in place", errno, EIO);
+    check("read error leaves the failing read's errno in place", read_errno,
+          EIO);
     check("read error is not retried", step_i, 2);
 
     /*

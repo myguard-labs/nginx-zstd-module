@@ -71,6 +71,15 @@ static uid_t    root_uid;
 static mode_t   root_mode;
 static uid_t    fake_euid = 500;
 
+/*
+ * Declared before the fakes: a violated fixture invariant -- open() of
+ * anything but "/", openat() through a closed dirfd, close() of an fd
+ * that is not open -- must FAIL the run, not just print. The walk
+ * ignores close()'s return and check_hygiene() counts only fds still
+ * open, so nothing else would notice a double close.
+ */
+static int      failures;
+
 /* per-fd bookkeeping: fd -> node index (-1 for the root), open state */
 static int      fd_node[256];
 static int      fd_open[256];
@@ -113,6 +122,7 @@ fake_open(const char *name, int flags)
 
     if (strcmp(name, "/") != 0) {
         fprintf(stderr, "FAIL: open(\"%s\"): the walk opens only \"/\"\n", name);
+        failures++;
         errno = EINVAL;
         return -1;
     }
@@ -147,6 +157,7 @@ fake_openat(int dirfd, const char *name, int flags)
 
     if (dirfd < 0 || dirfd >= 256 || !fd_open[dirfd]) {
         fprintf(stderr, "FAIL: openat() on fd %d, which is not open\n", dirfd);
+        failures++;
         errno = EBADF;
         return -1;
     }
@@ -212,6 +223,7 @@ fake_close(int fd)
 {
     if (fd < 0 || fd >= 256 || !fd_open[fd]) {
         fprintf(stderr, "FAIL: close(%d) on an fd that is not open\n", fd);
+        failures++;
         errno = EBADF;
         return -1;
     }
@@ -241,8 +253,6 @@ fake_close(int fd)
 #endif
 
 /* --- harness ---------------------------------------------------------- */
-
-static int  failures;
 
 static void
 check(const char *name, long got, long want)
