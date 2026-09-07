@@ -70,7 +70,8 @@ check_definition "$root/src/ngx_http_zstd_ratio.h" \
 # the module; it is not part of the family.
 grep -Fq '#include "ngx_http_zstd_dict_file.h"' \
 	"$root/src/ngx_http_zstd_filter_module.c"
-for fn in ngx_http_zstd_dict_file_read ngx_http_zstd_hex_nibble; do
+for fn in ngx_http_zstd_dict_file_read ngx_http_zstd_hex_nibble \
+	ngx_http_zstd_dict_file_check_dir ngx_http_zstd_dict_file_open_strict; do
 	check_definition "$root/src/ngx_http_zstd_dict_file.h" "$fn" "$root"
 done
 

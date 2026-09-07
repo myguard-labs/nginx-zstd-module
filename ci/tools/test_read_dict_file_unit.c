@@ -35,6 +35,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <sys/types.h>   /* ssize_t */
+#include <unistd.h>      /* close(), for the walk's contract */
 
 /* --- minimal nginx type/macro surface the header and the shell need --- */
 
@@ -48,6 +49,13 @@ typedef unsigned char u_char;
 #define NGX_EINTR     EINTR
 #define ngx_errno     errno
 #define ngx_read_fd_n "read()"
+
+/* the strict walk's contract: compiled in with the header, unused here */
+#define NGX_INVALID_FILE  -1
+#define NGX_MAX_PATH      4096
+#define ngx_memcpy        memcpy
+#define ngx_strcmp(a, b)  strcmp((const char *) (a), (const char *) (b))
+#define ngx_close_file    close
 
 typedef struct { size_t len; u_char *data; } ngx_str_t;
 typedef struct { int unused; } ngx_conf_t;
@@ -130,6 +138,14 @@ ngx_read_fd(ngx_fd_t fd, void *buf, size_t size)
     delivered += give;
     return (ssize_t) give;
 }
+
+/*
+ * The header's members are `static ngx_inline`; this fixture uses the
+ * loop and the hex decoder but not the strict walk, so ngx_inline must
+ * be a real `inline` here or -Werror=unused-function fires on the walk.
+ * (The C89 pass in the .sh keeps the empty fallback and allows unused.)
+ */
+#define ngx_inline  inline
 
 #include "../../src/ngx_http_zstd_dict_file.h"
 #include "generated_read_dict_file.inc"

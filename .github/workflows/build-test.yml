@@ -372,6 +372,18 @@ jobs:
           # Needs only a C compiler.
           bash "$GITHUB_WORKSPACE"/ci/tools/test_read_dict_file_unit.sh
 
+          # ngx_http_zstd_dict_file_open_strict(): the strict-mode
+          # component-by-component dictionary open, included from its
+          # header and driven against scripted open/openat/fstat/geteuid
+          # fakes. Reaches the exits the config-level matrix cannot stage
+          # (open("/") failing, fstat() failing mid-walk, a foreign-owned
+          # ancestor without root, a component of NGX_MAX_PATH bytes) and
+          # pins the openat() flag words, errno-before-close, and that
+          # every fd the walk opened is closed exactly once. Also checks
+          # that every refusal code has a diagnostic in the module.
+          # Needs only a C compiler.
+          bash "$GITHUB_WORKSPACE"/ci/tools/test_dict_walk_unit.sh
+
           # ngx_http_zstd_max_length_exceeded(): the length-independent
           # zstd_max_length cap checked per iteration of the streaming body
           # filter. Extracts the predicate verbatim and asserts an unset cap
