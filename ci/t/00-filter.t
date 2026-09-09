@@ -732,6 +732,52 @@ Content-Type: text/plain
 [error]
 
 
+=== TEST 29a: zstd filter compresses 410 responses above min_length
+# 410 Gone joins 403/404 as an error status with a compressible body,
+# matching core gzip as of nginx 1.31.6 (nginx/nginx#1466).
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 410 "gone body\n";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- error_code: 410
+--- response_headers
+!Content-Length
+Transfer-Encoding: chunked
+Content-Encoding: zstd
+Content-Type: text/plain
+--- no_error_log
+[error]
+
+
+=== TEST 29b: a 409 response stays uncompressed (the 4xx exceptions are a list, not a range)
+--- config
+    location /filter {
+        zstd on;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 409 "conflict body\n";
+    }
+--- request
+GET /filter
+--- more_headers
+Accept-Encoding: zstd
+--- error_code: 409
+--- response_headers
+!Content-Encoding
+Content-Type: text/plain
+--- no_error_log
+[error]
+
+
 
 === TEST 30: no infinite loop / CPU spin on a zero-length proxied body
 # Regression for the recurring "100% CPU infinite loop" class:

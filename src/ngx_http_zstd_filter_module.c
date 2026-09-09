@@ -203,6 +203,16 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
 #define NGX_HTTP_ZSTD_MAX_ELIGIBLE_STATUS  299
 
 /*
+ * 410 Gone is compressed like 403/404: an error status whose body is
+ * as compressible as a 404's, and the set core gzip compresses as of
+ * nginx 1.31.6 (nginx/nginx#1466, which also added this macro). Defined
+ * here for the nginx versions before it.
+ */
+#ifndef NGX_HTTP_GONE
+#define NGX_HTTP_GONE  410
+#endif
+
+/*
  * RFC 9842 §2.2 dcz framing: an 8-byte zstd skippable-frame header
  * (magic 0x184D2A5E and frame-size 32, both little-endian on the wire)
  * followed by the 32-byte SHA-256 of the dictionary, prepended to an
@@ -1549,7 +1559,8 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     }
 
     /* status not eligible: < 200, bodyless 204/205, 206 Partial Content,
-     * or any > 299 except 403/404 (which carry compressible error bodies).
+     * or any > 299 except 403/404/410 (which carry compressible error
+     * bodies; the set core gzip compresses as of nginx 1.31.6).
      *
      * 206 is excluded (matching nginx's gzip filter): an upstream 206 has a
      * Content-Range computed against its selected representation. Applying a
@@ -1563,7 +1574,8 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
         || r->headers_out.status == NGX_HTTP_PARTIAL_CONTENT
         || (r->headers_out.status > NGX_HTTP_ZSTD_MAX_ELIGIBLE_STATUS
             && r->headers_out.status != NGX_HTTP_FORBIDDEN
-            && r->headers_out.status != NGX_HTTP_NOT_FOUND))
+            && r->headers_out.status != NGX_HTTP_NOT_FOUND
+            && r->headers_out.status != NGX_HTTP_GONE))
     {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "zstd: skip, status %ui not eligible",
