@@ -168,6 +168,15 @@ python3 ci/tools/test_dcz_prefix_alloc.py --nginx-binary "$BIN" --port "$((p + 3
 python3 ci/tools/test_var_dynamic_cacheable.py \
     --nginx-binary "$BIN" --port "$((p + 32))"
 
+# The dictionary path-hardening matrix (the PR gate runs it too): every
+# strict-path refusal in the opener and the walk, the non-regular-input
+# refusals, the rejected-reload check. Those arms are otherwise reached
+# only by the unit fixtures, which this report does not see. The .so
+# files sit beside the binary in objs/ on the dynamic coverage build; the
+# one listening fixture takes the next port in the band.
+DICT_HARDENING_PORT="$((p + 33))" \
+    bash ci/tools/test_dict_path_hardening.sh "$BIN" "$SRCDIR/objs"
+
 # The testkit is the only layer that reaches worker-internal fault/counter
 # paths. Use the same canonical six-scenario runner as the PR and Memcheck
 # jobs; a failure stays visible AND fails this script at the end (after the

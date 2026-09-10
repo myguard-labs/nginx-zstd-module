@@ -29,6 +29,11 @@ set -euo pipefail
 NGINX="${1:?usage: test_dict_path_hardening.sh <nginx-binary> <module-dir>}"
 MODDIR="${2:?usage: test_dict_path_hardening.sh <nginx-binary> <module-dir>}"
 
+# The one fixture that serves requests (the rejected-reload check) listens
+# here. Overridable so a caller running inside a declared port band -- the
+# coverage job -- can keep this endpoint inside it.
+PORT="${DICT_HARDENING_PORT:-18198}"
+
 # Both arguments MUST be absolutized before anything else. Every fixture
 # below runs nginx with -p "$WORK" (a mktemp dir), and nginx resolves a
 # relative load_module path against that prefix -- so a caller passing
@@ -572,7 +577,7 @@ http {
     zstd_dict_file_unsafe on;
     zstd_dict_file $WORK/html/live.dict;
     server {
-        listen 127.0.0.1:18198;
+        listen 127.0.0.1:$PORT;
         location / {
             zstd on;
             zstd_min_length 1;
@@ -589,7 +594,7 @@ NGINX_PID=$!
 
 ready=0
 for _ in $(seq 1 100); do
-    if curl -fsS -o /dev/null "http://127.0.0.1:18198/" 2>/dev/null; then
+    if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then
         ready=1
         break
     fi
@@ -611,7 +616,7 @@ else
     # O_NOFOLLOW makes the open() itself fail (ELOOP, "Too many levels
     # of symbolic links") before ngx_is_link()'s own message can fire;
     # accept either wording as proof the symlink swap was refused.
-    if curl -fsS -o /dev/null "http://127.0.0.1:18198/" 2>/dev/null \
+    if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null \
         && grep -qE "is a symlink; refused|levels of symbolic links" \
             "$WORK/logs/error.log"; then
         echo "✓ old-cycle-active fixture: reload refused, old cycle still serving"
