@@ -82,6 +82,55 @@ my $big_path = File::Spec->catfile(File::Spec->tmpdir(),
 local $ENV{'TEST_NGINX_DCZ_BIGDICT'} = $big_path;
 END { unlink $big_path if $big_path; }
 
+# One byte over the 10 MB hard limit, for the too-large refusal (TEST 54).
+# Exposed via $TEST_NGINX_DCZ_HUGEDICT.
+my $huge_path = File::Spec->catfile(File::Spec->tmpdir(),
+                                    "zstd-dcz-hugedict-$$.bin");
+{
+    open my $hf, '>', $huge_path or die "hugedict: $!";
+    binmode $hf;
+    print {$hf} 'A' x (10 * 1024 * 1024 + 1);
+    close $hf;
+}
+local $ENV{'TEST_NGINX_DCZ_HUGEDICT'} = $huge_path;
+END { unlink $huge_path if $huge_path; }
+
+# Twenty-five filler request headers: nginx's headers_in list holds
+# twenty entries per part, so a request carrying more than that makes the
+# header walks continue into a second list part (TEST 55).
+our $many_headers = join("\n", map { "X-Pad-$_: filler" } 1 .. 25);
+
+# Sixteen more dictionaries, generated, for the lookup-shape blocks
+# (TESTs 51-53): with the committed fixture they make seventeen in one
+# location, one past NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD, so negotiation
+# takes the binary search over the digest-sorted array instead of the
+# linear scan. Exposed to config blocks via $TEST_NGINX_DCZ_MANYDIR;
+# $::many_cfg is the seventeen directives, $::many9_b64 the digest of a
+# generated entry that sorts somewhere in the middle.
+my $many_dir = File::Spec->catfile(File::Spec->tmpdir(), "zstd-dcz-many-$$");
+mkdir $many_dir or die "mkdir $many_dir: $!";
+our @many_raw;
+for my $i (1 .. 16) {
+    my $raw = "dcz filler dictionary number $i: shared boilerplate " x 8;
+    open my $mf, '>', "$many_dir/d$i" or die "d$i: $!";
+    binmode $mf;
+    print {$mf} $raw;
+    close $mf;
+    push @many_raw, $raw;
+}
+local $ENV{'TEST_NGINX_DCZ_MANYDIR'} = $many_dir;
+our $many_cfg = join("\n",
+    "        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict;",
+    map { "        zstd_dcz_dict_file \$TEST_NGINX_DCZ_MANYDIR/d$_;" } 1 .. 16);
+our $many9_b64 = encode_base64(sha256($many_raw[8]), "");
+our $many9_raw = sha256($many_raw[8]);
+END {
+    if ($many_dir) {
+        unlink glob("$many_dir/d*");
+        rmdir $many_dir;
+    }
+}
+
 no_long_string();
 log_level 'warn';
 repeat_each(1);
@@ -1374,5 +1423,123 @@ Accept-Encoding: zstd, dcz
 Content-Encoding: zstd
 --- error_log
 zstd dcz: skip, no Available-Dictionary header
+--- no_error_log
+[error]
+
+
+
+=== TEST 51: seventeen dictionaries: a mid-list one negotiates through the binary search
+# One past NGX_HTTP_ZSTD_DCZ_BSEARCH_THRESHOLD the lookup is a binary search
+# over the pointer array sorted by digest at merge time. The ninth
+# generated dictionary is neither first nor last of anything once sorted,
+# so a search over an unsorted array, or one that stops a step early,
+# would miss it. ci/tools/test_dcz_dict_lookup_unit.sh proves the lookup
+# against a linear oracle; this pins the config-to-wire path through it.
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_min_length 16;
+$::many_cfg
+        default_type text/plain;
+        return 200 \"dcz negotiation body: shared-boilerplate compute render\\n\";
+    }"
+--- request
+GET /t
+--- more_headers eval
+qq{Accept-Encoding: zstd, dcz
+Available-Dictionary: :$::many9_b64:}
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 52: seventeen dictionaries: the first-declared one still negotiates
+# Declaration order is not lookup order any more; the committed fixture,
+# declared first, must be found wherever the sort put it.
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_min_length 16;
+$::many_cfg
+        default_type text/plain;
+        return 200 \"dcz negotiation body: shared-boilerplate compute render\\n\";
+    }"
+--- request
+GET /t
+--- more_headers eval
+qq{Accept-Encoding: zstd, dcz
+Available-Dictionary: :$::dict_b64:}
+--- response_headers
+Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 53: seventeen dictionaries: an unknown digest falls through to plain zstd
+# The search's miss path: no entry has this digest, so negotiation
+# declines dcz and plain zstd serves.
+--- config eval
+"    location /t {
+        zstd on;
+        zstd_min_length 16;
+$::many_cfg
+        default_type text/plain;
+        return 200 \"dcz negotiation body: shared-boilerplate compute render\\n\";
+    }"
+--- request
+GET /t
+--- more_headers eval
+qq{Accept-Encoding: zstd, dcz
+Available-Dictionary: :$::odd_b64:}
+--- response_headers
+Content-Encoding: zstd
+--- no_error_log
+[error]
+
+
+
+=== TEST 54: a dcz dictionary above the 10 MB limit is refused at config load
+# TEST 13 covers the 8 MB window warning; this is the hard limit one byte
+# over, refused by the loader's own message before any read.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_DCZ_HUGEDICT;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- must_die
+--- error_log
+too large: 10485761 bytes (limit: 10485760 bytes)
+--- no_error_log
+[alert]
+
+
+
+=== TEST 55: Available-Dictionary beyond the first headers_in list part still negotiates
+# The dcz header collect walks r->headers_in.headers part by part. With
+# twenty-five filler headers ahead of it, Available-Dictionary lands in
+# the second part, so the walk's part-advance arm is the one that finds
+# it; a walk that stopped at the first part would serve plain zstd.
+--- config
+    location /t {
+        zstd on;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+qq{$::many_headers
+Accept-Encoding: zstd, dcz
+Available-Dictionary: :$::dict_b64:}
+--- response_headers
+Content-Encoding: dcz
 --- no_error_log
 [error]

@@ -39,6 +39,20 @@ if (defined $ENV{'TEST_NGINX_BINARY'}) {
     $static_linking = 1 if defined $v && $v =~ /-DZSTD_STATIC_LINKING_ONLY/;
 }
 
+# One byte over NGX_HTTP_ZSTD_MAX_DICT_SIZE (10 MB), generated rather than
+# committed, for the too-large refusal (TEST 25b). Exposed to config blocks
+# via $TEST_NGINX_ZSTD_HUGEDICT.
+my $huge_path = File::Spec->catfile(File::Spec->tmpdir(),
+                                    "zstd-hugedict-$$.bin");
+{
+    open my $hf, '>', $huge_path or die "hugedict: $!";
+    binmode $hf;
+    print {$hf} 'A' x (10 * 1024 * 1024 + 1);
+    close $hf;
+}
+local $ENV{'TEST_NGINX_ZSTD_HUGEDICT'} = $huge_path;
+END { unlink $huge_path if $huge_path; }
+
 add_block_preprocessor(sub {
     my $block = shift;
     return if !@dynamic_modules;
@@ -789,6 +803,28 @@ GET /ok
 --- error_code: 200
 --- no_error_log eval
 [qr/zstd_static_dict_bypass on. but ngx_http_zstd_filter_module/, qr/\[emerg\]/]
+
+
+
+=== TEST 25b: a zstd_dict_file above the 10 MB limit is refused at config load
+# The size is compared as off_t before the size_t narrowing, so the refusal
+# is the loader's own message, not a later read or allocation failure. One
+# byte over the limit; the complement (a file under it loads) is every
+# other zstd_dict_file block in this suite.
+--- http_config
+    zstd_dict_file_unsafe on;
+    zstd_dict_file $TEST_NGINX_ZSTD_HUGEDICT;
+--- config
+    location /d {
+        zstd on;
+        default_type text/plain;
+        return 200 "body";
+    }
+--- must_die
+--- error_log
+dictionary file too large: 10485761 bytes (limit: 10485760 bytes)
+--- no_error_log
+[alert]
 
 
 
