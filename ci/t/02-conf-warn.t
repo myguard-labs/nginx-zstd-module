@@ -25,6 +25,20 @@ if (defined $ENV{'TEST_NGINX_BINARY'}) {
     }
 }
 
+# The estimator-only directive (zstd_max_cctx_memory) needs a module built
+# with -DZSTD_STATIC_LINKING_ONLY. ci/tools/ci-build.sh leaves that out of
+# its release flavours on purpose (the deployable .so must not depend on
+# libzstd's static-only entry points), so CI Deep's Build & Test matrix runs
+# this file against a binary that refuses the directive. `nginx -V` echoes
+# the configure arguments, so the build shape is detectable here: blocks
+# that need the estimator skip themselves on a release-shape build, and
+# their complement (the refusal with its message) runs only there.
+our $static_linking = 0;
+if (defined $ENV{'TEST_NGINX_BINARY'}) {
+    my $v = `$ENV{'TEST_NGINX_BINARY'} -V 2>&1`;
+    $static_linking = 1 if defined $v && $v =~ /-DZSTD_STATIC_LINKING_ONLY/;
+}
+
 add_block_preprocessor(sub {
     my $block = shift;
     return if !@dynamic_modules;
@@ -682,6 +696,10 @@ a symlink at any component is refused, not followed
 # location configures no zstd_dcz_dict_file, which is the scoping that makes
 # the dcz clamp irrelevant here. Asserts a served response, not merely a
 # start, so a config that loads but breaks compression still fails.
+#
+# Needs the estimator, so only a -DZSTD_STATIC_LINKING_ONLY build runs
+# it; TEST 23b is the same config on the release-shape build.
+--- skip_eval: 3: !$::static_linking
 --- config
     location /budget {
         zstd on;
@@ -700,6 +718,30 @@ Accept-Encoding: zstd
 Content-Encoding: zstd
 --- no_error_log
 [error]
+
+
+
+=== TEST 23b: a release-shape build refuses zstd_max_cctx_memory by name at config load
+# The other half of TEST 23: without the memory-estimation API the
+# directive cannot be honoured, and the build says so at "nginx -t"
+# rather than loading with a silently unenforced budget. Pins the message
+# an operator sees (00-filter.t TEST 45 pins only the must_die).
+--- skip_eval: 2: $::static_linking
+--- config
+    location /budget {
+        zstd on;
+        zstd_min_length 1;
+        zstd_comp_level 1;
+        zstd_max_cctx_memory 2m;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "hello world padding padding padding padding padding\n";
+    }
+--- must_die
+--- error_log
+"zstd_max_cctx_memory" requires the module to be built with -DZSTD_STATIC_LINKING_ONLY
+--- no_error_log
+[alert]
 
 
 
