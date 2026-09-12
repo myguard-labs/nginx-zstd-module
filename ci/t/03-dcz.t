@@ -1,6 +1,7 @@
 use Test::Nginx::Socket;
 use File::Basename;
 use File::Spec;
+use File::Temp qw(tempfile tempdir);
 use Digest::SHA qw(sha256);
 use MIME::Base64 qw(encode_base64);
 use lib 'lib';
@@ -68,32 +69,29 @@ our $dict_hex_upper = uc($dict_hex);
 our $odd_hex  = "01" x 32;
 our $odd_b64  = encode_base64("\x01" x 32, "");
 
+# Generated dictionaries, never committed. File::Temp picks unpredictable
+# names and opens O_EXCL, so a pre-seeded symlink at a guessable path
+# cannot redirect a write on a shared runner; every write and close is
+# checked so a short fixture cannot pass silently; all go at exit.
+#
 # A dictionary above the 8 MB dcz window cap but under the 10 MB hard
-# limit, generated rather than committed (nobody wants an 8 MB fixture
-# in-tree). Exposed to config blocks via $TEST_NGINX_DCZ_BIGDICT.
-my $big_path = File::Spec->catfile(File::Spec->tmpdir(),
-                                   "zstd-dcz-bigdict-$$.bin");
-{
-    open my $bf, '>', $big_path or die "bigdict: $!";
-    binmode $bf;
-    print {$bf} 'A' x (8 * 1024 * 1024 + 17);
-    close $bf;
-}
+# limit (nobody wants an 8 MB fixture in-tree). Exposed to config blocks
+# via $TEST_NGINX_DCZ_BIGDICT.
+my ($big_fh, $big_path) = tempfile("zstd-dcz-bigdict-XXXXXX",
+                                   TMPDIR => 1, UNLINK => 1);
+binmode $big_fh;
+print {$big_fh} 'A' x (8 * 1024 * 1024 + 17) or die "bigdict: write: $!";
+close $big_fh or die "bigdict: close: $!";
 local $ENV{'TEST_NGINX_DCZ_BIGDICT'} = $big_path;
-END { unlink $big_path if $big_path; }
 
 # One byte over the 10 MB hard limit, for the too-large refusal (TEST 54).
 # Exposed via $TEST_NGINX_DCZ_HUGEDICT.
-my $huge_path = File::Spec->catfile(File::Spec->tmpdir(),
-                                    "zstd-dcz-hugedict-$$.bin");
-{
-    open my $hf, '>', $huge_path or die "hugedict: $!";
-    binmode $hf;
-    print {$hf} 'A' x (10 * 1024 * 1024 + 1);
-    close $hf;
-}
+my ($huge_fh, $huge_path) = tempfile("zstd-dcz-hugedict-XXXXXX",
+                                     TMPDIR => 1, UNLINK => 1);
+binmode $huge_fh;
+print {$huge_fh} 'A' x (10 * 1024 * 1024 + 1) or die "hugedict: write: $!";
+close $huge_fh or die "hugedict: close: $!";
 local $ENV{'TEST_NGINX_DCZ_HUGEDICT'} = $huge_path;
-END { unlink $huge_path if $huge_path; }
 
 # Twenty-five filler request headers: nginx's headers_in list holds
 # twenty entries per part, so a request carrying more than that makes the
@@ -107,15 +105,16 @@ our $many_headers = join("\n", map { "X-Pad-$_: filler" } 1 .. 25);
 # linear scan. Exposed to config blocks via $TEST_NGINX_DCZ_MANYDIR;
 # $::many_cfg is the seventeen directives, $::many9_b64 the digest of a
 # generated entry that sorts somewhere in the middle.
-my $many_dir = File::Spec->catfile(File::Spec->tmpdir(), "zstd-dcz-many-$$");
-mkdir $many_dir or die "mkdir $many_dir: $!";
+# The directory is a fresh private (0700) tempdir, so the fixed names
+# inside it cannot meet a pre-existing entry.
+my $many_dir = tempdir("zstd-dcz-many-XXXXXX", TMPDIR => 1, CLEANUP => 1);
 our @many_raw;
 for my $i (1 .. 16) {
     my $raw = "dcz filler dictionary number $i: shared boilerplate " x 8;
-    open my $mf, '>', "$many_dir/d$i" or die "d$i: $!";
+    open my $mf, '>', "$many_dir/d$i" or die "d$i: open: $!";
     binmode $mf;
-    print {$mf} $raw;
-    close $mf;
+    print {$mf} $raw or die "d$i: write: $!";
+    close $mf or die "d$i: close: $!";
     push @many_raw, $raw;
 }
 local $ENV{'TEST_NGINX_DCZ_MANYDIR'} = $many_dir;
@@ -123,13 +122,6 @@ our $many_cfg = join("\n",
     "        zstd_dcz_dict_file \$TEST_NGINX_PERL_PATH/suite/dcz-dict;",
     map { "        zstd_dcz_dict_file \$TEST_NGINX_DCZ_MANYDIR/d$_;" } 1 .. 16);
 our $many9_b64 = encode_base64(sha256($many_raw[8]), "");
-our $many9_raw = sha256($many_raw[8]);
-END {
-    if ($many_dir) {
-        unlink glob("$many_dir/d*");
-        rmdir $many_dir;
-    }
-}
 
 no_long_string();
 log_level 'warn';

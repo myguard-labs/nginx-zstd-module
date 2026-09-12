@@ -1,6 +1,7 @@
 use Test::Nginx::Socket;
 use File::Basename;
 use File::Spec;
+use File::Temp qw(tempfile);
 use lib 'lib';
 
 my $dirname = dirname(__FILE__);
@@ -41,17 +42,16 @@ if (defined $ENV{'TEST_NGINX_BINARY'}) {
 
 # One byte over NGX_HTTP_ZSTD_MAX_DICT_SIZE (10 MB), generated rather than
 # committed, for the too-large refusal (TEST 25b). Exposed to config blocks
-# via $TEST_NGINX_ZSTD_HUGEDICT.
-my $huge_path = File::Spec->catfile(File::Spec->tmpdir(),
-                                    "zstd-hugedict-$$.bin");
-{
-    open my $hf, '>', $huge_path or die "hugedict: $!";
-    binmode $hf;
-    print {$hf} 'A' x (10 * 1024 * 1024 + 1);
-    close $hf;
-}
+# via $TEST_NGINX_ZSTD_HUGEDICT. File::Temp picks an unpredictable name
+# and opens it O_EXCL, so a pre-seeded symlink at a guessable path cannot
+# redirect the write on a shared runner; the write and close are checked
+# so a short fixture cannot pass silently, and the file goes at exit.
+my ($huge_fh, $huge_path) = tempfile("zstd-hugedict-XXXXXX",
+                                     TMPDIR => 1, UNLINK => 1);
+binmode $huge_fh;
+print {$huge_fh} 'A' x (10 * 1024 * 1024 + 1) or die "hugedict: write: $!";
+close $huge_fh or die "hugedict: close: $!";
 local $ENV{'TEST_NGINX_ZSTD_HUGEDICT'} = $huge_path;
-END { unlink $huge_path if $huge_path; }
 
 add_block_preprocessor(sub {
     my $block = shift;
