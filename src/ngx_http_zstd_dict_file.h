@@ -326,11 +326,15 @@ ngx_http_zstd_dict_file_open_strict(ngx_str_t *path, int flags,
         return NGX_INVALID_FILE;
     }
 
-    fd = open("/", O_RDONLY | O_DIRECTORY
+    /* built first rather than #ifdef'd inside the call: a consumer that
+     * redefines open() as a function-like macro (the unit fixture) would
+     * otherwise hand the preprocessor a directive mid-argument-list */
+    oflags = O_RDONLY | O_DIRECTORY;
 #ifdef O_CLOEXEC
-              | O_CLOEXEC
+    oflags |= O_CLOEXEC;
 #endif
-              );
+
+    fd = open("/", oflags);
     if (fd < 0) {
         walk->err = ngx_errno;
         walk->rc = NGX_HTTP_ZSTD_DICT_WALK_OPEN_ROOT;

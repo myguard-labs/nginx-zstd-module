@@ -149,8 +149,18 @@ fake_openat(int dirfd, const char *name, int flags)
     int  i, fd;
 
     if (ncalls < 32) {
+        size_t  n = strlen(name);
+
+        /* the record keeps a bounded prefix: the sequence assertions
+         * compare short component names, and the NGX_MAX_PATH-byte
+         * component is asserted through the walk's own report */
+        if (n > sizeof(calls[ncalls].name) - 1) {
+            n = sizeof(calls[ncalls].name) - 1;
+        }
+
         calls[ncalls].dirfd = dirfd;
-        strncpy(calls[ncalls].name, name, sizeof(calls[ncalls].name) - 1);
+        memcpy(calls[ncalls].name, name, n);
+        calls[ncalls].name[n] = '\0';
         calls[ncalls].flags = flags;
     }
     ncalls++;
@@ -248,9 +258,13 @@ fake_close(int fd)
 
 #include "../../src/ngx_http_zstd_dict_file.h"
 
-#if !(NGX_HTTP_ZSTD_HAVE_STRICT_WALK)
-#error "this fixture needs the POSIX openat() walk"
-#endif
+/*
+ * POSIX only: without the *at() family the header defines no walk and the
+ * first call below fails to compile, which is the intended outcome. No
+ * #error spells that out, deliberately: the repository's standalone
+ * cppcheck pass sees no system headers, so AT_FDCWD is undefined there
+ * and a preprocessor error would abort its analysis of this file.
+ */
 
 /* --- harness ---------------------------------------------------------- */
 
