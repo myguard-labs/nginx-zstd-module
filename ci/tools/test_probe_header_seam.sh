@@ -63,6 +63,17 @@ grep -Fq '#include "ngx_http_zstd_ratio.h"' \
 check_definition "$root/src/ngx_http_zstd_ratio.h" \
 	ngx_http_zstd_ratio_parts "$root"
 
+# Same seam, the dictionary-file I/O family (#312): production must
+# include its header, and the read loop and the hex nibble decoder must
+# each keep exactly one definition. The module's logging shell around
+# the loop (ngx_http_zstd_read_dict_file) keeps its name and stays in
+# the module; it is not part of the family.
+grep -Fq '#include "ngx_http_zstd_dict_file.h"' \
+	"$root/src/ngx_http_zstd_filter_module.c"
+for fn in ngx_http_zstd_dict_file_read ngx_http_zstd_hex_nibble; do
+	check_definition "$root/src/ngx_http_zstd_dict_file.h" "$fn" "$root"
+done
+
 # Detection control: redirect the real unit fixture to a copied probe
 # implementation under ci/. The fixture must stay green while the seam
 # check turns red, reproducing the drift this gate exists to catch.

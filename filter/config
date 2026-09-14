@@ -13,6 +13,7 @@ HTTP_ZSTD_SRCS="$ngx_addon_dir/ngx_http_zstd_filter_module.c"
 HTTP_ZSTD_DEPS="$ngx_addon_dir/ngx_http_zstd_common.h \
                 $ngx_addon_dir/ngx_http_zstd_cache_control.h \
                 $ngx_addon_dir/ngx_http_zstd_ratio.h \
+                $ngx_addon_dir/ngx_http_zstd_dict_file.h \
                 $ngx_addon_dir/ngx_http_zstd_sha256.h"
 
 ngx_addon_name=ngx_http_zstd_filter_module
