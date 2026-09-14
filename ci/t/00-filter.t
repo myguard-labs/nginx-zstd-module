@@ -734,7 +734,8 @@ Content-Type: text/plain
 
 === TEST 29a: zstd filter compresses 410 responses above min_length
 # 410 Gone joins 403/404 as an error status with a compressible body,
-# matching core gzip as of nginx 1.31.6 (nginx/nginx#1466).
+# matching what nginx/nginx#1466 (approved for 1.31.6) proposes for core
+# gzip.
 --- config
     location /filter {
         zstd on;

@@ -198,15 +198,16 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
 
 /*
  * Highest response status the filter will encode. 3xx and above carry no
- * body worth encoding, except the 403/404 error pages excluded separately.
+ * body worth encoding, except the 403/404/410 error pages carved out
+ * separately.
  */
 #define NGX_HTTP_ZSTD_MAX_ELIGIBLE_STATUS  299
 
 /*
  * 410 Gone is compressed like 403/404: an error status whose body is
- * as compressible as a 404's, and the set core gzip compresses as of
- * nginx 1.31.6 (nginx/nginx#1466, which also added this macro). Defined
- * here for the nginx versions before it.
+ * as compressible as a 404's. nginx/nginx#1466 proposes the same for
+ * core gzip (approved for 1.31.6, unmerged at the time of writing) and
+ * adds this macro; it is defined here until that ships.
  */
 #ifndef NGX_HTTP_GONE
 #define NGX_HTTP_GONE  410
@@ -1560,7 +1561,7 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     /* status not eligible: < 200, bodyless 204/205, 206 Partial Content,
      * or any > 299 except 403/404/410 (which carry compressible error
-     * bodies; the set core gzip compresses as of nginx 1.31.6).
+     * bodies; the set nginx/nginx#1466 proposes for core gzip).
      *
      * 206 is excluded (matching nginx's gzip filter): an upstream 206 has a
      * Content-Range computed against its selected representation. Applying a
