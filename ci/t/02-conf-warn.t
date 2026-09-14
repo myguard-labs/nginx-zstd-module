@@ -36,7 +36,17 @@ if (defined $ENV{'TEST_NGINX_BINARY'}) {
 # their complement (the refusal with its message) runs only there.
 our $static_linking = 0;
 if (defined $ENV{'TEST_NGINX_BINARY'}) {
-    my $v = `$ENV{'TEST_NGINX_BINARY'} -V 2>&1`;
+    # Shell-free: the binary path is one argv word, however it is spelled,
+    # and its stderr (where -V prints) is joined onto the pipe in the child.
+    my $pid = open(my $vh, '-|');
+    die "fork for nginx -V: $!" if !defined $pid;
+    if (!$pid) {
+        open(STDERR, '>&', \*STDOUT) or exit 127;
+        exec {$ENV{'TEST_NGINX_BINARY'}} $ENV{'TEST_NGINX_BINARY'}, '-V';
+        exit 127;
+    }
+    my $v = do { local $/; <$vh> };
+    close $vh;
     $static_linking = 1 if defined $v && $v =~ /-DZSTD_STATIC_LINKING_ONLY/;
 }
 
@@ -44,12 +54,12 @@ if (defined $ENV{'TEST_NGINX_BINARY'}) {
 # committed, for the too-large refusal (TEST 25b). Exposed to config blocks
 # via $TEST_NGINX_ZSTD_HUGEDICT. File::Temp picks an unpredictable name
 # and opens it O_EXCL, so a pre-seeded symlink at a guessable path cannot
-# redirect the write on a shared runner; the write and close are checked
-# so a short fixture cannot pass silently, and the file goes at exit.
+# redirect the write on a shared runner, and the file goes at exit. The
+# loader refuses it at fstat() on size alone, so the file is extended with
+# a checked truncate rather than written: no 10 MiB scalar, no bytes read.
 my ($huge_fh, $huge_path) = tempfile("zstd-hugedict-XXXXXX",
                                      TMPDIR => 1, UNLINK => 1);
-binmode $huge_fh;
-print {$huge_fh} 'A' x (10 * 1024 * 1024 + 1) or die "hugedict: write: $!";
+truncate($huge_fh, 10 * 1024 * 1024 + 1) or die "hugedict: truncate: $!";
 close $huge_fh or die "hugedict: close: $!";
 local $ENV{'TEST_NGINX_ZSTD_HUGEDICT'} = $huge_path;
 

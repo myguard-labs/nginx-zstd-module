@@ -85,11 +85,11 @@ close $big_fh or die "bigdict: close: $!";
 local $ENV{'TEST_NGINX_DCZ_BIGDICT'} = $big_path;
 
 # One byte over the 10 MB hard limit, for the too-large refusal (TEST 54).
-# Exposed via $TEST_NGINX_DCZ_HUGEDICT.
+# Exposed via $TEST_NGINX_DCZ_HUGEDICT. The loader refuses it at fstat()
+# on size alone, so it is extended with a checked truncate, not written.
 my ($huge_fh, $huge_path) = tempfile("zstd-dcz-hugedict-XXXXXX",
                                      TMPDIR => 1, UNLINK => 1);
-binmode $huge_fh;
-print {$huge_fh} 'A' x (10 * 1024 * 1024 + 1) or die "hugedict: write: $!";
+truncate($huge_fh, 10 * 1024 * 1024 + 1) or die "hugedict: truncate: $!";
 close $huge_fh or die "hugedict: close: $!";
 local $ENV{'TEST_NGINX_DCZ_HUGEDICT'} = $huge_path;
 

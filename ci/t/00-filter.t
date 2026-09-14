@@ -3332,7 +3332,13 @@ Content-Encoding: zstd
 # access log, which evaluates at the log phase after the response
 # completed. Two requests on one instance: the first compresses a body
 # under a log_format naming all three variables, the second serves the
-# log file back, so the line the first one wrote is asserted verbatim.
+# log file back. The file is cleared when the server root is set up and
+# then accumulates one line per repetition of the block (repeat_each is
+# 3), so the whole body is anchored: every line must be a well-formed
+# record and there are at most three -- a later repetition cannot hide
+# behind an earlier line.
+--- post_setup_server_root eval
+'unlink "$ENV{TEST_NGINX_SERVER_ROOT}/logs/zstdvars.log";'
 --- http_config
     log_format zstdvars 'ratio=$zstd_ratio in=$zstd_bytes_in out=$zstd_bytes_out';
 --- config
@@ -3356,7 +3362,7 @@ Content-Encoding: zstd
 --- response_headers eval
 ["Content-Encoding: zstd", "!Content-Encoding"]
 --- response_body_like eval
-[qr/./s, qr/^ratio=\d+\.\d{3} in=[1-9]\d+ out=[1-9]\d+$/m]
+[qr/./s, qr/\A(?:ratio=\d+\.\d{3} in=[1-9]\d+ out=[1-9]\d+\n){1,3}\z/]
 --- no_error_log
 [error]
 
