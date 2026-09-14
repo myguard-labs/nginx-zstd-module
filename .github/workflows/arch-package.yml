@@ -18,7 +18,7 @@ env:
 
 jobs:
   package:
-    name: Build and smoke test
+    name: Build package and checkout
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -27,13 +27,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build and test Arch package
+      - name: Build and test Arch package and checkout
         run: packaging/arch/build.sh
 
       - name: Upload Arch package
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: nginx-mod-zstd-arch-package
+          name: nginx-mod-zstd-release-arch-package
           path: packaging/arch/dist/*.pkg.tar.zst
           if-no-files-found: error
           retention-days: 7

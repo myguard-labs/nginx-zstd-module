@@ -172,7 +172,9 @@ sudo pacman -U dist/nginx-mod-zstd-*.pkg.tar.zst
 
 The package is compiled against Arch's matching `nginx-src` package, installs
 both dynamic modules, and enables them through
-`/etc/nginx/modules.d/20-zstd.conf`.
+`/etc/nginx/modules.d/20-zstd.conf`. The container also compiles and smoke-tests
+the current checkout separately, so pull requests test their own module source
+while the exported package continues to use the pinned release archive.
 
 The container intentionally updates packages from Arch's live repositories.
 The exact nginx dependency protects the dynamic-module ABI by failing closed
@@ -1389,7 +1391,7 @@ documented `ubuntu-latest` fallback instead.
 | **CI** ([`ci.yml`](.github/workflows/ci.yml)) | every PR + focused merged `master` signal + manual | Calls Lint, Build&Test, Arch Package, Security Scanners, Harness Fault Arms, and the hosted Windows build. Four Linux jobs are initially runnable; dependency chains refill each lane as it becomes free. Only Harness Fault Arms runs on merged `master`. |
 | **Lint** ([`lint.yml`](.github/workflows/lint.yml)) | PR via CI + manual | Runs local deterministic checks, including runner trust, port bands, cadence, provenance, and the enforced four-lane topology. |
 | **Build&Test** ([`build-test.yml`](.github/workflows/build-test.yml)) | PR via CI + manual | Builds nginx mainline with strict warnings, runs the full functional and runtime regression suites, tests libzstd 1.4.x fallbacks, linkage variants, and arm64. Its sanitizer lane runs the filter and static Test::Nginx suites plus the runtime regressions under ASAN/UBSAN, requiring complete TAP/clean exits and rejecting complete sanitizer reports that contain module frames. Its dependency graph forms four self-hosted lane chains. |
-| **Arch Package** ([`arch-package.yml`](.github/workflows/arch-package.yml)) | PR via CI + manual | Builds `nginx-mod-zstd` in a fresh Arch container, checks the package with namcap, installs it, and smoke-tests dynamic and precompressed Zstandard responses. Uploads the package as a short-lived CI artifact. |
+| **Arch Package** ([`arch-package.yml`](.github/workflows/arch-package.yml)) | PR via CI + manual | Builds `nginx-mod-zstd` in a fresh Arch container, checks the released package with namcap, and smoke-tests both the package and current checkout with dynamic and precompressed Zstandard responses. Uploads the released package as a short-lived CI artifact. |
 | **Security Scanners** ([`security-scanners.yml`](.github/workflows/security-scanners.yml)) | PR via CI, weekly deep + manual | Runs flawfinder, clang-tidy, and semgrep over the module sources. |
 | **Harness Fault Arms** ([`harness-fault-arms.yml`](.github/workflows/harness-fault-arms.yml)) | PR and merged `master` via CI + manual, not required | Builds with the shared [`nginx-module-testkit`](https://github.com/myguard-labs/nginx-module-testkit) and runs all six fault, allocation, codec-count, and parameter-count scenarios through one non-vacuous scenario runner. |
 | **Windows build** ([`windows-build.yml`](.github/workflows/windows-build.yml)) | PR via CI + manual | Builds and smoke-checks MSVC x64 static and MinGW-w64 x64 dynamic modules. |
