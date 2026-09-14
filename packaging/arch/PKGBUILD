@@ -1,0 +1,52 @@
+# Maintainer: Thijs Eilander <eilander at myguard dot nl>
+
+pkgname=nginx-mod-zstd
+pkgver=0.90.8
+pkgrel=1
+_nginxver=1.30.4
+
+pkgdesc='Zstandard compression filter and static modules for nginx'
+arch=('x86_64')
+url='https://github.com/myguard-labs/nginx-zstd-module'
+license=('BSD-2-Clause')
+options=('!debug')
+depends=(
+  'glibc'
+  "nginx=${_nginxver}"
+  'zstd>=1.4.0'
+)
+makedepends=("nginx-src=${_nginxver}")
+backup=('etc/nginx/modules.d/20-zstd.conf')
+source=("${pkgname}-${pkgver}.tar.gz::https://codeload.github.com/myguard-labs/nginx-zstd-module/tar.gz/refs/tags/${pkgver}")
+sha256sums=('2ff32471016256e7017f79ef77aaba1ffa774506a22516500cbd0a029b27af87')
+
+prepare() {
+  mkdir -p build
+  cd build
+  ln -sf /usr/src/nginx/auto
+  ln -sf /usr/src/nginx/src
+}
+
+build() {
+  cd build
+  /usr/src/nginx/configure \
+    --with-ld-opt="$LDFLAGS" \
+    --with-compat \
+    --add-dynamic-module="../nginx-zstd-module-${pkgver}"
+  make modules
+}
+
+package() {
+  local module
+
+  install -Dm644 "nginx-zstd-module-${pkgver}/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -dm755 "$pkgdir/etc/nginx/modules.d"
+
+  for module in ngx_http_zstd_filter_module ngx_http_zstd_static_module; do
+    install -Dm755 "build/objs/${module}.so" \
+      "$pkgdir/usr/lib/nginx/modules/${module}.so"
+    printf 'load_module "/usr/lib/nginx/modules/%s.so";\n' "$module" \
+      >>"$pkgdir/etc/nginx/modules.d/20-zstd.conf"
+  done
+}

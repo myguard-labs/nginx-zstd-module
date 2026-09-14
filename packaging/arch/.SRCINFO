@@ -1,0 +1,17 @@
+pkgbase = nginx-mod-zstd
+	pkgdesc = Zstandard compression filter and static modules for nginx
+	pkgver = 0.90.8
+	pkgrel = 1
+	url = https://github.com/myguard-labs/nginx-zstd-module
+	arch = x86_64
+	license = BSD-2-Clause
+	makedepends = nginx-src=1.30.4
+	depends = glibc
+	depends = nginx=1.30.4
+	depends = zstd>=1.4.0
+	options = !debug
+	backup = etc/nginx/modules.d/20-zstd.conf
+	source = nginx-mod-zstd-0.90.8.tar.gz::https://codeload.github.com/myguard-labs/nginx-zstd-module/tar.gz/refs/tags/0.90.8
+	sha256sums = 2ff32471016256e7017f79ef77aaba1ffa774506a22516500cbd0a029b27af87
+
+pkgname = nginx-mod-zstd

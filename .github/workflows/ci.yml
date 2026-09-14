@@ -3,8 +3,8 @@ name: CI
 
 # Single PR gate entry point. On merged master, only the testkit harness runs
 # to retain its required-check promotion signal; the already-tested build,
-# lint, scanner, and Windows jobs do not run twice. Extended CodeQL, fuzz,
-# soak, and coverage work is scheduled by ci-deep.yml.
+# lint, Arch package, scanner, and Windows jobs do not run twice. Extended
+# CodeQL, fuzz, soak, and coverage work is scheduled by ci-deep.yml.
 #
 # Four self-hosted Linux lanes are budgeted explicitly:
 #   1. Build & Test: resolve/validation, then four dependency chains inside
@@ -16,8 +16,8 @@ name: CI
 # Resolve normally frees its lane in seconds and makes only mainline ready. A
 # short hosted barrier then releases the other three chains after mainline has
 # first claim on that lane; they fill lanes as validation, scanners, and
-# testkit finish. Lint, Windows, and arm64 use GitHub-hosted runners and do not
-# consume these four lanes.
+# testkit finish. Lint, Arch packaging, Windows, and arm64 use GitHub-hosted
+# runners and do not consume these four lanes.
 
 on:
   pull_request:
@@ -47,6 +47,14 @@ jobs:
     if: github.event_name != 'push'
     # actionlint #711 lacks $/; generator parity is superrepo-scoped.
     uses: ./.github/workflows/build-test.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  arch-package:
+    name: Arch package
+    if: github.event_name != 'push'
+    # actionlint #711 lacks $/; generator parity is superrepo-scoped.
+    uses: ./.github/workflows/arch-package.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 

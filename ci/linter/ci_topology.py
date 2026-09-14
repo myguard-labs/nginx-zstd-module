@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Thijs Eilander
 # SPDX-License-Identifier: BSD-2-Clause
-"""Protect the measured four-lane PR/deep topology and fan-out eligibility lead."""
+"""Protect the measured four-lane PR/deep topology and hosted workflow calls."""
 
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ def check_ci(ci: dict) -> list[str]:
     expected = {
         "lint": "./.github/workflows/lint.yml",
         "build-test": "./.github/workflows/build-test.yml",
+        "arch-package": "./.github/workflows/arch-package.yml",
         "security-scanners": "./.github/workflows/security-scanners.yml",
         "harness-fault-arms": "./.github/workflows/harness-fault-arms.yml",
         "windows-build": "./.github/workflows/windows-build.yml",
@@ -56,7 +57,13 @@ def check_ci(ci: dict) -> list[str]:
     ]:
         errors.append("ci.yml push must remain limited to master")
     push_guard = "github.event_name != 'push'"
-    for job in ("lint", "build-test", "security-scanners", "windows-build"):
+    for job in (
+        "lint",
+        "build-test",
+        "arch-package",
+        "security-scanners",
+        "windows-build",
+    ):
         if jobs.get(job, {}).get("if") != push_guard:
             errors.append(f"ci.yml:{job} must skip the focused master signal")
     if jobs.get("harness-fault-arms", {}).get("if") is not None:
@@ -187,8 +194,14 @@ def selftest(  # pylint: disable=too-many-statements
     changed["jobs"]["security-scanners"]["uses"] = "./.github/workflows/valgrind.yml"
     cases.append(("rewired PR workflow call", changed, build, deep))
     changed = copy.deepcopy(ci)
+    changed["jobs"]["arch-package"]["uses"] = "./.github/workflows/valgrind.yml"
+    cases.append(("rewired hosted package workflow", changed, build, deep))
+    changed = copy.deepcopy(ci)
     del changed["jobs"]["build-test"]["if"]
     cases.append(("duplicate master build", changed, build, deep))
+    changed = copy.deepcopy(ci)
+    del changed["jobs"]["arch-package"]["if"]
+    cases.append(("duplicate master package build", changed, build, deep))
     changed = copy.deepcopy(ci)
     changed[True]["push"] = None
     cases.append(("unbounded master signal", changed, build, deep))

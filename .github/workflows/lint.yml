@@ -30,8 +30,8 @@ on:
 # whole suite is a single run (verified: one run row per head sha). So that
 # term is identical across every member and distinguishes nothing; the literal
 # "lint-" prefix is what keeps this group distinct from its siblings. Keep the
-# prefix unique per member. Same applies to asan/valgrind/fuzzing/codeql/
-# security-scanners/windows-build/build-test.
+# prefix unique per member. Same applies to arch-package/asan/valgrind/
+# fuzzing/codeql/security-scanners/windows-build/build-test.
 concurrency:
   group: lint-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
