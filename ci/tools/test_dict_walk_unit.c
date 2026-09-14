@@ -70,6 +70,7 @@ static int      root_fstat_errno;
 static uid_t    root_uid;
 static mode_t   root_mode;
 static uid_t    fake_euid = 500;
+static int      root_open_flags;   /* what open("/") was asked for */
 
 /*
  * Declared before the fakes: a violated fixture invariant -- open() of
@@ -100,7 +101,7 @@ fs_reset(void)
     memset(calls, 0, sizeof(calls));
     nnodes = 0; ncalls = 0; opens = 0; closes = 0;
     next_fd = ROOT_FD;
-    root_open_errno = 0; root_fstat_errno = 0;
+    root_open_errno = 0; root_fstat_errno = 0; root_open_flags = -1;
     root_uid = 0; root_mode = S_IFDIR | 0755;
 }
 
@@ -118,7 +119,7 @@ fake_open(const char *name, int flags)
 {
     int  fd;
 
-    (void) flags;
+    root_open_flags = flags;
 
     if (strcmp(name, "/") != 0) {
         fprintf(stderr, "FAIL: open(\"%s\"): the walk opens only \"/\"\n", name);
@@ -259,6 +260,31 @@ fake_close(int fd)
 #include "../../src/ngx_http_zstd_dict_file.h"
 
 /*
+ * The module's logging shell, ngx_http_zstd_log_dict_walk(), is extracted
+ * verbatim by test_dict_walk_unit.sh into the generated file below and
+ * compiled against a counting ngx_conf_log_error() stub: every refusal
+ * code must produce exactly one diagnostic, OK none, and the three codes
+ * that carry an errno must hand it to the logger. A case dropped from the
+ * switch is then a counted failure here, not merely a missing label.
+ */
+typedef struct { int unused; } ngx_conf_t;
+
+#define NGX_LOG_EMERG  2
+
+static int  log_calls;
+static int  log_last_err;
+
+static void
+ngx_conf_log_error(int level, ngx_conf_t *cf, int err, const char *fmt, ...)
+{
+    (void) level; (void) cf; (void) fmt;
+    log_calls++;
+    log_last_err = err;
+}
+
+#include "generated_log_dict_walk.inc"
+
+/*
  * POSIX only: without the *at() family the header defines no walk and the
  * first call below fails to compile, which is the intended outcome. No
  * #error spells that out, deliberately: the repository's standalone
@@ -373,6 +399,8 @@ main(void)
     check_str("second component", calls[1].name, "dicts");
     check("leaf openat() is relative to dicts' fd", calls[2].dirfd, 102);
     check_str("leaf component", calls[2].name, "a.dict");
+    check("root open flags: O_RDONLY|O_DIRECTORY|O_CLOEXEC",
+          root_open_flags, O_RDONLY | O_DIRECTORY | CLOEXEC);
     check("intermediate flags: O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC",
           calls[0].flags, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | CLOEXEC);
     check("leaf flags: caller's flags | O_NOFOLLOW | O_CLOEXEC",
@@ -410,9 +438,11 @@ main(void)
     layout_happy();
     path = str("");
     fd = ngx_http_zstd_dict_file_open_strict(&path, FILE_FLAGS, &walk);
+    check("empty path is refused", fd, NGX_INVALID_FILE);
     check("empty path is refused as relative", walk.rc,
           NGX_HTTP_ZSTD_DICT_WALK_RELATIVE);
     check("empty path: nothing opened", opens, 0);
+    check_hygiene("empty path", fd);
 
     printf("# the root directory\n");
 
@@ -611,6 +641,45 @@ main(void)
     fd = ngx_http_zstd_dict_file_open_strict(&path, FILE_FLAGS, &walk);
     check("leaf mode is the caller's business: the walk opens it", fd, 103);
     check_hygiene("world-writable leaf", fd);
+
+    printf("# ngx_http_zstd_log_dict_walk() -- one diagnostic per refusal\n");
+
+    {
+        ngx_conf_t  cf;
+        int         rc;
+        char        label[96];
+
+        path = str("/srv/dicts/a.dict");
+
+        for (rc = NGX_HTTP_ZSTD_DICT_WALK_OK;
+             rc <= NGX_HTTP_ZSTD_DICT_WALK_DIR_WRITABLE; rc++)
+        {
+            memset(&walk, 0, sizeof(walk));
+            walk.rc = rc;
+            walk.err = EIO;
+            walk.uid = 1000;
+            memcpy(walk.component, "dicts", sizeof("dicts"));
+
+            log_calls = 0;
+            log_last_err = -1;
+            ngx_http_zstd_log_dict_walk(&cf, &path, &walk);
+
+            snprintf(label, sizeof(label), "log shell: code %d logs %s", rc,
+                     rc == NGX_HTTP_ZSTD_DICT_WALK_OK ? "nothing" : "once");
+            check(label, log_calls,
+                  rc == NGX_HTTP_ZSTD_DICT_WALK_OK ? 0 : 1);
+
+            if (rc == NGX_HTTP_ZSTD_DICT_WALK_OPEN_ROOT
+                || rc == NGX_HTTP_ZSTD_DICT_WALK_OPENAT
+                || rc == NGX_HTTP_ZSTD_DICT_WALK_DIR_FSTAT)
+            {
+                snprintf(label, sizeof(label),
+                         "log shell: code %d hands the call's errno to the "
+                         "logger", rc);
+                check(label, log_last_err, EIO);
+            }
+        }
+    }
 
     if (failures) {
         printf("❌ %d dict walk unit assertion(s) failed\n", failures);

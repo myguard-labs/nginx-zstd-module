@@ -28,12 +28,15 @@
  * A consumer that defines NGX_WIN32 to 0 (rather than leaving it
  * undefined) gets the same POSIX build: both guards below test the value.
  * ssize_t and uid_t come from <sys/types.h>, which the header includes
- * on that build. The strict walk calls open(), openat(), fstat() and
- * geteuid() by their libc names; a fixture that includes the system
- * headers first may redefine those four as function-like macros over
- * scripted fakes (ci/tools/test_dict_walk_unit.c does), so every exit
- * is reachable without a filesystem. When nginx has not defined
- * ngx_inline it expands
+ * on that build. A shim that defines NGX_WIN32 to 1 gets no such include
+ * and must provide ssize_t itself (nginx's win32 configuration does):
+ *     typedef long  ssize_t;
+ * the strict walk, and with it uid_t, is not compiled on that build.
+ * The strict walk calls open(), openat(), fstat() and geteuid() by
+ * their libc names; a fixture that includes the system headers first
+ * may redefine those four as function-like macros over scripted fakes
+ * (ci/tools/test_dict_walk_unit.c does), so every exit is reachable
+ * without a filesystem. When nginx has not defined ngx_inline it expands
  * to nothing: the definitions are already `static`, and an empty
  * fallback keeps a conforming C89 compile valid, where `inline` is not
  * a keyword -- a fixture that uses only part of the family defines
@@ -358,7 +361,9 @@ ngx_http_zstd_dict_file_open_strict(ngx_str_t *path, int flags,
     end = path->data + path->len;
 
     for ( ;; ) {
-        /* skip any run of separators; a trailing one means no leaf */
+        /* skip any run of separators; only a path with nothing but
+         * separators left has no leaf (separators AFTER the last
+         * component do not add one: "/srv/a.dict/" opens a.dict) */
         while (start < end && *start == '/') {
             start++;
         }

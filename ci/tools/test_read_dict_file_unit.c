@@ -97,6 +97,9 @@ static void ngx_conf_log_error(int level, ngx_conf_t *cf, int err,
  */
 typedef struct { ssize_t n; int err; } step_t;
 
+/* declared before the stub: an exhausted script must fail the run */
+static int     failures;
+
 static step_t  steps[16];
 static int     nsteps;
 static int     step_i;
@@ -111,8 +114,12 @@ ngx_read_fd(ngx_fd_t fd, void *buf, size_t size)
     (void) fd;
 
     if (step_i >= nsteps) {
+        /* a read the script did not expect is a failed assertion, not
+         * just a message: count it so the run cannot exit 0 */
         fprintf(stderr, "FAIL: stub ran out of scripted steps "
                         "(loop called read() more times than expected)\n");
+        failures++;
+        errno = EIO;
         return -1;
     }
 
@@ -151,8 +158,6 @@ ngx_read_fd(ngx_fd_t fd, void *buf, size_t size)
 #include "generated_read_dict_file.inc"
 
 /* --- harness ---------------------------------------------------------- */
-
-static int  failures;
 
 static void
 reset(void)
