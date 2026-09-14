@@ -12,9 +12,10 @@ name: Build & Test
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # NGINX_VERSION is NOT pinned here. The `resolve` job scrapes nginx.org for
-  # the current mainline release and feeds it via needs.resolve.outputs.*; per-
-  # job env: blocks below override this placeholder with the resolved value.
+  # NGINX_VERSION is NOT pinned here. The `resolve` job reads the current
+  # mainline release from the GitHub releases feed (ci/tools/nginx-releases.sh)
+  # and feeds it via needs.resolve.outputs.*; per-job env: blocks below
+  # override this placeholder with the resolved value.
   NGINX_VERSION: ""
   # Single source of truth for every `cpanm ... Test::Nginx::Socket` call
   # site in this file (keep in sync with ci-deep.yml's own copy). An
@@ -29,8 +30,8 @@ env:
   # pin is a no-op in behaviour, not a dependency bump.
   TEST_NGINX_SOCKET_VERSION: "0.32"
   TEST_NGINX_SOCKET_DIST: "AGENT/Test-Nginx-0.32.tar.gz"
-  # The `resolve` job scrapes nginx.org for the current mainline release at run
-  # time and feeds it to every job via `needs.resolve.outputs.nginx_version`
+  # The `resolve` job reads the current mainline release from the GitHub
+  # releases feed at run time and feeds it to every job via `needs.resolve.outputs.nginx_version`
   # (and the build matrix JSON). This makes the weekly cron actually test the
   # module against new releases as they ship, instead of failing once nginx.org
   # drops an old tarball.
@@ -56,7 +57,7 @@ permissions:
 jobs:
 
   # ── Resolve the current mainline nginx version once per run ───────────────
-  #    Scrapes nginx.org and exposes a bare version string and a single-entry
+  #    Reads the GitHub releases feed and exposes a bare version string and a single-entry
   #    build-matrix JSON (nginx mainline only). Every other job consumes
   #    needs.resolve.outputs.* so the whole run agrees on one version.
   #    nginx.org only keeps the newest mainline tarball around, so resolving
@@ -704,7 +705,7 @@ jobs:
       # know which nginx it was.
       #
       # Values go through `env:` rather than straight into the `run:` body:
-      # they originate from the resolve job's scrape of nginx.org, so
+      # they originate from the resolve job's read of the GitHub releases feed, so
       # interpolating them into shell is a template-injection sink (zizmor
       # flags it). As env vars they are data, never code.
       - name: Report resolved version

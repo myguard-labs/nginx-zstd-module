@@ -82,7 +82,8 @@ fi
 
 # ci-build.sh resolves an empty VERSION to the current mainline; recover the
 # resolved value from the build tree it actually created rather than
-# re-resolving (a second nginx.org scrape could race a release and disagree).
+# re-resolving (a second read of the releases feed could race a release and
+# disagree).
 BUILD_ROOT="${BUILD_ROOT:-$MODULE_DIR/.build}"
 if [ -n "$VERSION" ]; then
     # An explicit version names exactly one tree. Globbing here instead would

@@ -44,6 +44,9 @@ case "$url" in
         case "${NGINX_FEED:-json}" in
             no-even)
                 echo '[{"tag_name": "release-1.31.5", "draft": false, "prerelease": false}]' ;;
+            no-odd)
+                echo '[{"tag_name": "release-1.30.4", "draft": false, "prerelease": false},'
+                echo ' {"tag_name": "release-1.28.0", "draft": false, "prerelease": false}]' ;;
             dead)
                 echo "curl: (22) stub: feed unreachable" >&2
                 exit 22 ;;
@@ -92,6 +95,17 @@ run no-even mainline
 [ "$rc" -eq 0 ] && [ "$out" = "1.31.5" ] && ok "mainline still resolves when only the stable line is absent" || bad "mainline with no stable: rc=$rc out='$out' $err"
 run no-even both
 [ "$rc" -ne 0 ] && [ -z "$out" ] && ok "both with a line absent: fatal, nothing printed" || bad "both with no stable: rc=$rc out='$out' $err"
+
+# The other line, with its own guard and its own message: a feed of only
+# even-minor releases must refuse mainline by name, still serve stable, and
+# refuse both. (A guard that fell through to the stable one would print the
+# wrong diagnostic; a guard that fell through to the echo would print "-".)
+run no-odd mainline
+[ "$rc" -eq 1 ] && [ -z "$out" ] && grep -q 'shows no mainline (odd-minor) release' <<<"$err" && ok "mainline absent: fatal by name, status 1, nothing printed" || bad "mainline absent: rc=$rc out='$out' $err"
+run no-odd stable
+[ "$rc" -eq 0 ] && [ "$out" = "1.30.4" ] && ok "stable still resolves when only the mainline line is absent" || bad "stable with no mainline: rc=$rc out='$out' $err"
+run no-odd both
+[ "$rc" -eq 1 ] && [ -z "$out" ] && grep -q 'shows no mainline' <<<"$err" && ok "both with no mainline: fatal by name, nothing printed" || bad "both with no mainline: rc=$rc out='$out' $err"
 
 say "== the page cap is a refusal =="
 run endless mainline

@@ -4,7 +4,8 @@
 #   ci/tools/ci-build.sh [flavor] [version] [mode]
 #     flavor : nginx (default) | angie
 #     version: source version, e.g. 1.31.2. Omit (or pass "" with flavor=nginx)
-#              to resolve the current mainline release from nginx.org.
+#              to resolve the current mainline release from the GitHub
+#              releases feed (ci/tools/nginx-releases.sh).
 #     mode   : release (default) | coverage
 #              coverage adds --coverage to cc-opt/ld-opt and builds into a
 #              SEPARATE tree (.build/<flavor>-<version>-coverage/) so a

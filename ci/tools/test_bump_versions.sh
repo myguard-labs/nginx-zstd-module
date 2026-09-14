@@ -275,7 +275,7 @@ EOF
 stub_sha() { printf 'dummy %s\n' "$1" | sha256sum | awk '{print $1}'; }
 
 # The files the updater may rewrite -- the one list every "edited nothing"
-# case compares against, so a sixth tracked file is added here once and
+# case compares against, so another tracked file is added here once and
 # every such case keeps proving what it claims.
 TRACKED_FIXTURES=(
     .github/workflows/ci-deep.yml
