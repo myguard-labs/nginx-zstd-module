@@ -1035,3 +1035,140 @@ Content-Encoding: zstd
 [emerg]
 [error]
 [alert]
+
+
+
+=== TEST 32: dcz dictionaries at a high zstd_comp_level warn at config load
+# A33-F1 advisory. A dcz response rebuilds its dictionary's match tables
+# via ZSTD_CCtx_refPrefix() on every request, at a cost set by dictionary
+# size and level and independent of the body. Level 9 is the first level
+# whose strategy builds those tables (measured: 1 MB dict 0.75 ms at
+# level 3 against 4.5 ms at level 9), so it is where the advisory starts.
+# Config-load only: the warning must not change whether the location
+# serves, so the request below still succeeds.
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 9;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again";
+    }
+--- request
+GET /t
+--- error_code: 200
+--- error_log
+re-references its dictionary with ZSTD_CCtx_refPrefix()
+--- no_error_log
+[emerg]
+[error]
+[alert]
+
+
+
+=== TEST 33: dcz dictionaries at the default level stay silent
+# Negative control for TEST 32, and the one that matters: the common
+# web-serving profile configures dcz dictionaries at the default level
+# and must not be warned at. Identical to TEST 32 except for the level,
+# so a warning appearing here is the gate firing on dictionary presence
+# alone rather than on the compressor profile.
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 3;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again";
+    }
+--- request
+GET /t
+--- error_code: 200
+--- no_error_log eval
+[qr/ZSTD_CCtx_refPrefix/, qr/\[emerg\]/, qr/\[error\]/, qr/\[alert\]/]
+
+
+
+=== TEST 34: "zstd_long on" warns at the default level and names itself
+# The second lever: long-distance matching builds its own per-request
+# tables, so it earns the advisory independently of the level. Pinned at
+# level 3, where TEST 33 proves the level arm is silent -- so only the
+# long_mode arm can be firing here. Also pins that the message names the
+# directive, which is what the operator acts on.
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 3;
+        zstd_long on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again";
+    }
+--- request
+GET /t
+--- error_code: 200
+--- error_log
+with "zstd_long on"
+disable "zstd_long"
+--- no_error_log
+[emerg]
+[error]
+[alert]
+
+
+
+=== TEST 35b: the advisory renders the dictionary count and the LARGEST size
+# Pins the formatted region itself, which the other arms match around: the
+# count, the plural branch, and which dictionary the size comes from. Two
+# fixtures of different sizes in one location, declared smallest-last so a
+# "keep the first" or "keep the last" bug both read wrong -- the message
+# must name 59738 (suite/test), not 2660 (suite/dcz-dict). Also the only
+# arm that would catch the count and size arguments being swapped.
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 9;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/test;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again";
+    }
+--- request
+GET /t
+--- error_code: 200
+--- error_log
+2 dcz dictionaries are configured at "zstd_comp_level" 9
+largest configured dictionary here is 59738 bytes
+--- no_error_log
+[emerg]
+[error]
+[alert]
+
+
+
+=== TEST 35: a high level WITHOUT dcz dictionaries stays silent
+# The other half of the gate. Level 9 alone is not the finding: without a
+# configured dictionary there is no refPrefix call and nothing to warn
+# about. Separates the advisory from the memory advisories above, which
+# do fire on level alone.
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 9;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again";
+    }
+--- request
+GET /t
+--- error_code: 200
+--- no_error_log eval
+[qr/ZSTD_CCtx_refPrefix/, qr/\[emerg\]/, qr/\[error\]/, qr/\[alert\]/]

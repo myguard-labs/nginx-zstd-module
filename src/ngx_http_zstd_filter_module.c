@@ -4556,6 +4556,29 @@ ngx_http_zstd_read_dict_file(ngx_conf_t *cf, ngx_fd_t fd, ngx_str_t *path,
 }
 
 
+/*
+ * Compression level at or above which configured dcz dictionaries draw
+ * the per-request ZSTD_CCtx_refPrefix() advisory in
+ * ngx_http_zstd_merge_loc_conf(); see the rationale there for the
+ * measurements behind it.
+ *
+ * 9 is the first level whose strategy builds the expensive match tables:
+ * measured on a 1 KB body at windowLog 23, a 1 MB dictionary costs
+ * 0.75 ms at level 3 and 4.5 ms at level 9, and an 8 MB dictionary
+ * 0.75 ms at level 3 against 35 ms at level 9. Levels 1-8 are flat in
+ * dictionary size, so warning about them would be noise on the common
+ * web-serving profile.
+ *
+ * Deliberately OUTSIDE the ZSTD_STATIC_LINKING_ONLY guard below: the
+ * advisory it feeds needs no estimator API and must also fire on a
+ * release-shape build, which is the build most likely to be serving
+ * this profile.
+ */
+#ifndef NGX_HTTP_ZSTD_DCZ_REFPREFIX_ADVISORY_LEVEL
+#define NGX_HTTP_ZSTD_DCZ_REFPREFIX_ADVISORY_LEVEL  9
+#endif
+
+
 #if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
 
 /*
@@ -5559,6 +5582,85 @@ close:
                                est * NGX_HTTP_ZSTD_CCTX_SLOTS);
         }
 #endif
+    }
+
+    /*
+     * A33-F1 advisory: dcz dictionaries at an expensive compressor profile.
+     *
+     * A dcz response references its negotiated dictionary with
+     * ZSTD_CCtx_refPrefix() on EVERY request (see the two call sites in
+     * ngx_http_zstd_filter_init_cctx()), which rebuilds the dictionary's
+     * match tables each time. The cost is a function of dictionary size
+     * and compression level and is independent of the response body, so
+     * a small body pays it in full. Measured, libzstd 1.5.7, 1 KB body,
+     * windowLog 23:
+     *
+     *     dict    level 3     level 9     level 19
+     *     1 MB    0.75 ms      4.5 ms      14.9 ms
+     *     8 MB    0.75 ms       35 ms       395 ms
+     *
+     * Level 3 is flat because the default strategy does not build the
+     * expensive tables; from level 9 the cost climbs steeply with
+     * dictionary size, and "zstd_long on" enables long-distance matching,
+     * which adds its own per-request table build.
+     *
+     * This is a hardening advisory, not a default-config DoS: neither
+     * lever is attacker-supplied. The level is the operator's
+     * "zstd_comp_level" and the dictionary set is whatever the operator
+     * configured with "zstd_dcz_dict_file"; a client only selects among
+     * already-configured dictionaries via "Available-Dictionary". So the
+     * cost is reachable only in a configuration the operator chose, and
+     * the right response is to name it at config load rather than to
+     * refuse the configuration or to change the request path.
+     *
+     * The gate is the profile, not the dictionary size: the sizes above
+     * are this box's numbers on one body size, and a threshold on bytes
+     * would be a tuning constant with no defensible value. Level and
+     * long-mode are what the operator can act on, so they are what the
+     * advisory keys on and what it reports.
+     *
+     * Deliberately outside the ZSTD_STATIC_LINKING_ONLY guard used by
+     * the two memory advisories above: this needs no estimator API, and
+     * a release-shape build (which refuses "zstd_max_cctx_memory" by
+     * name) is exactly the build most likely to be serving this profile.
+     */
+    if (rc == NGX_CONF_OK && conf->enable
+        && conf->dcz_dicts != NULL && conf->dcz_dicts->nelts > 0
+        && (conf->level >= NGX_HTTP_ZSTD_DCZ_REFPREFIX_ADVISORY_LEVEL
+            || conf->long_mode))
+    {
+        ngx_http_zstd_dcz_dict_t  *dicts;
+        size_t                     largest;
+        ngx_uint_t                 i;
+
+        dicts = conf->dcz_dicts->elts;
+        largest = 0;
+
+        for (i = 0; i < conf->dcz_dicts->nelts; i++) {
+            if (dicts[i].bytes.len > largest) {
+                largest = dicts[i].bytes.len;
+            }
+        }
+
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "%ui dcz dictionar%s configured at "
+                           "\"zstd_comp_level\" %i%s; each dcz response "
+                           "re-references its dictionary with "
+                           "ZSTD_CCtx_refPrefix(), rebuilding its match "
+                           "tables per request at a cost set by dictionary "
+                           "size and level and independent of the response "
+                           "body (largest configured dictionary here is "
+                           "%uz bytes). Lower \"zstd_comp_level\" below %d "
+                           "for dcz locations%s, or use smaller "
+                           "dictionaries, if this cost is not intended",
+                           conf->dcz_dicts->nelts,
+                           conf->dcz_dicts->nelts == 1 ? "y is" : "ies are",
+                           conf->level,
+                           conf->long_mode ? " with \"zstd_long on\"" : "",
+                           largest,
+                           (int) NGX_HTTP_ZSTD_DCZ_REFPREFIX_ADVISORY_LEVEL,
+                           conf->long_mode
+                               ? ", disable \"zstd_long\"" : "");
     }
 
     /*
