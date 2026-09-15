@@ -97,7 +97,8 @@ PYEOF
 nginx_lines() {
     local page even="-" odd="-" json count
     for ((page = 1; page <= NGINX_FEED_PAGES; page++)); do
-        json="$(gh_api_json "repos/nginx/nginx/releases?per_page=${NGINX_FEED_PAGE}&page=${page}")"
+        json="$(gh_api_json "repos/nginx/nginx/releases?per_page=${NGINX_FEED_PAGE}&page=${page}")" \
+            || return 1
         read -r even odd count < <(printf '%s' "$json" | python3 -c "$NGINX_LINE_PY" "$even" "$odd")
         if [ "$count" -lt "$NGINX_FEED_PAGE" ]; then
             break   # a short page is the end of the list
