@@ -90,16 +90,25 @@ $CC -std=gnu99 -Wall -Wextra -Werror -O1 \
 "$OUT/test_read_dict_file_unit"
 
 # The header itself must stay C89-clean for the portable build, on its own
-# fallback (ngx_inline empty; no -D mask), against the real read(2).
+# fallback (ngx_inline empty; no -D mask), against the real read(2). With
+# the fallback empty every member is a plain static function, so the
+# ones this program does not call are allowed to go unused.
 printf '%s\n' \
     '#include <errno.h>' \
     '#include <fcntl.h>' \
+    '#include <string.h>' \
     '#include <unistd.h>' \
     'typedef unsigned char u_char;' \
     'typedef int ngx_fd_t;' \
+    'typedef struct { size_t len; u_char *data; } ngx_str_t;' \
     '#define ngx_read_fd(fd, buf, n) read(fd, buf, n)' \
     '#define ngx_errno errno' \
     '#define NGX_EINTR EINTR' \
+    '#define NGX_INVALID_FILE -1' \
+    '#define NGX_MAX_PATH 4096' \
+    '#define ngx_memcpy memcpy' \
+    '#define ngx_strcmp(a, b) strcmp((const char *) (a), (const char *) (b))' \
+    '#define ngx_close_file close' \
     '#include "../../src/ngx_http_zstd_dict_file.h"' \
     'int main(void) {' \
     '    u_char b[8]; int fd = open("/dev/zero", O_RDONLY);' \
@@ -108,8 +117,8 @@ printf '%s\n' \
     '    return ngx_http_zstd_hex_nibble(0x41) == 10 && ngx_http_zstd_hex_nibble(0x47) == 0xff ? 0 : 1;' \
     '}' \
     >"$OUT/c89.c"
-"$CC" -std=c89 -pedantic-errors -Wall -Wextra -Werror -O1 \
-    -I ci/tools -o "$OUT/dict_file_c89" "$OUT/c89.c"
+"$CC" -std=c89 -pedantic-errors -Wall -Wextra -Werror -Wno-unused-function \
+    -O1 -I ci/tools -o "$OUT/dict_file_c89" "$OUT/c89.c"
 "$OUT/dict_file_c89"
 
 echo "OK: read_dict_file unit fixture (loop from $HDR, shell extracted from $SRC)"
