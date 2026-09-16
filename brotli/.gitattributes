@@ -1,0 +1,22 @@
+# Files that are executed or sourced by POSIX sh on Linux (including WSL
+# builds from a Windows checkout) must stay LF: nginx's ./configure
+# sources `config`/`filter/config`/`static/config` with sh, which treats
+# a CR as part of the line and fails with "$'\r': command not found"
+# when core.autocrlf=true has smudged the checkout to CRLF.
+config text eol=lf
+*/config text eol=lf
+*.sh text eol=lf
+script/* text eol=lf
+*.t text eol=lf
+examples/*.conf text eol=lf
+
+# Byte-exact fixtures: the static-module suite asserts Content-Length
+# and serves .br frames verbatim — any EOL conversion corrupts them.
+t/suite/* -text
+fuzz/corpus/* -text
+fuzz/fuzz.dict -text
+*.br binary
+
+# CI-only stub module for the vary-suppression witness; it claims a
+# real third-party module's name and must never ship in archives.
+/tools/ci-cvary-stub export-ignore

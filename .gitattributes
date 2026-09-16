@@ -1,3 +1,10 @@
+# Everything is LF unless a later rule says otherwise: git's text=auto
+# heuristic leaves genuine binaries alone, and the byte-exact fixture
+# rules below override this for the crafted corpora. Retires the
+# recurring Windows-checkout CRLF-smudge class (sh-sourced configs,
+# byte-compared locks, freshly-extracted headers) in one line.
+* text=auto eol=lf
+
 *.t linguist-language=Text
 
 # Files that are executed or sourced by POSIX sh/perl on Linux (including
@@ -7,6 +14,7 @@
 # has smudged the checkout to CRLF.
 config text eol=lf
 auto/* text eol=lf
+**/auto/* text eol=lf
 */config text eol=lf
 *.sh text eol=lf
 *.t text eol=lf
@@ -16,8 +24,15 @@ auto/* text eol=lf
 # them.
 ci/fuzz/corpus/* -text
 ci/fuzz/fuzz.dict -text
+# Any dictionary fixture is byte-significant -- libFuzzer token files
+# and RFC 9842 raw dictionaries alike; -text keeps the former diffable.
+# .dat per Compression Dictionary Transport guidance for web-served
+# dictionaries, covered for future examples.
 *.dict -text
+*.dat -text
 *.zst binary
+*.br binary
+*.gz binary
 
 # t/suite/test's byte length is asserted verbatim by the static suite
 # (Content-Length and the size half of the ETag) — CRLF smudging changes
@@ -36,11 +51,18 @@ ci/fuzz/regressions/README.md text
 ci/fuzz/regressions_dcz/* -text
 ci/fuzz/regressions_dcz/README.md text
 
-# CI-only stub module (linkage-isolation job); keep it out of release
-# tarballs (git archive). Its former sibling, the vary-suppression
-# stub, no longer exists in the tree.
+# CI-only stub modules (linkage-isolation job, vary-suppression witness);
+# keep them out of release tarballs (git archive). The vary stub claims a
+# real third-party module's name and must never ship.
 /ci/tools/ci-linkcheck-module export-ignore
 
 # Patches are applied with git apply against LF checkouts; CRLF
 # smudging would make every context line mismatch.
 ci/tools/patches/** text eol=lf
+
+# The CPAN dependency lock is byte-compared against cpanm output on a
+# Linux runner: a CRLF smudge turns every line into a mismatch.
+*.cpan.lock text eol=lf
+
+# Testkit scenario files execute under bash/nginx on Linux runners
+compression/t/harness-scenarios/** text eol=lf
