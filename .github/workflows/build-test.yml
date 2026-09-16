@@ -220,7 +220,7 @@ jobs:
       # Cheapest test layer over the real pure decision functions -- the
       # Accept-Encoding parser and the .zst frame-header probe: no nginx
       # build tree, no network, sub-second. Links the shipped
-      # src/ngx_http_zstd_common.h via ci/fuzz/extract_parser.sh, and the
+      # src/ngx_http_zstd_accept_encoding.h via ci/fuzz/extract_parser.sh, and the
       # frame probe by including src/ngx_http_zstd_frame_probe.h directly
       # (#270 -- the probe's authoritative copy is a header now, so there
       # is no extraction left to go stale).

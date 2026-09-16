@@ -11,14 +11,26 @@ check_definition() {
 	expected=$1
 	fn=$2
 	tree=$3
+	# Optional fourth argument: file names (space-separated) to leave out
+	# of the count. The Accept-Encoding family is sliced into
+	# ci/fuzz/generated_parser.inc by design (that slice is the mechanism
+	# that keeps the fuzz and unit builds on the shipped code), and a unit
+	# fixture may stub one of its walkers under the production name; a
+	# fresh slice or a declared stub is not a drifted copy.
+	excludes=
+	for name in ${4:-}; do
+		excludes="$excludes --exclude=$name"
+	done
 
-	if ! defs=$(grep -r -n -h "^$fn(" \
+	# shellcheck disable=SC2086  # $excludes is a list of --exclude words
+	if ! defs=$(grep -r -n -h $excludes "^$fn(" \
 		"$tree/src" "$tree/filter" "$tree/static" "$tree/ci"); then
 		echo "probe seam: could not find $fn definitions" >&2
 		return 1
 	fi
 
-	if ! sites=$(grep -r -l "^$fn(" \
+	# shellcheck disable=SC2086
+	if ! sites=$(grep -r -l $excludes "^$fn(" \
 		"$tree/src" "$tree/filter" "$tree/static" "$tree/ci"); then
 		echo "probe seam: could not find $fn definition sites" >&2
 		return 1
@@ -78,6 +90,30 @@ for fn in ngx_http_zstd_dict_file_read ngx_http_zstd_hex_nibble \
 	ngx_http_zstd_dict_file_open_strict; do
 	check_definition "$root/src/ngx_http_zstd_dict_file.h" "$fn" "$root"
 done
+
+# Same seam, the Accept-Encoding parser: the common header must include
+# its header, and each parser function must keep exactly one definition
+# in the sources. The zstd wrappers around it (ngx_http_zstd_accept_encoding,
+# ngx_http_zstd_accepts, ngx_http_zstd_ok) keep their names and stay in
+# the common header; they are not part of the family. The fuzz and unit
+# builds slice this family into ci/fuzz/generated_parser.inc on purpose,
+# so that one generated file is left out of the count; the static-bypass
+# unit fixture stubs the request walker under its production name and
+# is left out of that one function's count for the same reason.
+if ! grep -Fq '#include "ngx_http_zstd_accept_encoding.h"' \
+	"$root/src/ngx_http_zstd_common.h"; then
+	echo 'probe seam: src/ngx_http_zstd_common.h no longer includes ngx_http_zstd_accept_encoding.h' >&2
+	exit 1
+fi
+for fn in ngx_http_zstd_skip_quoted ngx_http_zstd_parse_q_fraction \
+	ngx_http_zstd_eval_qvalue ngx_http_zstd_coding_weight_ex \
+	ngx_http_zstd_coding_weight ngx_http_zstd_chain_coding_weight; do
+	check_definition "$root/src/ngx_http_zstd_accept_encoding.h" "$fn" \
+		"$root" generated_parser.inc
+done
+check_definition "$root/src/ngx_http_zstd_accept_encoding.h" \
+	ngx_http_zstd_request_coding_weight "$root" \
+	"generated_parser.inc test_static_should_bypass_unit.c"
 
 # Detection control: redirect the real unit fixture to a copied probe
 # implementation under ci/. The fixture must stay green while the seam

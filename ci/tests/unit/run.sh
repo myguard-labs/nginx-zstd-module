@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # ci/tests/unit/run.sh -- build and run the pure-function unit tests: the
-# Accept-Encoding parser (src/ngx_http_zstd_common.h) and the .zst
-# frame-header probe (src/ngx_http_zstd_frame_probe.h).
+# Accept-Encoding parser (src/ngx_http_zstd_accept_encoding.h) and the
+# .zst frame-header probe (src/ngx_http_zstd_frame_probe.h).
 #
 #   ci/tests/unit/run.sh            # regenerate parser slice, build, run
 #   ci/tests/unit/run.sh clean      # remove build products
@@ -21,7 +21,7 @@
 # Runs in well under a second, needs no nginx build tree, no network and no
 # root: unlike the skeleton's scan core, the Accept-Encoding parser is pure,
 # self-contained ASCII walking (see the header comment atop
-# src/ngx_http_zstd_common.h) that needs only ngx_strncasecmp() /
+# src/ngx_http_zstd_accept_encoding.h) that needs only ngx_strncasecmp() /
 # ngx_strcasestrn(), which ci/fuzz/ngx_shim.h reproduces as faithful, cited
 # copies of the upstream src/core/ngx_string.c implementations. There is
 # therefore no dependency on ci/tools/nginx-tree.sh or a .build/ tree here --
@@ -30,7 +30,8 @@
 #
 # WHAT IT DOES *NOT* DO: it does not re-implement the parser. This script
 # runs ci/fuzz/extract_parser.sh first, exactly as the fuzz build does, so
-# the tests always link the SHIPPED src/ngx_http_zstd_common.h -- never a
+# the tests always link the SHIPPED src/ngx_http_zstd_accept_encoding.h
+# (and the zstd wrappers in src/ngx_http_zstd_common.h) -- never a
 # hand-copied version that can drift from production.
 #
 # -Werror applies throughout: unlike the skeleton's scan-core layer, there is
@@ -58,7 +59,7 @@ if [ "${1:-}" = "clean" ]; then
 fi
 
 # Regenerate the extracted parser slice so this binary always links the
-# shipped src/ngx_http_zstd_common.h, never a stale copy.
+# shipped src/ngx_http_zstd_accept_encoding.h, never a stale copy.
 # test_accept_encoding.c includes ci/fuzz/ headers by RELATIVE path, so a static
 # analyser invoked from anywhere parses it without -I flags. That is deliberate:
 # an analyser that cannot resolve an include skips the whole TU and reports no
