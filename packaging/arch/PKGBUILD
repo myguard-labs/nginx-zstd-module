@@ -2,8 +2,8 @@
 
 pkgname=nginx-mod-zstd
 pkgver=0.90.8
-pkgrel=1
-_nginxver=1.30.4
+pkgrel=2
+_nginxver=1.30.5
 
 pkgdesc='Zstandard compression filter and static modules for nginx'
 arch=('x86_64')
