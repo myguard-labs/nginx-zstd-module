@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Unit tests for the Accept-Encoding parser
- * (src/ngx_http_zstd_common.h: ngx_http_zstd_skip_quoted(),
- * ngx_http_zstd_eval_qvalue(), ngx_http_zstd_coding_weight(),
- * ngx_http_zstd_accept_encoding()).
+ * (src/ngx_http_zstd_accept_encoding.h: ngx_http_zstd_skip_quoted(),
+ * ngx_http_zstd_eval_qvalue(), ngx_http_zstd_coding_weight(); and its
+ * zstd wrapper ngx_http_zstd_accept_encoding() in
+ * src/ngx_http_zstd_common.h).
  *
  * WHY THIS EXISTS ALONGSIDE ci/t/ AND ci/fuzz/
  *
@@ -27,17 +28,20 @@
  *
  * This file, like the fuzz target, does NOT link the real ngx_string.c: the
  * production parser is fully self-contained ASCII walking (see the comment
- * atop ngx_http_zstd_common.h) and needs only ngx_strncasecmp/ngx_strcasestrn,
+ * atop ngx_http_zstd_accept_encoding.h) and needs only
+ * ngx_strncasecmp/ngx_strcasestrn,
  * which ci/fuzz/ngx_shim.h reproduces as faithful, cited copies of the
  * upstream implementations -- the same shim the fuzz target links, so this
  * layer and the fuzz layer test the exact same compiled bytes. There is no
  * shim of the DECISION logic itself: run.sh regenerates
- * ci/fuzz/generated_parser.inc from the real src/ngx_http_zstd_common.h via
- * ci/fuzz/extract_parser.sh before every build, so this binary always links
- * the shipped parser, never a copy.
+ * ci/fuzz/generated_parser.inc from the real
+ * src/ngx_http_zstd_accept_encoding.h via ci/fuzz/extract_parser.sh before
+ * every build, so this binary always links the shipped parser, never a
+ * copy.
  *
- * SEEN RED -- every mutation below was APPLIED to
- * src/ngx_http_zstd_common.h and the named check was observed failing
+ * SEEN RED -- every mutation below was APPLIED to the parser (then in
+ * src/ngx_http_zstd_common.h, now moved verbatim to
+ * src/ngx_http_zstd_accept_encoding.h) and the named check was observed failing
  * (see ci/adoption-findings.md for the exact commands). Re-run them after
  * touching the parser or this file: a check that has never failed is not
  * known to be a check.

@@ -6,10 +6,11 @@ bodies out of shipped production source at build time.
 ## fuzz_accept_encoding
 
 The RFC 7231 Accept-Encoding / q-value parser in
-[`../../src/ngx_http_zstd_common.h`](../../src/ngx_http_zstd_common.h): the
-entry point `ngx_http_zstd_accept_encoding()` and the
-`ngx_http_zstd_eval_qvalue()` helper it calls. Both are sliced into the fuzz
-target together.
+[`../../src/ngx_http_zstd_accept_encoding.h`](../../src/ngx_http_zstd_accept_encoding.h):
+the `ngx_http_zstd_eval_qvalue()` helper and the weight walkers built on
+it, plus the zstd entry point `ngx_http_zstd_accept_encoding()` from
+[`../../src/ngx_http_zstd_common.h`](../../src/ngx_http_zstd_common.h).
+All are sliced into the fuzz target together.
 
 ### Why fuzz_accept_encoding
 
@@ -19,10 +20,11 @@ over the same buffer. That length-bounded vs. NUL-bounded mix, plus q-value
 edge cases, is the bug class the Perl suite cannot reach and that matches this
 module's historical bug profile (truncation, terminal-frame, lifetime).
 
-`extract_parser.sh` slices the verbatim bodies of both parser functions
-(`ngx_http_zstd_eval_qvalue` then `ngx_http_zstd_accept_encoding`, in
-definition order) out of the shipped header into `generated_parser.inc`
-at build time, and fails loudly if it cannot find either.
+`extract_parser.sh` slices the verbatim bodies of the parser functions
+(`ngx_http_zstd_eval_qvalue` and the walkers, then
+`ngx_http_zstd_accept_encoding`, in definition order) out of the two
+shipped headers into `generated_parser.inc` at build time, and fails
+loudly if it cannot find any of them.
 
 ## fuzz_dcz
 

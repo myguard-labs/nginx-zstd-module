@@ -11,6 +11,7 @@ HTTP_ZSTD_SRCS="$ngx_addon_dir/ngx_http_zstd_filter_module.c"
 # generation) rebuilds the object whenever a header changes; without
 # this, edits to them leave stale .o files behind.
 HTTP_ZSTD_DEPS="$ngx_addon_dir/ngx_http_zstd_common.h \
+                $ngx_addon_dir/ngx_http_zstd_accept_encoding.h \
                 $ngx_addon_dir/ngx_http_zstd_cache_control.h \
                 $ngx_addon_dir/ngx_http_zstd_ratio.h \
                 $ngx_addon_dir/ngx_http_zstd_dict_file.h \
