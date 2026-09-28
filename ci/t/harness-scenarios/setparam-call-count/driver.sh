@@ -16,10 +16,9 @@
 #            (zstd_compress.c) both restore it from the CCtx's own applied
 #            params right after copying the CDict's other cParams, so
 #            init_cctx keeps setting it here -> 2 calls (windowLog, LDM).
-#   /dcz/    negotiated raw prefix (ctx->dcz_dict, refPrefix): refPrefix
-#            does NOT override sticky parameters, so level, windowLog
-#            (the dcz-aware value, set once, not twice), LDM and
-#            checksumFlag(dcz) all apply -> 4 calls.
+#   /dcz/    negotiated raw-content CDict: level is superseded by the
+#            config-time CDict, while windowLog (the dcz-aware per-request
+#            value), LDM and checksumFlag(dcz) still apply -> 3 calls.
 #
 # THE OUTPUT-IDENTITY HALF. A call count on its own is satisfied by a
 # response that is fast and wrong, so every oracle here is paired with a
@@ -157,7 +156,7 @@ assert_window_cap() {
     fi
 }
 
-echo "1..8"
+echo "1..12"
 
 # /cdict/: no dcz negotiation header, so init_cctx takes the zlcf->dict
 # branch. level is superseded-by-cdict and skipped; windowLog is NOT
@@ -167,9 +166,58 @@ measure "cdict" "/cdict/index.html" "zstd" 2
 assert_window_cap "cdict" "$PROBER_PREFIX/tmp/cdict.bin" 20
 
 if [ -n "$DICT_SHA_B64" ]; then
-    measure "dcz" "/dcz/index.html" "dcz" 4 \
+    # Disarming also resets the dcz-only attachment counter. This brackets
+    # exactly the two requests below while leaving the config-time build
+    # count intact.
+    curl -fsS --max-time 5 \
+        "http://$HOST:$PORT/__probe?fault_dczdict=-1" -o /dev/null
+
+    measure "dcz" "/dcz/index.html" "dcz" 3 \
         "Accept-Encoding: zstd, dcz" \
         "Available-Dictionary: :$DICT_SHA_B64:"
+
+    BUILDS_AFTER_FIRST="$(prober_probe_field \
+        "$(prober_probe_body "$HOST" "$PORT")" dcz_cdict_builds || echo -1)"
+    CALLS_AFTER_FIRST="$(prober_probe_field \
+        "$(prober_probe_body "$HOST" "$PORT")" dcz_cdict_refs || echo -1)"
+    if [ "$BUILDS_AFTER_FIRST" -eq 1 ]; then
+        ok "dcz: one raw-content CDict was built at configuration load"
+    else
+        diag "dcz: dcz_cdict_builds=$BUILDS_AFTER_FIRST expected=1"
+        notok "dcz: one raw-content CDict was built at configuration load"
+    fi
+    if [ "$CALLS_AFTER_FIRST" -eq 1 ]; then
+        ok "dcz: first request attached the prepared CDict once"
+    else
+        diag "dcz: dcz_cdict_refs=$CALLS_AFTER_FIRST expected=1"
+        notok "dcz: first request attached the prepared CDict once"
+    fi
+
+    REUSE_BODY="$PROBER_PREFIX/tmp/dcz-reuse.bin"
+    if curl -sS --max-time 15 -o "$REUSE_BODY" \
+           -H 'Accept-Encoding: zstd, dcz' \
+           -H "Available-Dictionary: :$DICT_SHA_B64:" \
+           "http://$HOST:$PORT/dcz/index.html" \
+       && zstd -d -q -f -o "$REUSE_BODY.dec" "$REUSE_BODY" \
+               -D "$DICT_FILE" 2>/dev/null \
+       && cmp -s "$REUSE_BODY.dec" "$WWW/index.html"
+    then
+        ok "dcz: repeated request decodes byte-for-byte with the raw dictionary"
+    else
+        notok "dcz: repeated request decodes byte-for-byte with the raw dictionary"
+    fi
+
+    REUSE_PROBE="$(prober_probe_body "$HOST" "$PORT" || true)"
+    BUILDS_AFTER_REUSE="$(prober_probe_field "$REUSE_PROBE" \
+        dcz_cdict_builds || echo -1)"
+    CALLS_AFTER_REUSE="$(prober_probe_field "$REUSE_PROBE" \
+        dcz_cdict_refs || echo -1)"
+    if [ "$BUILDS_AFTER_REUSE" -eq 1 ] && [ "$CALLS_AFTER_REUSE" -eq 2 ]; then
+        ok "dcz: repeated request reused one prebuilt CDict (1 build, 2 attachments)"
+    else
+        diag "dcz: builds=$BUILDS_AFTER_REUSE calls=$CALLS_AFTER_REUSE expected=1/2"
+        notok "dcz: repeated request reused one prebuilt CDict (1 build, 2 attachments)"
+    fi
 else
     # NOT a SKIP -- see codec-call-count/driver.sh's identical reasoning:
     # openssl(1) is a hard requires-gate, so reaching here means the hash
@@ -178,7 +226,11 @@ else
     # for the oracle.
     notok "dcz: response carried Content-Encoding: dcz (could not derive the dictionary hash from $DICT_FILE)"
     notok "dcz: response decodes byte-for-byte to the origin (no dictionary hash)"
-    notok "dcz: setParameter call count is 4 (no dictionary hash)"
+    notok "dcz: setParameter call count is 3 (no dictionary hash)"
+    notok "dcz: one raw-content CDict was built at configuration load (no dictionary hash)"
+    notok "dcz: first request attached the prepared CDict once (no dictionary hash)"
+    notok "dcz: repeated request decodes byte-for-byte with the raw dictionary (no dictionary hash)"
+    notok "dcz: repeated request reused one prebuilt CDict (no dictionary hash)"
 fi
 
 # error log carries no crit/alert/emerg: this scenario injects no faults.

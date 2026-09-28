@@ -577,9 +577,7 @@ typedef struct {
     size_t                       stream_out_size;
 
     /*
-     * Cycle-wide trained-dictionary registry for zstd_dict_file (dcz is
-     * unaffected — see ngx_http_zstd_dcz_dict_file() below, out of
-     * scope here).
+     * Cycle-wide trained-dictionary registry for zstd_dict_file.
      *
      * dict_file's raw bytes are read from disk exactly ONCE per cycle
      * into dict_buf/dict_buf_size, on the first enabled location that
@@ -630,6 +628,16 @@ typedef struct {
     ngx_array_t                 *dict_registry;  /* dict_entry_t entries */
 
     /*
+     * Cycle-wide prepared raw-content dictionaries for dcz. Each entry is
+     * keyed by the raw dictionary allocation, effective compression level,
+     * and the location's maximum (already clamped) dcz window. Locations
+     * that inherit the same dictionary/profile reuse the same immutable
+     * ZSTD_CDict, while each location keeps its own aligned pointer vector
+     * below for O(1) request-time selection.
+     */
+    ngx_array_t                 *dcz_cdict_registry;
+
+    /*
      * Conservative "could this cycle possibly serve a compressed
      * response" latch for ngx_http_zstd_filter_init() (TODO row: skip
      * installing the header/body filter hooks when the module is off
@@ -667,11 +675,21 @@ typedef struct {
 } ngx_http_zstd_dict_entry_t;
 
 
+typedef struct {
+    const u_char                *data;
+    size_t                       size;
+    ngx_int_t                    level;
+    ngx_int_t                    window_log;
+    ZSTD_CDict                  *dict;
+} ngx_http_zstd_dcz_cdict_entry_t;
+
+
 /*
  * One RFC 9842 dictionary, loaded at config parse. `bytes` is the raw
  * file content in cf->pool (worker-lifetime; old workers keep their
- * forked copy across a reload until they drain), referenced per request
- * via ZSTD_CCtx_refPrefix() — RFC 9842 type=raw semantics exactly. The
+ * forked copy across a reload until they drain). Static-API builds prepare
+ * it once as ZSTD_dct_rawContent and attach that immutable CDict per request;
+ * public-API-only builds retain the ZSTD_CCtx_refPrefix() fallback. The
  * SHA-256 is the negotiation key: it is what a client's
  * Available-Dictionary header carries and what the dcz frame header
  * must embed.
@@ -741,6 +759,10 @@ typedef struct {
 
     ngx_array_t                 *dcz_dicts;  /* ngx_http_zstd_dcz_dict_t */
 
+    /* One ZSTD_CDict * per dcz_dicts element, in the same sorted order.
+     * NULL on public-API-only builds, which retain the refPrefix fallback. */
+    ZSTD_CDict                 **dcz_cdicts;
+
     /*
      * RFC 9842 secure-context escape hatch. dcz is only offered on a
      * TLS connection (r->connection->ssl != NULL). Behind a
@@ -783,6 +805,10 @@ typedef struct {
      * NULL means plain zstd. Points into the loc conf's dcz_dicts array
      * (config-pool lifetime, outlives the request). */
     ngx_http_zstd_dcz_dict_t    *dcz_dict;
+
+    /* Prepared raw-content dictionary aligned with dcz_dict for this
+     * location. NULL selects the public-API refPrefix fallback. */
+    ZSTD_CDict                  *dcz_cdict;
 
     uint64_t                     bytes_in;
     uint64_t                     bytes_out;
@@ -1527,7 +1553,8 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     ngx_table_elt_t           *h;
     ngx_http_zstd_loc_conf_t  *zlcf;
     ngx_http_zstd_ctx_t       *ctx;
-    ngx_http_zstd_dcz_dict_t  *dcz;
+    ngx_http_zstd_dcz_dict_t  *dcz, *dcz_base;
+    ngx_uint_t                 dcz_index;
 
     zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
 
@@ -1790,6 +1817,12 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     ctx->last_out = &ctx->out;
     ctx->last_in  = &ctx->in;
     ctx->dcz_dict = dcz;
+
+    if (dcz != NULL && zlcf->dcz_cdicts != NULL) {
+        dcz_base = zlcf->dcz_dicts->elts;
+        dcz_index = (ngx_uint_t) (dcz - dcz_base);
+        ctx->dcz_cdict = zlcf->dcz_cdicts[dcz_index];
+    }
 
     h = ngx_http_zstd_list_push(&r->headers_out.headers);
     if (h == NULL) {
@@ -3696,25 +3729,15 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
     }
 
     /*
-     * ZSTD_c_compressionLevel is one of the "compression parameters"
-     * ZSTD_CCtx_refCDict() unconditionally overrides from the CDict's own
-     * baked-in ZSTD_compressionParameters (see the enum block comment in
-     * zstd.h: "When compressing with a ZSTD_CDict these parameters are
-     * superseded by the parameters used to construct the ZSTD_CDict" --
-     * ZSTD_c_compressionLevel is the first parameter in that block). Skip
-     * setting it only when refCDict is actually going to run below --
-     * i.e. zlcf->dict is set AND this request did NOT negotiate dcz,
-     * exactly the "else if (zlcf->dict)" condition the refCDict call site
-     * itself uses. zstd_dict_file is an http{}-context directive, so a
-     * dcz-negotiated request can have BOTH ctx->dcz_dict and zlcf->dict
-     * non-NULL at once; the dcz branch below always wins that mutual
-     * exclusion (ZSTD_CCtx_refPrefix() only, never refCDict), so gating on
-     * zlcf->dict alone would wrongly skip the level on such a request even
-     * though refCDict is never called for it. The dcz path uses
-     * ZSTD_CCtx_refPrefix(), which does NOT override sticky parameters, so
-     * level must still be set there.
+     * ZSTD_c_compressionLevel is superseded by an attached CDict's baked
+     * compression parameters. The active prepared dictionary is either the
+     * negotiated dcz raw-content CDict or, on a plain-zstd response, the
+     * zstd_dict_file CDict. A public-API-only dcz build has no prepared raw
+     * CDict and retains refPrefix, so it must still set the request's level.
      */
-    if (zlcf->dict == NULL || ctx->dcz_dict != NULL) {
+    if ((ctx->dcz_dict != NULL && ctx->dcz_cdict == NULL)
+        || (ctx->dcz_dict == NULL && zlcf->dict == NULL))
+    {
         if (ngx_http_zstd_set_param(r, cctx, ZSTD_c_compressionLevel,
                                     (int) zlcf->level, "level")
             != NGX_OK)
@@ -3844,35 +3867,49 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
         }
 
         /*
-         * Reference the raw dictionary bytes as a prefix — RFC 9842
-         * type=raw semantics exactly (ZSTD_CCtx_refPrefix interprets the
-         * buffer as raw content, not a trained-dictionary structure).
-         * Per-request table build over the prefix is the deliberate MVP
-         * trade against caching a CDict per (dict, level, window) tuple;
-         * the buffer itself is config-pool memory that outlives the
-         * request. Mutually exclusive with the trained zstd_dict_file
-         * CDict below: a dcz response's frame must reference ONLY the
-         * negotiated dictionary or the client cannot decode it.
+         * Attach the config-time raw-content CDict after every full reset.
+         * Its ZSTD_dct_rawContent construction preserves RFC 9842's raw
+         * dictionary interpretation even when the bytes begin with trained-
+         * dictionary magic. The CCtx-side windowLog above remains the exact
+         * per-request value; the CDict registry key carries the location's
+         * clamped maximum only for match-state construction and reuse.
+         *
+         * Public-API-only builds cannot express ZSTD_dct_rawContent at CDict
+         * creation, so they retain refPrefix rather than risk interpreting
+         * raw RFC bytes as a trained dictionary. Both branches are mutually
+         * exclusive with zstd_dict_file below: a dcz frame references only
+         * its negotiated dictionary.
          */
 #ifdef NGX_TEST_HARNESS
-        if (ngx_http_zstd_probe_refprefix_fault()
-            == NGX_HTTP_ZSTD_PROBE_REFPREFIX_ERROR)
+        if (ctx->dcz_cdict != NULL) {
+            ngx_http_zstd_probe_note_dcz_cdict_ref();
+        }
+
+        if (ngx_http_zstd_probe_dczdict_fault()
+            == NGX_HTTP_ZSTD_PROBE_DCZDICT_ERROR)
         {
             /* See the codec fault site for why (size_t) -1 is the stable,
              * public-API-only synthetic error value. Substituting before the
              * call leaves the CCtx untouched, exactly like a real failure. */
             rc = (size_t) -1;
         } else {
-            rc = ZSTD_CCtx_refPrefix(cctx, ctx->dcz_dict->bytes.data,
-                                     ctx->dcz_dict->bytes.len);
+            rc = ctx->dcz_cdict != NULL
+                 ? ZSTD_CCtx_refCDict(cctx, ctx->dcz_cdict)
+                 : ZSTD_CCtx_refPrefix(cctx, ctx->dcz_dict->bytes.data,
+                                      ctx->dcz_dict->bytes.len);
         }
 #else
-        rc = ZSTD_CCtx_refPrefix(cctx, ctx->dcz_dict->bytes.data,
-                                 ctx->dcz_dict->bytes.len);
+        rc = ctx->dcz_cdict != NULL
+             ? ZSTD_CCtx_refCDict(cctx, ctx->dcz_cdict)
+             : ZSTD_CCtx_refPrefix(cctx, ctx->dcz_dict->bytes.data,
+                                  ctx->dcz_dict->bytes.len);
 #endif
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                          "zstd: ZSTD_CCtx_refPrefix() failed: %s",
+                          "zstd: dcz %s failed: %s",
+                          ctx->dcz_cdict != NULL
+                              ? "ZSTD_CCtx_refCDict()"
+                              : "ZSTD_CCtx_refPrefix()",
                           ZSTD_getErrorName(rc));
             return NGX_ERROR;
         }
@@ -4558,9 +4595,8 @@ ngx_http_zstd_read_dict_file(ngx_conf_t *cf, ngx_fd_t fd, ngx_str_t *path,
 
 /*
  * Compression level at or above which configured dcz dictionaries draw
- * the per-request ZSTD_CCtx_refPrefix() advisory in
- * ngx_http_zstd_merge_loc_conf(); see the rationale there for the
- * measurements behind it.
+ * the per-request ZSTD_CCtx_refPrefix() advisory on public-API-only builds.
+ * Static-API builds prepare ZSTD_dct_rawContent CDicts instead.
  *
  * 9 is the first level whose strategy builds the expensive match tables:
  * measured on a 1 KB body at windowLog 23, a 1 MB dictionary costs
@@ -4569,10 +4605,8 @@ ngx_http_zstd_read_dict_file(ngx_conf_t *cf, ngx_fd_t fd, ngx_str_t *path,
  * dictionary size, so warning about them would be noise on the common
  * web-serving profile.
  *
- * Deliberately OUTSIDE the ZSTD_STATIC_LINKING_ONLY guard below: the
- * advisory it feeds needs no estimator API and must also fire on a
- * release-shape build, which is the build most likely to be serving
- * this profile.
+ * Deliberately outside the ZSTD_STATIC_LINKING_ONLY guard below because the
+ * fallback advisory is compiled only in the complementary branch later.
  */
 #ifndef NGX_HTTP_ZSTD_DCZ_REFPREFIX_ADVISORY_LEVEL
 #define NGX_HTTP_ZSTD_DCZ_REFPREFIX_ADVISORY_LEVEL  9
@@ -4930,6 +4964,164 @@ ngx_http_zstd_dcz_window_cap(ngx_conf_t *cf, ngx_http_zstd_loc_conf_t *conf,
     }
 
     *cap = wlog;
+
+    return NGX_CONF_OK;
+}
+
+#endif
+
+
+#if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
+
+/*
+ * Maximum dcz window this location can select after both operator ceilings.
+ * Individual requests may size the frame down further from dictionary +
+ * pledged content, but the prepared raw-content match state is shared and is
+ * therefore built once at the location's clamped maximum. The exact request
+ * window is still set on the CCtx after every full reset.
+ */
+static ngx_int_t
+ngx_http_zstd_dcz_cdict_window_log(ngx_http_zstd_loc_conf_t *conf)
+{
+    ngx_int_t  wlog;
+
+    wlog = NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG;
+
+    if (conf->window_log > 0 && conf->window_log < wlog) {
+        wlog = conf->window_log;
+    }
+
+    if (conf->dcz_window_cap > 0 && conf->dcz_window_cap < wlog) {
+        wlog = conf->dcz_window_cap;
+    }
+
+    if (wlog < NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG) {
+        wlog = NGX_HTTP_ZSTD_DCZ_MIN_WINDOW_LOG;
+    }
+
+    return wlog;
+}
+
+
+/*
+ * Prepare the raw-content CDict vector for one merged location. The cycle-wide
+ * registry de-duplicates inherited/sibling locations with the same dictionary,
+ * compression level, and clamped window. Every new CDict is registered with
+ * cf->pool before it becomes visible in the registry, so a rejected reload and
+ * a normal old-cycle teardown both free it exactly once while its by-reference
+ * dictionary bytes are still alive.
+ */
+static char *
+ngx_http_zstd_prepare_dcz_cdicts(ngx_conf_t *cf,
+    ngx_http_zstd_main_conf_t *zmcf, ngx_http_zstd_loc_conf_t *conf)
+{
+    ngx_http_zstd_dcz_dict_t         *dicts;
+    ngx_http_zstd_dcz_cdict_entry_t  *entries, *entry;
+    ngx_pool_cleanup_t               *cln;
+    ZSTD_compressionParameters        cparams;
+    ZSTD_CDict                       *cdict;
+    size_t                            cdicts_size;
+    ngx_int_t                         wlog;
+    ngx_uint_t                        i, j;
+
+    if (!conf->enable || conf->dcz_dicts == NULL
+        || conf->dcz_dicts->nelts == 0)
+    {
+        return NGX_CONF_OK;
+    }
+
+    if ((size_t) conf->dcz_dicts->nelts
+        > NGX_MAX_SIZE_T_VALUE / sizeof(ZSTD_CDict *))
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "too many dcz dictionaries to prepare");
+        return NGX_CONF_ERROR;
+    }
+
+    cdicts_size = (size_t) conf->dcz_dicts->nelts * sizeof(ZSTD_CDict *);
+    conf->dcz_cdicts = ngx_pcalloc(cf->pool, cdicts_size);
+    if (conf->dcz_cdicts == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    dicts = conf->dcz_dicts->elts;
+    wlog = ngx_http_zstd_dcz_cdict_window_log(conf);
+
+    for (i = 0; i < conf->dcz_dicts->nelts; i++) {
+        cdict = NULL;
+
+        if (zmcf->dcz_cdict_registry != NULL) {
+            entries = zmcf->dcz_cdict_registry->elts;
+
+            for (j = 0; j < zmcf->dcz_cdict_registry->nelts; j++) {
+                if (entries[j].data == dicts[i].bytes.data
+                    && entries[j].size == dicts[i].bytes.len
+                    && entries[j].level == conf->level
+                    && entries[j].window_log == wlog)
+                {
+                    cdict = entries[j].dict;
+                    break;
+                }
+            }
+        }
+
+        if (cdict == NULL) {
+            cparams = ZSTD_getCParams((int) conf->level, 0,
+                                      dicts[i].bytes.len);
+            cparams.windowLog = (unsigned) wlog;
+
+            cdict = ZSTD_createCDict_advanced(dicts[i].bytes.data,
+                                              dicts[i].bytes.len,
+                                              ZSTD_dlm_byRef,
+                                              ZSTD_dct_rawContent,
+                                              cparams, ZSTD_defaultCMem);
+            if (cdict == NULL) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "ZSTD_createCDict_advanced() failed for "
+                                   "dcz dictionary \"%V\" at level %i, "
+                                   "windowLog %i",
+                                   &dicts[i].file, conf->level, wlog);
+                return NGX_CONF_ERROR;
+            }
+
+            cln = ngx_pool_cleanup_add(cf->pool, 0);
+            if (cln == NULL) {
+                ZSTD_freeCDict(cdict);
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "ngx_pool_cleanup_add() failed for dcz "
+                                   "dictionary \"%V\"", &dicts[i].file);
+                return NGX_CONF_ERROR;
+            }
+
+            cln->handler = ngx_http_zstd_cleanup_dict;
+            cln->data = cdict;
+
+            if (zmcf->dcz_cdict_registry == NULL) {
+                zmcf->dcz_cdict_registry = ngx_array_create(cf->pool, 4,
+                                      sizeof(ngx_http_zstd_dcz_cdict_entry_t));
+                if (zmcf->dcz_cdict_registry == NULL) {
+                    return NGX_CONF_ERROR;
+                }
+            }
+
+            entry = ngx_array_push(zmcf->dcz_cdict_registry);
+            if (entry == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            entry->data = dicts[i].bytes.data;
+            entry->size = dicts[i].bytes.len;
+            entry->level = conf->level;
+            entry->window_log = wlog;
+            entry->dict = cdict;
+
+#ifdef NGX_TEST_HARNESS
+            ngx_http_zstd_probe_note_dcz_cdict_build();
+#endif
+        }
+
+        conf->dcz_cdicts[i] = cdict;
+    }
 
     return NGX_CONF_OK;
 }
@@ -5585,45 +5777,19 @@ close:
     }
 
     /*
-     * A33-F1 advisory: dcz dictionaries at an expensive compressor profile.
-     *
-     * A dcz response references its negotiated dictionary with
-     * ZSTD_CCtx_refPrefix() on EVERY request (see the two call sites in
-     * ngx_http_zstd_filter_init_cctx()), which rebuilds the dictionary's
-     * match tables each time. The cost is a function of dictionary size
-     * and compression level and is independent of the response body, so
-     * a small body pays it in full. Measured, libzstd 1.5.7, 1 KB body,
-     * windowLog 23:
-     *
-     *     dict    level 3     level 9     level 19
-     *     1 MB    0.75 ms      4.5 ms      14.9 ms
-     *     8 MB    0.75 ms       35 ms       395 ms
-     *
-     * Level 3 is flat because the default strategy does not build the
-     * expensive tables; from level 9 the cost climbs steeply with
-     * dictionary size, and "zstd_long on" enables long-distance matching,
-     * which adds its own per-request table build.
-     *
-     * This is a hardening advisory, not a default-config DoS: neither
-     * lever is attacker-supplied. The level is the operator's
-     * "zstd_comp_level" and the dictionary set is whatever the operator
-     * configured with "zstd_dcz_dict_file"; a client only selects among
-     * already-configured dictionaries via "Available-Dictionary". So the
-     * cost is reachable only in a configuration the operator chose, and
-     * the right response is to name it at config load rather than to
-     * refuse the configuration or to change the request path.
-     *
-     * The gate is the profile, not the dictionary size: the sizes above
-     * are this box's numbers on one body size, and a threshold on bytes
-     * would be a tuning constant with no defensible value. Level and
-     * long-mode are what the operator can act on, so they are what the
-     * advisory keys on and what it reports.
-     *
-     * Deliberately outside the ZSTD_STATIC_LINKING_ONLY guard used by
-     * the two memory advisories above: this needs no estimator API, and
-     * a release-shape build (which refuses "zstd_max_cctx_memory" by
-     * name) is exactly the build most likely to be serving this profile.
+     * Static-API builds prepare every dcz dictionary now, after the budget
+     * path above has derived dcz_window_cap. Public-API-only builds cannot
+     * force ZSTD_dct_rawContent (a dictionary whose first four bytes happen
+     * to be the trained-dictionary magic must still be raw under RFC 9842),
+     * so they retain refPrefix and its high-profile advisory.
      */
+#if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
+    if (rc == NGX_CONF_OK
+        && ngx_http_zstd_prepare_dcz_cdicts(cf, zmcf, conf) != NGX_CONF_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+#else
     if (rc == NGX_CONF_OK && conf->enable
         && conf->dcz_dicts != NULL && conf->dcz_dicts->nelts > 0
         && (conf->level >= NGX_HTTP_ZSTD_DCZ_REFPREFIX_ADVISORY_LEVEL
@@ -5662,6 +5828,7 @@ close:
                            conf->long_mode
                                ? ", disable \"zstd_long\"" : "");
     }
+#endif
 
     /*
      * G5: there is no longer a gzip_vary-off warning here. The header
@@ -6089,11 +6256,9 @@ ngx_http_zstd_cleanup_dict(void *data)
  * zstd_dcz_dict_file <path> — load one RFC 9842 dictionary. The file is
  * read and hashed here at config parse (nginx -t validates it), into
  * cf->pool so the raw bytes live exactly as long as the configuration
- * that references them. No CDict is built: the request path references
- * the bytes with ZSTD_CCtx_refPrefix(), which honors whatever
- * per-location parameters that request's CCtx carries — repeating the
- * trained-dict path's CDict-per-(level,window) merge matrix here would
- * buy latency only, and is deferred until profiling demands it.
+ * that references them. After location inheritance and memory-policy
+ * clamps are resolved, static-API builds prepare ZSTD_dct_rawContent
+ * CDicts from these bytes in ngx_http_zstd_merge_loc_conf().
  */
 static char *
 ngx_http_zstd_dcz_dict_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)

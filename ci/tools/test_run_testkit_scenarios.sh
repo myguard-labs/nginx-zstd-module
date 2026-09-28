@@ -37,7 +37,7 @@ case "$scenario" in
         for n in 2 4 6 8 10; do printf 'ok %s - total codec calls is 1\n' "$n"; done
         ;;
     setparam-call-count)
-        printf '1..7\nok 1 - boot\nok 2 - decoded\nok 3 - setParameter call count is 1\nok 4 - frame window size is 1024\nok 5 - decoded\nok 6 - ready\nok 7 - setParameter call count is 2\n'
+        printf '1..12\nok 1 - boot\nok 2 - decoded\nok 3 - setParameter call count is 1\nok 4 - frame window size is 1024\nok 5 - decoded\nok 6 - ready\nok 7 - setParameter call count is 2\nok 8 - built\nok 9 - attached\nok 10 - decoded again\nok 11 - repeated request reused one prebuilt CDict\nok 12 - logs clean\n'
         ;;
     setparam-call-count-nodict)
         printf '1..4\nok 1 - boot\nok 2 - decoded\nok 3 - setParameter call count is 3\nok 4 - frame window size is 2048\n'
@@ -54,7 +54,7 @@ run() {
 
 run
 [ "$(wc -l < "$WORK/calls")" -eq 6 ]
-grep -q $'^fault-arms\tzstd: ZSTD_' "$WORK/calls"
+grep -q $'^fault-arms\tzstd: (ZSTD_' "$WORK/calls"
 grep -q $'^fault-palloc\tzstd: ' "$WORK/calls"
 grep -q $'^alloc-neutral\tunset$' "$WORK/calls"
 

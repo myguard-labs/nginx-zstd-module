@@ -69,7 +69,7 @@ static ngx_uint_t  ngx_http_zstd_probe_have_ctx;
  */
 static ngx_int_t  ngx_http_zstd_probe_fault_codec_nth     = -1;
 static ngx_int_t  ngx_http_zstd_probe_fault_codec_end_nth = -1;
-static ngx_int_t  ngx_http_zstd_probe_fault_refprefix_nth = -1;
+static ngx_int_t  ngx_http_zstd_probe_fault_dczdict_nth   = -1;
 
 /*
  * Per-site event counters. These count calls SINCE THE SITE WAS ARMED,
@@ -102,7 +102,9 @@ static ngx_int_t  ngx_http_zstd_probe_fault_refprefix_nth = -1;
  */
 static ngx_uint_t  ngx_http_zstd_probe_codec_calls;
 static ngx_uint_t  ngx_http_zstd_probe_codec_end_calls;
-static ngx_uint_t  ngx_http_zstd_probe_refprefix_calls;
+static ngx_uint_t  ngx_http_zstd_probe_dczdict_calls;
+static ngx_uint_t  ngx_http_zstd_probe_dcz_cdict_builds;
+static ngx_uint_t  ngx_http_zstd_probe_dcz_cdict_refs;
 
 /*
  * Pool-allocation fault site. Same shape and same arm-relative counting as
@@ -221,26 +223,40 @@ ngx_http_zstd_probe_codec_fault(ngx_uint_t is_end)
 
 
 /*
- * Consume one event at the dcz-only ZSTD_CCtx_refPrefix() site.
+ * Consume one event at the dcz-only dictionary-attachment site.
  *
  * A prefix reference has no meaningful zero-output success state, so this
  * dedicated outcome has only NONE and ERROR. The site, state, and counter are
  * all independent from CODEC/CODEC_END.
  */
-ngx_http_zstd_probe_refprefix_outcome_e
-ngx_http_zstd_probe_refprefix_fault(void)
+ngx_http_zstd_probe_dczdict_outcome_e
+ngx_http_zstd_probe_dczdict_fault(void)
 {
     ngx_uint_t  seq;
 
-    seq = ++ngx_http_zstd_probe_refprefix_calls;
+    seq = ++ngx_http_zstd_probe_dczdict_calls;
 
-    if (ngx_http_zstd_probe_fault_refprefix_nth < 0
-        || (ngx_uint_t) ngx_http_zstd_probe_fault_refprefix_nth != seq)
+    if (ngx_http_zstd_probe_fault_dczdict_nth < 0
+        || (ngx_uint_t) ngx_http_zstd_probe_fault_dczdict_nth != seq)
     {
-        return NGX_HTTP_ZSTD_PROBE_REFPREFIX_NONE;
+        return NGX_HTTP_ZSTD_PROBE_DCZDICT_NONE;
     }
 
-    return NGX_HTTP_ZSTD_PROBE_REFPREFIX_ERROR;
+    return NGX_HTTP_ZSTD_PROBE_DCZDICT_ERROR;
+}
+
+
+void
+ngx_http_zstd_probe_note_dcz_cdict_build(void)
+{
+    ngx_http_zstd_probe_dcz_cdict_builds++;
+}
+
+
+void
+ngx_http_zstd_probe_note_dcz_cdict_ref(void)
+{
+    ngx_http_zstd_probe_dcz_cdict_refs++;
 }
 
 
@@ -330,19 +346,23 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
                         ",\"palloc_calls\":%ui"
                         ",\"codec_calls\":%ui"
                         ",\"codec_end_calls\":%ui"
-                        ",\"refprefix_calls\":%ui"
-                        ",\"refprefix_armed\":%ui"
+                        ",\"dczdict_calls\":%ui"
+                        ",\"dczdict_armed\":%ui"
+                        ",\"dcz_cdict_builds\":%ui"
+                        ",\"dcz_cdict_refs\":%ui"
                         ",\"setparam_calls\":%ui",
                         ngx_http_zstd_probe_chain_links,
                         ngx_http_zstd_probe_bufs_allocated,
                         ngx_http_zstd_probe_palloc_calls,
                         ngx_http_zstd_probe_codec_calls,
                         ngx_http_zstd_probe_codec_end_calls,
-                        ngx_http_zstd_probe_refprefix_calls,
-                        ngx_http_zstd_probe_fault_refprefix_nth < 0
+                        ngx_http_zstd_probe_dczdict_calls,
+                        ngx_http_zstd_probe_fault_dczdict_nth < 0
                             ? 0
                             : (ngx_uint_t)
-                                ngx_http_zstd_probe_fault_refprefix_nth,
+                                ngx_http_zstd_probe_fault_dczdict_nth,
+                        ngx_http_zstd_probe_dcz_cdict_builds,
+                        ngx_http_zstd_probe_dcz_cdict_refs,
                         ngx_http_zstd_probe_setparam_calls);
 
     if (ngx_http_zstd_probe_have_ctx) {
@@ -404,21 +424,21 @@ ngx_http_zstd_probe_nth_is_valid(ngx_int_t nth)
 
 
 /*
- * Arm the module-local refPrefix site from the request query string.
+ * Arm the module-local dcz dictionary site from the request query string.
  *
  * The generic testkit predates this dcz-only site, so it does not know the
- * fault_refprefix key. Keep the same input contract as its bare-ordinal sites:
+ * fault_dczdict key. Keep the same input contract as its bare-ordinal sites:
  * 1..999 arms, any well-formed negative value disarms, and malformed or
  * out-of-range values leave the current arm unchanged.
  */
 static void
-ngx_http_zstd_probe_arm_refprefix(ngx_http_request_t *r)
+ngx_http_zstd_probe_arm_dczdict(ngx_http_request_t *r)
 {
     ngx_str_t  value;
     ngx_int_t  nth;
 
-    if (ngx_http_arg(r, (u_char *) "fault_refprefix",
-                     sizeof("fault_refprefix") - 1, &value)
+    if (ngx_http_arg(r, (u_char *) "fault_dczdict",
+                     sizeof("fault_dczdict") - 1, &value)
         != NGX_OK)
     {
         return;
@@ -427,8 +447,9 @@ ngx_http_zstd_probe_arm_refprefix(ngx_http_request_t *r)
     if (value.len >= 2 && value.data[0] == '-') {
         nth = ngx_atoi(value.data + 1, value.len - 1);
         if (nth > 0) {
-            ngx_http_zstd_probe_fault_refprefix_nth = -1;
-            ngx_http_zstd_probe_refprefix_calls = 0;
+            ngx_http_zstd_probe_fault_dczdict_nth = -1;
+            ngx_http_zstd_probe_dczdict_calls = 0;
+            ngx_http_zstd_probe_dcz_cdict_refs = 0;
         }
         return;
     }
@@ -438,8 +459,9 @@ ngx_http_zstd_probe_arm_refprefix(ngx_http_request_t *r)
         return;
     }
 
-    ngx_http_zstd_probe_fault_refprefix_nth = nth;
-    ngx_http_zstd_probe_refprefix_calls = 0;
+    ngx_http_zstd_probe_fault_dczdict_nth = nth;
+    ngx_http_zstd_probe_dczdict_calls = 0;
+    ngx_http_zstd_probe_dcz_cdict_refs = 0;
 }
 
 
@@ -447,7 +469,7 @@ ngx_http_zstd_probe_arm_refprefix(ngx_http_request_t *r)
  * Reset the setParameter counter from the request query string
  * (?setparam_reset=1). No fault to arm here, so this is a bare reset
  * rather than routed through fault_set_global -- same reasoning as
- * arm_refprefix() above being module-local because the generic testkit
+ * arm_dczdict() above being module-local because the generic testkit
  * predates this counter.
  */
 static void
@@ -606,7 +628,7 @@ ngx_http_zstd_probe_handler(ngx_http_request_t *r)
      * fault_set_global -- see ngx_test_probe_arm()'s dispatch-order
      * comment.
      */
-    ngx_http_zstd_probe_arm_refprefix(r);
+    ngx_http_zstd_probe_arm_dczdict(r);
     ngx_http_zstd_probe_arm_setparam_reset(r);
     (void) ngx_test_probe_arm(NULL, &r->args);
 

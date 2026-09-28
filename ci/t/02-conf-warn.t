@@ -1046,6 +1046,7 @@ Content-Encoding: zstd
 # level 3 against 4.5 ms at level 9), so it is where the advisory starts.
 # Config-load only: the warning must not change whether the location
 # serves, so the request below still succeeds.
+--- skip_eval: 3: $::static_linking
 --- config
     location /t {
         zstd on;
@@ -1098,6 +1099,7 @@ GET /t
 # level 3, where TEST 33 proves the level arm is silent -- so only the
 # long_mode arm can be firing here. Also pins that the message names the
 # directive, which is what the operator acts on.
+--- skip_eval: 3: $::static_linking
 --- config
     location /t {
         zstd on;
@@ -1129,6 +1131,7 @@ disable "zstd_long"
 # "keep the first" or "keep the last" bug both read wrong -- the message
 # must name 59738 (suite/test), not 2660 (suite/dcz-dict). Also the only
 # arm that would catch the count and size arguments being swapped.
+--- skip_eval: 3: $::static_linking
 --- config
     location /t {
         zstd on;
@@ -1150,6 +1153,33 @@ largest configured dictionary here is 59738 bytes
 [emerg]
 [error]
 [alert]
+
+
+
+=== TEST 35c: static-API dcz profiles replace the per-request advisory with prepared CDicts
+# The complement of TESTS 32/34/35b. A static-API build prepares raw-content
+# CDicts at configuration load, so even the old warning's strongest shape --
+# multiple dictionaries, high level, and long mode -- must stay silent. The
+# request proves configuration acceptance remains unchanged; live repeated
+# dcz attachment and decode are pinned by the harness scenario.
+--- skip_eval: 3: !$::static_linking
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 9;
+        zstd_long on;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/test;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again";
+    }
+--- request
+GET /t
+--- error_code: 200
+--- no_error_log eval
+[qr/ZSTD_CCtx_refPrefix/, qr/\[emerg\]/, qr/\[error\]/, qr/\[alert\]/]
 
 
 
