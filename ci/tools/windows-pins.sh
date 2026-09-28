@@ -18,8 +18,8 @@
 # Data only: every assignment here is consumed by the sourcing script,
 # which shellcheck cannot see when it lints this file on its own.
 # shellcheck shell=sh disable=SC2034
-VER_NGINX=1.31.5
-SHA_NGINX=e951607d534836624bd36b6b45a71dbfb055237deae3738da6bbf3270dada279
+VER_NGINX=1.31.6
+SHA_NGINX=974ed5298a5e398e008704ed5db284e655fc270c596493dbccada452448fc9f1
 VER_PCRE2=10.48
 SHA_PCRE2=ebcc25aadf2a51fa1fefa9b8bc9e7a79b3dae86870a0f1152a22e42befd46888
 VER_OPENSSL=4.0.2
