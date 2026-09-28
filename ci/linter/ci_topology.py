@@ -37,7 +37,6 @@ def check_ci(ci: dict) -> list[str]:
     expected = {
         "lint": "./.github/workflows/lint.yml",
         "build-test": "./.github/workflows/build-test.yml",
-        "arch-package": "./.github/workflows/arch-package.yml",
         "security-scanners": "./.github/workflows/security-scanners.yml",
         "harness-fault-arms": "./.github/workflows/harness-fault-arms.yml",
         "windows-build": "./.github/workflows/windows-build.yml",
@@ -60,7 +59,6 @@ def check_ci(ci: dict) -> list[str]:
     for job in (
         "lint",
         "build-test",
-        "arch-package",
         "security-scanners",
         "windows-build",
     ):
@@ -183,6 +181,21 @@ def selftest(  # pylint: disable=too-many-statements
         for error in baseline:
             print(f"FAIL topology baseline is invalid: {error}", file=sys.stderr)
         return 1
+    failed = False
+    changed = copy.deepcopy(ci)
+    changed["jobs"]["arch-package"] = {
+        "name": "Arch package",
+        "if": "github.event_name != 'push'",
+        "uses": "./.github/workflows/arch-package.yml",
+        "permissions": {"contents": "read"},
+    }
+    arch_errors = findings(changed, build, deep)
+    expected_arch_errors = ["ci.yml must contain only the measured PR workflow set"]
+    if arch_errors == expected_arch_errors:
+        print("ok   topology rejects automatic Arch package workflow")
+    else:
+        print(f"FAIL topology Arch workflow errors: {arch_errors!r}", file=sys.stderr)
+        failed = True
     cases = []
     changed = copy.deepcopy(ci)
     changed["jobs"]["fuzzing"] = {"uses": "./.github/workflows/fuzzing.yml"}
@@ -194,14 +207,8 @@ def selftest(  # pylint: disable=too-many-statements
     changed["jobs"]["security-scanners"]["uses"] = "./.github/workflows/valgrind.yml"
     cases.append(("rewired PR workflow call", changed, build, deep))
     changed = copy.deepcopy(ci)
-    changed["jobs"]["arch-package"]["uses"] = "./.github/workflows/valgrind.yml"
-    cases.append(("rewired hosted package workflow", changed, build, deep))
-    changed = copy.deepcopy(ci)
     del changed["jobs"]["build-test"]["if"]
     cases.append(("duplicate master build", changed, build, deep))
-    changed = copy.deepcopy(ci)
-    del changed["jobs"]["arch-package"]["if"]
-    cases.append(("duplicate master package build", changed, build, deep))
     changed = copy.deepcopy(ci)
     changed[True]["push"] = None
     cases.append(("unbounded master signal", changed, build, deep))
@@ -232,7 +239,6 @@ def selftest(  # pylint: disable=too-many-statements
     changed = copy.deepcopy(deep)
     changed["jobs"]["unlisted"] = {}
     cases.append(("unlisted deep child job", ci, build, changed))
-    failed = False
     for label, ci_doc, build_doc, deep_doc in cases:
         if findings(ci_doc, build_doc, deep_doc):
             print(f"ok   topology rejects {label}")
