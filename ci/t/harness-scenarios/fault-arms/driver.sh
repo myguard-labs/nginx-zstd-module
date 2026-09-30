@@ -11,9 +11,9 @@
 # n-th call at that site since the arm; 1000+n injects success-with-
 # zero-output on the n-th call.
 #
-# The same scenario owns the dedicated dcz setup site immediately before
-# ZSTD_CCtx_refPrefix(). GET /__probe?fault_refprefix=<n> injects an error on
-# its n-th call; the separately rendered refprefix_calls counter proves a
+# The same scenario owns the dedicated dcz dictionary-attachment site.
+# GET /__probe?fault_dczdict=<n> injects an error on its n-th call; the
+# separately rendered dczdict_calls counter proves a
 # plain zstd request cannot consume that dcz-only arm.
 #
 # Non-vacuity discipline copied from consumer-zstd/driver.sh: if the basis a
@@ -136,10 +136,10 @@ DCZ_HEADERS=(
 # 9  the upper valid boundary (999) arms, while malformed/out-of-range values
 #    leave that arm unchanged
 # 10 negative disarm clears that boundary arm
-# 11 REFPREFIX armed at its lower boundary does not affect plain zstd and
+# 11 DCZDICT armed at its lower boundary does not affect plain zstd and
 #    the dedicated counter remains zero (dcz-only negative control)
 # 12 the SAME still-armed fault is consumed by a negotiated dcz request,
-#    which fails closed and logs the existing refPrefix error branch
+#    which fails closed and logs the dcz CDict error branch
 # 13 arm-then-disarm before consumption leaves the first dcz call clean
 # 14 no worker died by signal across the whole run
 #
@@ -155,7 +155,7 @@ DCZ_HEADERS=(
 # mutant-exempt: oracle 10's not-ok echo shares the same observed disarm mutant
 # mutant-exempt: oracle 11 failed when the fault decision was moved above the dcz guard
 # mutant-exempt: oracle 11's not-ok echo shares the same observed dcz-only mutant
-# mutant-exempt: oracle 12 failed when the armed outcome returned REFPREFIX_NONE
+# mutant-exempt: oracle 12 failed when the armed outcome returned DCZDICT_NONE
 # mutant-exempt: oracle 12's not-ok echo shares the same observed outcome mutant
 # mutant-exempt: oracle 13 failed when the pre-consumption disarm was removed
 # mutant-exempt: oracle 13's not-ok echo shares the same observed disarm mutant
@@ -361,7 +361,7 @@ then
     DCZ_BASE_OK=1
 fi
 if [ "$DCZ_BASE_OK" -eq 1 ]; then
-    echo "ok 8 - an unfaulted request negotiated dcz before the refPrefix error arm"
+    echo "ok 8 - an unfaulted request negotiated dcz before the dictionary error arm"
 else
     echo "not ok 8 - dcz normal-path control did not negotiate a clean 200"
     FAILED=$((FAILED + 1))
@@ -369,31 +369,31 @@ fi
 
 # --- 9: parser boundary and malformed-input controls -----------------------
 # Manual mutation control (2026-08-28): changing the invalid-input branch to
-# clear refprefix_armed made this named oracle turn red.
+# clear dczdict_armed made this named oracle turn red.
 PARSER9_OK=1
-if ! arm refprefix 999 \
-    || [ "$(read_probe_field refprefix_armed || echo invalid)" != 999 ]
+if ! arm dczdict 999 \
+    || [ "$(read_probe_field dczdict_armed || echo invalid)" != 999 ]
 then
     PARSER9_OK=0
 fi
 for invalid in '' '-' 0 1000 10000 1junk; do
     if ! curl -fsS --max-time 5 \
-        "http://$HOST:$PORT/__probe?fault_refprefix=${invalid}" -o /dev/null \
-        || [ "$(read_probe_field refprefix_armed || echo invalid)" != 999 ]
+        "http://$HOST:$PORT/__probe?fault_dczdict=${invalid}" -o /dev/null \
+        || [ "$(read_probe_field dczdict_armed || echo invalid)" != 999 ]
     then
         PARSER9_OK=0
     fi
 done
 if ! curl -fsS --max-time 5 \
-    "http://$HOST:$PORT/__probe?xfault_refprefix=1" -o /dev/null \
-    || [ "$(read_probe_field refprefix_armed || echo invalid)" != 999 ]
+    "http://$HOST:$PORT/__probe?xfault_dczdict=1" -o /dev/null \
+    || [ "$(read_probe_field dczdict_armed || echo invalid)" != 999 ]
 then
     PARSER9_OK=0
 fi
 if [ "$PARSER9_OK" -eq 1 ]; then
-    echo "ok 9 - fault_refprefix accepts boundary 999 and rejects empty, malformed, out-of-range, and substring keys without changing the arm"
+    echo "ok 9 - fault_dczdict accepts boundary 999 and rejects empty, malformed, out-of-range, and substring keys without changing the arm"
 else
-    echo "not ok 9 - fault_refprefix parser changed or lost the boundary-999 arm on invalid input"
+    echo "not ok 9 - fault_dczdict parser changed or lost the boundary-999 arm on invalid input"
     FAILED=$((FAILED + 1))
 fi
 
@@ -402,45 +402,45 @@ fi
 # reset made this named oracle and oracle 13 turn red. Use a value longer than
 # the positive arm range to pin the "any non-empty negative" parser contract.
 curl -fsS --max-time 5 \
-    "http://$HOST:$PORT/__probe?fault_refprefix=-10000" -o /dev/null || true
-if [ "$(read_probe_field refprefix_armed || echo invalid)" = 0 ]; then
-    echo "ok 10 - a negative fault_refprefix value disarmed the boundary arm"
+    "http://$HOST:$PORT/__probe?fault_dczdict=-10000" -o /dev/null || true
+if [ "$(read_probe_field dczdict_armed || echo invalid)" = 0 ]; then
+    echo "ok 10 - a negative fault_dczdict value disarmed the boundary arm"
 else
-    echo "not ok 10 - negative fault_refprefix did not clear the armed state"
+    echo "not ok 10 - negative fault_dczdict did not clear the armed state"
     FAILED=$((FAILED + 1))
 fi
 
 # --- 11: dedicated site is dcz-only ----------------------------------------
 # Manual mutation control (2026-08-28): moving the fault decision above the
 # ctx->dcz_dict guard made this named oracle turn red on the plain request.
-PLAIN_CONTROL_OUT="$PROBER_PREFIX/refprefix-plain-control.out"
+PLAIN_CONTROL_OUT="$PROBER_PREFIX/dczdict-plain-control.out"
 ARM11_OK=0
 PLAIN11_OK=0
-REFPREFIX_AFTER_PLAIN=-1
-if arm refprefix 1; then
+DCZDICT_AFTER_PLAIN=-1
+if arm dczdict 1; then
     ARM11_OK=1
     if fetch /body.bin "$PLAIN_CONTROL_OUT" \
         && grep -q '^HTTP/1.1 200' "$PLAIN_CONTROL_OUT.hdrs"
     then
         PLAIN11_OK=1
     fi
-    REFPREFIX_AFTER_PLAIN="$(read_probe_field refprefix_calls || echo -1)"
+    DCZDICT_AFTER_PLAIN="$(read_probe_field dczdict_calls || echo -1)"
 fi
 if [ "$ARM11_OK" -eq 1 ] && [ "$PLAIN11_OK" -eq 1 ] \
-    && [ "$REFPREFIX_AFTER_PLAIN" -eq 0 ]
+    && [ "$DCZDICT_AFTER_PLAIN" -eq 0 ]
 then
-    echo "ok 11 - fault_refprefix=1 left plain zstd untouched and its dedicated counter at zero"
+    echo "ok 11 - fault_dczdict=1 left plain zstd untouched and its dedicated counter at zero"
 else
-    echo "not ok 11 - plain zstd consumed or was affected by the dcz-only refPrefix arm (arm_ok=$ARM11_OK; plain_ok=$PLAIN11_OK; calls=$REFPREFIX_AFTER_PLAIN)"
+    echo "not ok 11 - plain zstd consumed or was affected by the dcz-only dictionary arm (arm_ok=$ARM11_OK; plain_ok=$PLAIN11_OK; calls=$DCZDICT_AFTER_PLAIN)"
     FAILED=$((FAILED + 1))
 fi
 
-# --- 12: negotiated dcz consumes REFPREFIX ERROR and fails closed -----------
-# Manual mutation control (2026-08-28): returning REFPREFIX_NONE at the armed
+# --- 12: negotiated dcz consumes DCZDICT ERROR and fails closed -------------
+# Manual mutation control (2026-08-28): returning DCZDICT_NONE at the armed
 # event made this named oracle turn red (got200=1, calls=1, log=0).
 # Do not re-arm here. Oracle 11 proved the plain request did not consume the
 # lower-bound nth=1 arm; this request must consume that same pending event.
-REF_ERR_OUT="$PROBER_PREFIX/refprefix-err.out"
+REF_ERR_OUT="$PROBER_PREFIX/dczdict-err.out"
 ELOG_MARK_12="$(wc -l < "$ELOG")"
 GOT200_12=0
 # Manual mutation control (2026-08-28): inverting the empty-body check made
@@ -452,19 +452,19 @@ if (fetch /dcz/body.bin "$REF_ERR_OUT" "${DCZ_HEADERS[@]}" \
 then
     GOT200_12=1
 fi
-REFPREFIX_AFTER_DCZ="$(read_probe_field refprefix_calls || echo -1)"
-REFPREFIX_LOG_12=0
+DCZDICT_AFTER_DCZ="$(read_probe_field dczdict_calls || echo -1)"
+DCZDICT_LOG_12=0
 if tail -n +$((ELOG_MARK_12 + 1)) "$ELOG" \
-    | grep -q 'zstd: ZSTD_CCtx_refPrefix() failed:'
+    | grep -q 'zstd: dcz ZSTD_CCtx_refCDict() failed:'
 then
-    REFPREFIX_LOG_12=1
+    DCZDICT_LOG_12=1
 fi
-if [ "$GOT200_12" -eq 0 ] && [ "$REFPREFIX_AFTER_DCZ" -eq 1 ] \
-    && [ "$REFPREFIX_LOG_12" -eq 1 ]
+if [ "$GOT200_12" -eq 0 ] && [ "$DCZDICT_AFTER_DCZ" -eq 1 ] \
+    && [ "$DCZDICT_LOG_12" -eq 1 ]
 then
-    echo "ok 12 - negotiated dcz consumed fault_refprefix=1 and the existing refPrefix error branch failed closed"
+    echo "ok 12 - negotiated dcz consumed fault_dczdict=1 and the CDict error branch failed closed"
 else
-    echo "not ok 12 - refPrefix fault was not reached or did not fail closed (got200=$GOT200_12; calls=$REFPREFIX_AFTER_DCZ; log=$REFPREFIX_LOG_12)"
+    echo "not ok 12 - dcz dictionary fault was not reached or did not fail closed (got200=$GOT200_12; calls=$DCZDICT_AFTER_DCZ; log=$DCZDICT_LOG_12)"
     FAILED=$((FAILED + 1))
 fi
 
@@ -475,13 +475,13 @@ fi
 # oracle turn red.
 ARM13_OK=0
 DISARM13_OK=0
-if arm refprefix 1 \
-    && [ "$(read_probe_field refprefix_armed || echo invalid)" = 1 ]
+if arm dczdict 1 \
+    && [ "$(read_probe_field dczdict_armed || echo invalid)" = 1 ]
 then
     ARM13_OK=1
 fi
-if [ "$ARM13_OK" -eq 1 ] && disarm refprefix \
-    && [ "$(read_probe_field refprefix_armed || echo invalid)" = 0 ]
+if [ "$ARM13_OK" -eq 1 ] && disarm dczdict \
+    && [ "$(read_probe_field dczdict_armed || echo invalid)" = 0 ]
 then
     DISARM13_OK=1
 fi

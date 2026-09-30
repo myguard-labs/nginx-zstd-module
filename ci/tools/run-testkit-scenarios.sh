@@ -166,6 +166,8 @@ verify_tap() {
             done
             require_line "$log" '^ok 4 - [^#]*frame window size is [^#]*$' \
                 "setparam-call-count did not assert the CDict frame window"
+            require_line "$log" '^ok 11 - [^#]*reused one prebuilt CDict[^#]*$' \
+                "setparam-call-count did not assert dcz prepared-state reuse"
             ;;
         setparam-call-count-nodict)
             require_line "$log" '^ok 3 - [^#]*setParameter call count is [^#]*$' \
@@ -188,7 +190,7 @@ for scenario in "${SCENARIOS[@]}"; do
     allow_log=""
     case "$scenario" in
         fault-arms)
-            allow_log='zstd: ZSTD_(compressStream2|CCtx_refPrefix)\(\) failed'
+            allow_log='zstd: (ZSTD_compressStream2\(\)|dcz ZSTD_CCtx_refCDict\(\)) failed'
             ;;
         fault-palloc)
             allow_log='zstd: |ngx_(palloc|pcalloc|pnalloc)'
