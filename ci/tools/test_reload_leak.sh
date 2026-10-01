@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Reload-under-ASAN leak regression for the zstd_dict_file ZSTD_CDict
-# lifecycle. Targets the bug class fixed in 0fb40d9 ("Free ZSTD_CDict on
-# configuration cleanup to prevent memory leak") and f735a5d ("pass size=0
-# to ngx_pool_cleanup_add for dict cleanup handler"): the CDict leak only
+# Reload-under-ASAN leak regression for both trained and RFC 9842 raw-content
+# ZSTD_CDict lifecycles. Targets the bug class fixed in 0fb40d9 ("Free
+# ZSTD_CDict on configuration cleanup to prevent memory leak") and f735a5d
+# ("pass size=0 to ngx_pool_cleanup_add for dict cleanup handler"): the leak
 # manifests when the configuration is reloaded (SIGHUP), which the normal
 # smoke tests never do.
 #
@@ -29,13 +29,31 @@ NGINX="${1:?usage: test_reload_leak.sh <nginx-binary> [reloads]}"
 RELOADS="${2:-5}"
 
 WORK="$(mktemp -d)"
-cleanup() { rm -rf "$WORK"; }
+cleanup() { rm -rf "${WORK:?}"; }
 trap cleanup EXIT
 
 mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/html"
 
 # A non-trivial dictionary so ZSTD_createCDict() actually allocates.
 head -c 8192 /dev/urandom | base64 >"$WORK/html/zstd.dict"
+DICT_SHA_B64="$(openssl dgst -sha256 -binary "$WORK/html/zstd.dict" \
+                | openssl base64 -A)"
+printf '%s\n' 'raw-content dictionary compressed body long enough to compress' \
+    >"$WORK/html/dcz.expected"
+
+fetch_dcz() {
+    local tag="$1"
+    local body="$WORK/logs/$tag.dcz"
+    local headers="$WORK/logs/$tag.headers"
+    local plain="$WORK/logs/$tag.plain"
+
+    curl -fsS -D "$headers" -o "$body" -H 'Accept-Encoding: zstd, dcz' \
+        -H "Available-Dictionary: :$DICT_SHA_B64:" \
+        "http://127.0.0.1:18099/dcz"
+    grep -qi '^Content-Encoding:[[:space:]]*dcz' "$headers"
+    zstd -d -q -f -D "$WORK/html/zstd.dict" -o "$plain" "$body"
+    cmp -s "$plain" "$WORK/html/dcz.expected"
+}
 
 cat >"$WORK/conf/nginx.conf" <<EOF
 daemon off;
@@ -48,14 +66,23 @@ http {
     access_log off;
     zstd_dict_file_unsafe on;
     zstd_dict_file $WORK/html/zstd.dict;
+    zstd_dcz_dict_file $WORK/html/zstd.dict;
+    zstd_dcz_assume_secure_transport on;
     server {
         listen 127.0.0.1:18099;
-        location / {
+        location /trained {
             zstd on;
             zstd_min_length 1;
             zstd_types text/plain;
             default_type text/plain;
             return 200 "dictionary compressed body long enough to compress\n";
+        }
+        location /dcz {
+            zstd on;
+            zstd_min_length 1;
+            zstd_types text/plain;
+            default_type text/plain;
+            return 200 "raw-content dictionary compressed body long enough to compress\n";
         }
     }
 }
@@ -73,7 +100,7 @@ NGINX_PID=$!
 # on a loaded shared runner is exactly when this fires.
 ready=0
 for _ in $(seq 1 100); do
-    if curl -fsS -o /dev/null "http://127.0.0.1:18099/" 2>/dev/null; then
+    if curl -fsS -o /dev/null "http://127.0.0.1:18099/trained" 2>/dev/null; then
         ready=1
         break
     fi
@@ -86,7 +113,9 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 for i in $(seq 1 "$RELOADS"); do
-    curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' "http://127.0.0.1:18099/"
+    curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' \
+        "http://127.0.0.1:18099/trained"
+    fetch_dcz "reload-$i"
     kill -HUP "$NGINX_PID"
     sleep 0.5
     echo "  reload $i/$RELOADS done"
@@ -99,7 +128,9 @@ done
 # verdict. And wait must not run under set -e: a leak makes nginx exit
 # 23 (exitcode above), which used to abort the script right here,
 # skipping the report that says WHY.
-curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' "http://127.0.0.1:18099/"
+curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' \
+    "http://127.0.0.1:18099/trained"
+fetch_dcz final
 kill -QUIT "$NGINX_PID"
 ( sleep 90; kill -9 "$NGINX_PID" 2>/dev/null ) &
 WATCHDOG=$!
@@ -123,4 +154,4 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 "$SCRIPT_DIR/lsan_log_verdict.sh" "$WORK/logs/asan*"
-echo "✓ No CDict leak across $RELOADS config reloads under ASAN"
+echo "✓ No trained/raw-content CDict leak across $RELOADS config reloads under ASAN"

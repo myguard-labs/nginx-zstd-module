@@ -12,9 +12,10 @@
 # zero-output on the n-th call.
 #
 # The same scenario owns the dedicated dcz setup site immediately before
-# ZSTD_CCtx_refPrefix(). GET /__probe?fault_refprefix=<n> injects an error on
-# its n-th call; the separately rendered refprefix_calls counter proves a
-# plain zstd request cannot consume that dcz-only arm.
+# the dcz dictionary-attachment call. The historical fault_refprefix query
+# name remains the test API across the cached-CDict migration; it injects an
+# error on the n-th dcz attachment, and the separately rendered
+# refprefix_calls counter proves a plain zstd request cannot consume the arm.
 #
 # Non-vacuity discipline copied from consumer-zstd/driver.sh: if the basis a
 # set of oracles needs (a probe reading, a completed request) is missing,
@@ -141,7 +142,11 @@ DCZ_HEADERS=(
 # 12 the SAME still-armed fault is consumed by a negotiated dcz request,
 #    which fails closed and logs the existing refPrefix error branch
 # 13 arm-then-disarm before consumption leaves the first dcz call clean
-# 14 no worker died by signal across the whole run
+# 14 repeated default-profile dcz requests attach prepared state without
+#    another CDict build, while a zstd_long profile retains refPrefix because
+#    refCDict would supersede that request parameter; public-API builds retain
+#    refPrefix for both profiles
+# 15 no worker died by signal across the whole run
 #
 # Mutation accounting for the deliberately broad mutant-parity matcher. It
 # counts both halves of each TAP verdict (success and failure echoes) as
@@ -159,8 +164,8 @@ DCZ_HEADERS=(
 # mutant-exempt: oracle 12's not-ok echo shares the same observed outcome mutant
 # mutant-exempt: oracle 13 failed when the pre-consumption disarm was removed
 # mutant-exempt: oracle 13's not-ok echo shares the same observed disarm mutant
-# mutant-exempt: oracle 14 is the pre-existing signal-death assertion, renumbered only
-echo "1..14"
+# mutant-exempt: oracle 15 is the pre-existing signal-death assertion, renumbered only
+echo "1..15"
 
 # --- 1: warm-up -----------------------------------------------------------
 WARMUP="$PROBER_PREFIX/warmup.out"
@@ -455,16 +460,16 @@ fi
 REFPREFIX_AFTER_DCZ="$(read_probe_field refprefix_calls || echo -1)"
 REFPREFIX_LOG_12=0
 if tail -n +$((ELOG_MARK_12 + 1)) "$ELOG" \
-    | grep -q 'zstd: ZSTD_CCtx_refPrefix() failed:'
+    | grep -qE 'zstd: ZSTD_CCtx_ref(Prefix\(\)|CDict\(dcz\)) failed:'
 then
     REFPREFIX_LOG_12=1
 fi
 if [ "$GOT200_12" -eq 0 ] && [ "$REFPREFIX_AFTER_DCZ" -eq 1 ] \
     && [ "$REFPREFIX_LOG_12" -eq 1 ]
 then
-    echo "ok 12 - negotiated dcz consumed fault_refprefix=1 and the existing refPrefix error branch failed closed"
+    echo "ok 12 - negotiated dcz consumed fault_refprefix=1 and the dictionary-attach error branch failed closed"
 else
-    echo "not ok 12 - refPrefix fault was not reached or did not fail closed (got200=$GOT200_12; calls=$REFPREFIX_AFTER_DCZ; log=$REFPREFIX_LOG_12)"
+    echo "not ok 12 - dcz dictionary-attach fault was not reached or did not fail closed (got200=$GOT200_12; calls=$REFPREFIX_AFTER_DCZ; log=$REFPREFIX_LOG_12)"
     FAILED=$((FAILED + 1))
 fi
 
@@ -497,13 +502,96 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# --- 14: no signal-death across the run ------------------------------------
+# --- 14: repeated dcz requests reuse config-time CDict state ---------------
+# The build counter is inherited from the master that parsed this config.
+# Requests may advance only the attach counter. Disabling the cached-CDict
+# branch makes both deltas stay zero; moving construction onto the request path
+# makes builds advance, so neither defect can satisfy this oracle.
+BUILDS_BEFORE="$(read_probe_field dcz_cdict_builds || echo -1)"
+ATTACHES_BEFORE="$(read_probe_field dcz_cdict_attaches || echo -1)"
+NGINX_BUILD="$("$PROBER_SERVER_BIN" -V 2>&1)"
+HAS_DCZ_CDICT=0
+if [[ "$NGINX_BUILD" == *-DZSTD_STATIC_LINKING_ONLY* ]]; then
+    HAS_DCZ_CDICT=1
+fi
+REUSE_OUT_1="$PROBER_PREFIX/dcz-reuse-1.out"
+REUSE_OUT_2="$PROBER_PREFIX/dcz-reuse-2.out"
+PROFILE_OUT_1="$PROBER_PREFIX/dcz-profile-1.out"
+PROFILE_OUT_2="$PROBER_PREFIX/dcz-profile-2.out"
+REUSE_OK=0
+if [ "$BUILDS_BEFORE" -ge 0 ] && [ "$ATTACHES_BEFORE" -ge 0 ] \
+    && fetch /dcz/body.bin "$REUSE_OUT_1" "${DCZ_HEADERS[@]}" \
+    && fetch /dcz/body.bin "$REUSE_OUT_2" "${DCZ_HEADERS[@]}" \
+    && grep -qi '^Content-Encoding:[[:space:]]*dcz' "$REUSE_OUT_1.hdrs" \
+    && grep -qi '^Content-Encoding:[[:space:]]*dcz' "$REUSE_OUT_2.hdrs" \
+    && zstd -d -q -f -D "$DICT_FILE" -o "$REUSE_OUT_1.plain" \
+        "$REUSE_OUT_1" 2>/dev/null \
+    && zstd -d -q -f -D "$DICT_FILE" -o "$REUSE_OUT_2.plain" \
+        "$REUSE_OUT_2" 2>/dev/null \
+    && cmp -s "$REUSE_OUT_1.plain" "$PROBER_PREFIX/www/body.bin" \
+    && cmp -s "$REUSE_OUT_2.plain" "$PROBER_PREFIX/www/body.bin"
+then
+    BUILDS_AFTER_REUSE="$(read_probe_field dcz_cdict_builds || echo -1)"
+    ATTACHES_AFTER_REUSE="$(read_probe_field dcz_cdict_attaches || echo -1)"
+    if fetch /dcz-profile/body.bin "$PROFILE_OUT_1" "${DCZ_HEADERS[@]}" \
+        && fetch /dcz-profile/body.bin "$PROFILE_OUT_2" "${DCZ_HEADERS[@]}" \
+        && grep -qi '^Content-Encoding:[[:space:]]*dcz' \
+            "$PROFILE_OUT_1.hdrs" \
+        && grep -qi '^Content-Encoding:[[:space:]]*dcz' \
+            "$PROFILE_OUT_2.hdrs" \
+        && zstd -d -q -f -D "$DICT_FILE" -o "$PROFILE_OUT_1.plain" \
+            "$PROFILE_OUT_1" 2>/dev/null \
+        && zstd -d -q -f -D "$DICT_FILE" -o "$PROFILE_OUT_2.plain" \
+            "$PROFILE_OUT_2" 2>/dev/null \
+        && cmp -s "$PROFILE_OUT_1.plain" "$PROBER_PREFIX/www/body.bin" \
+        && cmp -s "$PROFILE_OUT_2.plain" "$PROBER_PREFIX/www/body.bin"
+    then
+        BUILDS_AFTER="$(read_probe_field dcz_cdict_builds || echo -1)"
+        ATTACHES_AFTER="$(read_probe_field dcz_cdict_attaches || echo -1)"
+    else
+        BUILDS_AFTER=-1
+        ATTACHES_AFTER=-1
+    fi
+    if [ "$HAS_DCZ_CDICT" -eq 1 ]; then
+        if [ "$BUILDS_BEFORE" -gt 0 ] \
+            && [ "$BUILDS_AFTER_REUSE" -eq "$BUILDS_BEFORE" ] \
+            && [ "$BUILDS_AFTER" -eq "$BUILDS_BEFORE" ] \
+            && [ "$ATTACHES_AFTER_REUSE" \
+                 -eq $((ATTACHES_BEFORE + 2)) ] \
+            && [ "$ATTACHES_AFTER" -eq "$ATTACHES_AFTER_REUSE" ]
+        then
+            REUSE_OK=1
+        fi
+    elif [ "$BUILDS_BEFORE" -eq 0 ] \
+        && [ "$BUILDS_AFTER_REUSE" -eq 0 ] && [ "$BUILDS_AFTER" -eq 0 ] \
+        && [ "$ATTACHES_BEFORE" -eq 0 ] \
+        && [ "$ATTACHES_AFTER_REUSE" -eq 0 ] \
+        && [ "$ATTACHES_AFTER" -eq 0 ]
+    then
+        REUSE_OK=2
+    fi
+else
+    BUILDS_AFTER_REUSE=-1
+    ATTACHES_AFTER_REUSE=-1
+    BUILDS_AFTER=-1
+    ATTACHES_AFTER=-1
+fi
+if [ "$REUSE_OK" -eq 1 ]; then
+    echo "ok 14 - repeated dcz requests reused config-time CDict state (two attaches, zero rebuilds) while zstd_long retained refPrefix"
+elif [ "$REUSE_OK" -eq 2 ]; then
+    echo "ok 14 - repeated dcz requests retained the public-API refPrefix fallback (zero CDict builds or attaches)"
+else
+    echo "not ok 14 - dcz dictionary reuse/fallback witness failed (advanced_api=$HAS_DCZ_CDICT; builds=$BUILDS_BEFORE->$BUILDS_AFTER_REUSE->$BUILDS_AFTER; attaches=$ATTACHES_BEFORE->$ATTACHES_AFTER_REUSE->$ATTACHES_AFTER)"
+    FAILED=$((FAILED + 1))
+fi
+
+# --- 15: no signal-death across the run ------------------------------------
 if grep -qE 'worker process .* exited on signal|SIGSEGV|SIGABRT|SIGBUS' "$ELOG"; then
-    echo "not ok 14 - a worker died by signal during fault injection"
+    echo "not ok 15 - a worker died by signal during fault injection"
     grep -nE 'exited on signal|SIGSEGV|SIGABRT|SIGBUS' "$ELOG" | sed 's/^/# /'
     FAILED=$((FAILED + 1))
 else
-    echo "ok 14 - no worker died by signal across the whole fault-injection run"
+    echo "ok 15 - no worker died by signal across the whole fault-injection run"
 fi
 
 if [ "$FAILED" -gt 0 ]; then

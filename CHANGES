@@ -2,17 +2,18 @@ Changes with http-zstd
 
 Unreleased
 
-    *) Change: a location that configures dcz dictionaries at
-       "zstd_comp_level" 9 or above, or with "zstd_long on", now emits a
-       config-load warning naming the profile and the size of the largest
-       configured dictionary. A dcz response re-references its dictionary with
-       ZSTD_CCtx_refPrefix() on every request, rebuilding its match
-       tables at a cost set by dictionary size and level and independent
-       of the response body (measured, 1 KB body: an 8 MB dictionary
-       costs 0.75 ms at level 3 against 35 ms at level 9). The warning is
-       advisory only -- no request-path behaviour, dcz wire output or
-       configuration acceptance changes, and the common profile of dcz
-       dictionaries at the default level stays silent.
+    *) Performance: static-API builds now prepare RFC 9842 dictionaries once
+       at configuration load as ZSTD_dct_rawContent CDicts, shared by raw
+       dictionary, compression level, and every reachable clamped dcz window.
+       Each request attaches the matching prepared state after its full CCtx
+       reset while retaining its exact per-request ZSTD_c_windowLog, removing
+       the measured 0.75-1.6 ms table rebuild for an 8 MB dictionary at the
+       default level. The dcz skippable header and raw-dictionary decode
+       contract are unchanged, although libzstd can choose different valid
+       matches and therefore different compressed bytes than
+       ZSTD_CCtx_refPrefix(). Public-API-only builds retain refPrefix and the
+       existing high-profile config warning because they cannot force
+       raw-content CDict semantics.
 
     *) Bugfix: "$zstd_ratio" is now exact for the whole 64-bit range of
        byte counts. The previous form scaled the input count before

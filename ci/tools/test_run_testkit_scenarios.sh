@@ -23,7 +23,10 @@ scenario="$(basename "$1")"
 printf '%s\t%s\n' "$scenario" "${PROBER_ALLOW_LOG-unset}" >> "$CALLS"
 case "$scenario" in
     fault-arms)
-        printf '1..1\nok 1 - fault reached\n'
+        printf '1..15\n'
+        for n in $(seq 1 13); do printf 'ok %s - fault reached\n' "$n"; done
+        printf 'ok 14 - repeated dcz requests reused config-time CDict state (two attaches, zero rebuilds) while zstd_long retained refPrefix\n'
+        printf 'ok 15 - no worker died by signal across the whole fault-injection run\n'
         ;;
     alloc-neutral)
         printf '1..5\nok 1 - boot\nok 2 - probe\nok 3 - cycle used\nok 4 - cycle blocks\nok 5 - worker fds\n'
@@ -57,6 +60,21 @@ run
 grep -q $'^fault-arms\tzstd: ZSTD_' "$WORK/calls"
 grep -q $'^fault-palloc\tzstd: ' "$WORK/calls"
 grep -q $'^alloc-neutral\tunset$' "$WORK/calls"
+
+# Public-API builds deliberately retain refPrefix and therefore report zero
+# CDict builds/attaches. The verifier must accept that explicit witness while
+# still requiring all 15 TAP results.
+cat >"$WORK/public-api-runner" <<'SH'
+#!/usr/bin/env bash
+printf '1..15\n'
+for n in $(seq 1 13); do printf 'ok %s - fault reached\n' "$n"; done
+printf 'ok 14 - repeated dcz requests retained the public-API refPrefix fallback (zero CDict builds or attaches)\n'
+printf 'ok 15 - no worker died by signal across the whole fault-injection run\n'
+SH
+chmod +x "$WORK/public-api-runner"
+CALLS="$WORK/calls" PROBER_RUN_SCENARIO="$WORK/public-api-runner" "$TOOL" \
+    --root "$WORK/root" --build "$WORK/build" --version 1.31.4 \
+    --log-dir "$WORK/logs" fault-arms
 
 # A skipped property witness must fail even when the fake runner exits zero.
 cat >"$WORK/skip-runner" <<'SH'
