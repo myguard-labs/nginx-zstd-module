@@ -693,11 +693,12 @@ typedef struct {
 
 /*
  * One prepared raw-content dictionary for a dcz compression profile.
- * ZSTD_CCtx_refCDict() supersedes the CCtx's compression parameters, including
- * windowLog, so a prepared dictionary is reusable only when BOTH the level and
- * the request's already-clamped effective window match.  The outer dictionary
- * object owns an array of these entries because inherited locations can share
- * the same raw bytes while selecting different levels or window ceilings.
+ * ZSTD_CCtx_refCDict() supersedes the CCtx's compression parameters. A
+ * prepared dictionary is therefore reusable only when the level and the
+ * request's already-clamped effective window match and no additional
+ * superseded parameter is configured. The outer dictionary object owns an
+ * array of these entries because inherited locations can share the same raw
+ * bytes while selecting different compression profiles or window ceilings.
  */
 typedef struct {
     ngx_int_t                    level;
@@ -1066,7 +1067,8 @@ static ngx_http_zstd_dcz_dict_t *ngx_http_zstd_dcz_dict_lookup(
 static char *ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
     ngx_http_zstd_loc_conf_t *conf);
 static ZSTD_CDict *ngx_http_zstd_dcz_cdict_lookup(
-    ngx_http_zstd_dcz_dict_t *dict, ngx_int_t level, ngx_int_t window_log);
+    ngx_http_zstd_dcz_dict_t *dict, ngx_int_t level, ngx_int_t window_log,
+    ngx_flag_t long_mode, ssize_t target_cblock_size);
 #endif
 
 
@@ -3916,7 +3918,9 @@ ngx_http_zstd_filter_init_cctx(ngx_http_request_t *r,
          */
 #if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
         dcz_cdict = ngx_http_zstd_dcz_cdict_lookup(ctx->dcz_dict,
-                                                   zlcf->level, wlog);
+                                                   zlcf->level, wlog,
+                                                   zlcf->long_mode,
+                                                   zlcf->target_cblock_size);
 
         if (dcz_cdict != NULL) {
 #ifdef NGX_TEST_HARNESS
@@ -6186,10 +6190,23 @@ ngx_http_zstd_cleanup_dict(void *data)
 
 static ZSTD_CDict *
 ngx_http_zstd_dcz_cdict_lookup(ngx_http_zstd_dcz_dict_t *dict,
-    ngx_int_t level, ngx_int_t window_log)
+    ngx_int_t level, ngx_int_t window_log, ngx_flag_t long_mode,
+    ssize_t target_cblock_size)
 {
     ngx_http_zstd_dcz_cdict_entry_t  *entries;
     ngx_uint_t                        i;
+
+    /*
+     * ZSTD_createCDict_advanced() can bake only ZSTD_compressionParameters.
+     * refCDict would therefore discard these request-side parameters if a
+     * CDict prepared for the otherwise-identical level/window were attached.
+     * Keep the refPrefix path for those opt-in profiles; it preserves every
+     * CCtx parameter and remains compatible with the libzstd 1.4.x floor,
+     * which has no ZSTD_createCDict_advanced2().
+     */
+    if (long_mode || target_cblock_size > 0) {
+        return NULL;
+    }
 
     if (dict->cdicts == NULL) {
         return NULL;
@@ -6214,8 +6231,9 @@ ngx_http_zstd_dcz_cdict_lookup(ngx_http_zstd_dcz_dict_t *dict,
  * The dictionary bytes and the prepared tables share cf->pool's lifetime:
  * ZSTD_dlm_byRef keeps the bytes referenced, while one pool cleanup per CDict
  * releases libzstd's allocation before nginx frees the pool storage. Inherited
- * locations append only missing (level, clamped-window) profiles to the shared
- * dictionary object's registry.
+ * locations append only missing eligible (level, clamped-window) profiles to
+ * the shared dictionary object's registry. Profiles with another parameter
+ * superseded by refCDict deliberately retain the per-request refPrefix path.
  */
 static char *
 ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
@@ -6232,6 +6250,10 @@ ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
     if (!conf->enable || conf->dcz_dicts == NULL
         || conf->dcz_dicts->nelts == 0)
     {
+        return NGX_CONF_OK;
+    }
+
+    if (conf->long_mode || conf->target_cblock_size > 0) {
         return NGX_CONF_OK;
     }
 
@@ -6253,7 +6275,9 @@ ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
         }
 
         for (wlog = min_wlog; wlog <= max_wlog; wlog++) {
-            if (ngx_http_zstd_dcz_cdict_lookup(&dicts[i], conf->level, wlog)
+            if (ngx_http_zstd_dcz_cdict_lookup(&dicts[i], conf->level, wlog,
+                                               conf->long_mode,
+                                               conf->target_cblock_size)
                 != NULL)
             {
                 continue;
