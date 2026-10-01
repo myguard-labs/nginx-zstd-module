@@ -142,7 +142,10 @@ DCZ_HEADERS=(
 # 12 the SAME still-armed fault is consumed by a negotiated dcz request,
 #    which fails closed and logs the existing refPrefix error branch
 # 13 arm-then-disarm before consumption leaves the first dcz call clean
-# 14 repeated dcz requests attach prepared state without another CDict build
+# 14 repeated default-profile dcz requests attach prepared state without
+#    another CDict build, while a zstd_long profile retains refPrefix because
+#    refCDict would supersede that request parameter; public-API builds retain
+#    refPrefix for both profiles
 # 15 no worker died by signal across the whole run
 #
 # Mutation accounting for the deliberately broad mutant-parity matcher. It
@@ -506,10 +509,17 @@ fi
 # makes builds advance, so neither defect can satisfy this oracle.
 BUILDS_BEFORE="$(read_probe_field dcz_cdict_builds || echo -1)"
 ATTACHES_BEFORE="$(read_probe_field dcz_cdict_attaches || echo -1)"
+NGINX_BUILD="$("$PROBER_SERVER_BIN" -V 2>&1)"
+HAS_DCZ_CDICT=0
+if [[ "$NGINX_BUILD" == *-DZSTD_STATIC_LINKING_ONLY* ]]; then
+    HAS_DCZ_CDICT=1
+fi
 REUSE_OUT_1="$PROBER_PREFIX/dcz-reuse-1.out"
 REUSE_OUT_2="$PROBER_PREFIX/dcz-reuse-2.out"
+PROFILE_OUT_1="$PROBER_PREFIX/dcz-profile-1.out"
+PROFILE_OUT_2="$PROBER_PREFIX/dcz-profile-2.out"
 REUSE_OK=0
-if [ "$BUILDS_BEFORE" -gt 0 ] && [ "$ATTACHES_BEFORE" -ge 0 ] \
+if [ "$BUILDS_BEFORE" -ge 0 ] && [ "$ATTACHES_BEFORE" -ge 0 ] \
     && fetch /dcz/body.bin "$REUSE_OUT_1" "${DCZ_HEADERS[@]}" \
     && fetch /dcz/body.bin "$REUSE_OUT_2" "${DCZ_HEADERS[@]}" \
     && grep -qi '^Content-Encoding:[[:space:]]*dcz' "$REUSE_OUT_1.hdrs" \
@@ -521,21 +531,57 @@ if [ "$BUILDS_BEFORE" -gt 0 ] && [ "$ATTACHES_BEFORE" -ge 0 ] \
     && cmp -s "$REUSE_OUT_1.plain" "$PROBER_PREFIX/www/body.bin" \
     && cmp -s "$REUSE_OUT_2.plain" "$PROBER_PREFIX/www/body.bin"
 then
-    BUILDS_AFTER="$(read_probe_field dcz_cdict_builds || echo -1)"
-    ATTACHES_AFTER="$(read_probe_field dcz_cdict_attaches || echo -1)"
-    if [ "$BUILDS_AFTER" -eq "$BUILDS_BEFORE" ] \
-        && [ "$ATTACHES_AFTER" -eq $((ATTACHES_BEFORE + 2)) ]
+    BUILDS_AFTER_REUSE="$(read_probe_field dcz_cdict_builds || echo -1)"
+    ATTACHES_AFTER_REUSE="$(read_probe_field dcz_cdict_attaches || echo -1)"
+    if fetch /dcz-profile/body.bin "$PROFILE_OUT_1" "${DCZ_HEADERS[@]}" \
+        && fetch /dcz-profile/body.bin "$PROFILE_OUT_2" "${DCZ_HEADERS[@]}" \
+        && grep -qi '^Content-Encoding:[[:space:]]*dcz' \
+            "$PROFILE_OUT_1.hdrs" \
+        && grep -qi '^Content-Encoding:[[:space:]]*dcz' \
+            "$PROFILE_OUT_2.hdrs" \
+        && zstd -d -q -f -D "$DICT_FILE" -o "$PROFILE_OUT_1.plain" \
+            "$PROFILE_OUT_1" 2>/dev/null \
+        && zstd -d -q -f -D "$DICT_FILE" -o "$PROFILE_OUT_2.plain" \
+            "$PROFILE_OUT_2" 2>/dev/null \
+        && cmp -s "$PROFILE_OUT_1.plain" "$PROBER_PREFIX/www/body.bin" \
+        && cmp -s "$PROFILE_OUT_2.plain" "$PROBER_PREFIX/www/body.bin"
     then
-        REUSE_OK=1
+        BUILDS_AFTER="$(read_probe_field dcz_cdict_builds || echo -1)"
+        ATTACHES_AFTER="$(read_probe_field dcz_cdict_attaches || echo -1)"
+    else
+        BUILDS_AFTER=-1
+        ATTACHES_AFTER=-1
+    fi
+    if [ "$HAS_DCZ_CDICT" -eq 1 ]; then
+        if [ "$BUILDS_BEFORE" -gt 0 ] \
+            && [ "$BUILDS_AFTER_REUSE" -eq "$BUILDS_BEFORE" ] \
+            && [ "$BUILDS_AFTER" -eq "$BUILDS_BEFORE" ] \
+            && [ "$ATTACHES_AFTER_REUSE" \
+                 -eq $((ATTACHES_BEFORE + 2)) ] \
+            && [ "$ATTACHES_AFTER" -eq "$ATTACHES_AFTER_REUSE" ]
+        then
+            REUSE_OK=1
+        fi
+    elif [ "$BUILDS_BEFORE" -eq 0 ] \
+        && [ "$BUILDS_AFTER_REUSE" -eq 0 ] && [ "$BUILDS_AFTER" -eq 0 ] \
+        && [ "$ATTACHES_BEFORE" -eq 0 ] \
+        && [ "$ATTACHES_AFTER_REUSE" -eq 0 ] \
+        && [ "$ATTACHES_AFTER" -eq 0 ]
+    then
+        REUSE_OK=2
     fi
 else
+    BUILDS_AFTER_REUSE=-1
+    ATTACHES_AFTER_REUSE=-1
     BUILDS_AFTER=-1
     ATTACHES_AFTER=-1
 fi
 if [ "$REUSE_OK" -eq 1 ]; then
-    echo "ok 14 - repeated dcz requests reused config-time CDict state (two attaches, zero rebuilds)"
+    echo "ok 14 - repeated dcz requests reused config-time CDict state (two attaches, zero rebuilds) while zstd_long retained refPrefix"
+elif [ "$REUSE_OK" -eq 2 ]; then
+    echo "ok 14 - repeated dcz requests retained the public-API refPrefix fallback (zero CDict builds or attaches)"
 else
-    echo "not ok 14 - dcz CDict reuse witness failed (builds=$BUILDS_BEFORE->$BUILDS_AFTER; attaches=$ATTACHES_BEFORE->$ATTACHES_AFTER)"
+    echo "not ok 14 - dcz dictionary reuse/fallback witness failed (advanced_api=$HAS_DCZ_CDICT; builds=$BUILDS_BEFORE->$BUILDS_AFTER_REUSE->$BUILDS_AFTER; attaches=$ATTACHES_BEFORE->$ATTACHES_AFTER_REUSE->$ATTACHES_AFTER)"
     FAILED=$((FAILED + 1))
 fi
 

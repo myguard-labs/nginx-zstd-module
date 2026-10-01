@@ -38,6 +38,22 @@ mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/html"
 head -c 8192 /dev/urandom | base64 >"$WORK/html/zstd.dict"
 DICT_SHA_B64="$(openssl dgst -sha256 -binary "$WORK/html/zstd.dict" \
                 | openssl base64 -A)"
+printf '%s\n' 'raw-content dictionary compressed body long enough to compress' \
+    >"$WORK/html/dcz.expected"
+
+fetch_dcz() {
+    local tag="$1"
+    local body="$WORK/logs/$tag.dcz"
+    local headers="$WORK/logs/$tag.headers"
+    local plain="$WORK/logs/$tag.plain"
+
+    curl -fsS -D "$headers" -o "$body" -H 'Accept-Encoding: zstd, dcz' \
+        -H "Available-Dictionary: :$DICT_SHA_B64:" \
+        "http://127.0.0.1:18099/dcz"
+    grep -qi '^Content-Encoding:[[:space:]]*dcz' "$headers"
+    zstd -d -q -f -D "$WORK/html/zstd.dict" -o "$plain" "$body"
+    cmp -s "$plain" "$WORK/html/dcz.expected"
+}
 
 cat >"$WORK/conf/nginx.conf" <<EOF
 daemon off;
@@ -99,9 +115,7 @@ fi
 for i in $(seq 1 "$RELOADS"); do
     curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' \
         "http://127.0.0.1:18099/trained"
-    curl -fsS -o /dev/null -H 'Accept-Encoding: zstd, dcz' \
-        -H "Available-Dictionary: :$DICT_SHA_B64:" \
-        "http://127.0.0.1:18099/dcz"
+    fetch_dcz "reload-$i"
     kill -HUP "$NGINX_PID"
     sleep 0.5
     echo "  reload $i/$RELOADS done"
@@ -116,9 +130,7 @@ done
 # skipping the report that says WHY.
 curl -fsS -o /dev/null -H 'Accept-Encoding: zstd' \
     "http://127.0.0.1:18099/trained"
-curl -fsS -o /dev/null -H 'Accept-Encoding: zstd, dcz' \
-    -H "Available-Dictionary: :$DICT_SHA_B64:" \
-    "http://127.0.0.1:18099/dcz"
+fetch_dcz final
 kill -QUIT "$NGINX_PID"
 ( sleep 90; kill -9 "$NGINX_PID" 2>/dev/null ) &
 WATCHDOG=$!

@@ -145,8 +145,8 @@ verify_tap() {
 
     case "$scenario" in
         fault-arms)
-            require_line "$log" '^ok 14 - [^#]*two attaches, zero rebuilds[^#]*$' \
-                "fault-arms did not prove repeated dcz requests reuse the prepared CDict"
+            require_line "$log" '^ok 14 - [^#]*(two attaches, zero rebuilds|zero CDict builds or attaches)[^#]*$' \
+                "fault-arms did not prove prepared-CDict reuse or the public-API fallback"
             ;;
         alloc-neutral)
             skipped="$(grep -cE '^ok [345] .*# SKIP' "$log" || true)"
