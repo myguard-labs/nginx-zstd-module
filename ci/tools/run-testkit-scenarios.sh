@@ -144,6 +144,10 @@ verify_tap() {
     fi
 
     case "$scenario" in
+        fault-arms)
+            require_line "$log" '^ok 14 - [^#]*two attaches, zero rebuilds[^#]*$' \
+                "fault-arms did not prove repeated dcz requests reuse the prepared CDict"
+            ;;
         alloc-neutral)
             skipped="$(grep -cE '^ok [345] .*# SKIP' "$log" || true)"
             [ "$skipped" -ne 3 ] || fail \
@@ -188,7 +192,7 @@ for scenario in "${SCENARIOS[@]}"; do
     allow_log=""
     case "$scenario" in
         fault-arms)
-            allow_log='zstd: ZSTD_(compressStream2|CCtx_refPrefix)\(\) failed'
+            allow_log='zstd: ZSTD_(compressStream2\(\)|CCtx_refPrefix\(\)|CCtx_refCDict\(dcz\)) failed'
             ;;
         fault-palloc)
             allow_log='zstd: |ngx_(palloc|pcalloc|pnalloc)'

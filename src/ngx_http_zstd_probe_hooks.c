@@ -103,6 +103,8 @@ static ngx_int_t  ngx_http_zstd_probe_fault_refprefix_nth = -1;
 static ngx_uint_t  ngx_http_zstd_probe_codec_calls;
 static ngx_uint_t  ngx_http_zstd_probe_codec_end_calls;
 static ngx_uint_t  ngx_http_zstd_probe_refprefix_calls;
+static ngx_uint_t  ngx_http_zstd_probe_dcz_cdict_builds;
+static ngx_uint_t  ngx_http_zstd_probe_dcz_cdict_attaches;
 
 /*
  * Pool-allocation fault site. Same shape and same arm-relative counting as
@@ -221,7 +223,7 @@ ngx_http_zstd_probe_codec_fault(ngx_uint_t is_end)
 
 
 /*
- * Consume one event at the dcz-only ZSTD_CCtx_refPrefix() site.
+ * Consume one event at the dcz-only dictionary-attachment site.
  *
  * A prefix reference has no meaningful zero-output success state, so this
  * dedicated outcome has only NONE and ERROR. The site, state, and counter are
@@ -241,6 +243,20 @@ ngx_http_zstd_probe_refprefix_fault(void)
     }
 
     return NGX_HTTP_ZSTD_PROBE_REFPREFIX_ERROR;
+}
+
+
+void
+ngx_http_zstd_probe_note_dcz_cdict_build(void)
+{
+    ngx_http_zstd_probe_dcz_cdict_builds++;
+}
+
+
+void
+ngx_http_zstd_probe_note_dcz_cdict_attach(void)
+{
+    ngx_http_zstd_probe_dcz_cdict_attaches++;
 }
 
 
@@ -332,6 +348,8 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
                         ",\"codec_end_calls\":%ui"
                         ",\"refprefix_calls\":%ui"
                         ",\"refprefix_armed\":%ui"
+                        ",\"dcz_cdict_builds\":%ui"
+                        ",\"dcz_cdict_attaches\":%ui"
                         ",\"setparam_calls\":%ui",
                         ngx_http_zstd_probe_chain_links,
                         ngx_http_zstd_probe_bufs_allocated,
@@ -343,6 +361,8 @@ ngx_http_zstd_probe_module_render(u_char *buf, u_char *last)
                             ? 0
                             : (ngx_uint_t)
                                 ngx_http_zstd_probe_fault_refprefix_nth,
+                        ngx_http_zstd_probe_dcz_cdict_builds,
+                        ngx_http_zstd_probe_dcz_cdict_attaches,
                         ngx_http_zstd_probe_setparam_calls);
 
     if (ngx_http_zstd_probe_have_ctx) {
@@ -404,7 +424,9 @@ ngx_http_zstd_probe_nth_is_valid(ngx_int_t nth)
 
 
 /*
- * Arm the module-local refPrefix site from the request query string.
+ * Arm the module-local dcz dictionary-attachment site from the request query
+ * string. The key retains its original refPrefix spelling for compatibility
+ * with existing harness callers.
  *
  * The generic testkit predates this dcz-only site, so it does not know the
  * fault_refprefix key. Keep the same input contract as its bare-ordinal sites:

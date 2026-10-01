@@ -231,6 +231,56 @@ main(void)
         }
     }
 
+    /*
+     * The config-time CDict cache must cover every integer window the
+     * request-time helper can return, without building any impossible values.
+     * Sweep both clamps (including malformed/out-of-domain values used as
+     * defence-in-depth inputs) and every pledged-size boundary above.
+     */
+    for (di = 0; di < sizeof(dicts) / sizeof(dicts[0]); di++) {
+        for (conf = -1; conf <= 25; conf++) {
+            for (budget = -1; budget <= 25; budget++) {
+                ngx_int_t  min_wlog, max_wlog, want_min, want_max;
+
+                ngx_http_zstd_dcz_cdict_window_range(dicts[di], conf, budget,
+                                                      &min_wlog, &max_wlog);
+                want_min = ngx_http_zstd_dcz_window_log(dicts[di], 0,
+                                                        conf, budget);
+                want_max = ngx_http_zstd_dcz_window_log(dicts[di],
+                               (off_t) ((size_t) 1
+                                        << NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG),
+                               conf, budget);
+
+                if (min_wlog != want_min) {
+                    fail("cdict-range-min", dicts[di], 0, conf, budget,
+                         min_wlog, want_min);
+                }
+                if (max_wlog != want_max) {
+                    fail("cdict-range-max", dicts[di],
+                         (off_t) ((size_t) 1
+                                  << NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG),
+                         conf, budget, max_wlog, want_max);
+                }
+                if (min_wlog > max_wlog) {
+                    fail("cdict-range-order", dicts[di], 0, conf, budget,
+                         min_wlog, max_wlog);
+                }
+
+                for (pi = 0; pi < sizeof(pledges) / sizeof(pledges[0]); pi++) {
+                    ngx_int_t  actual;
+
+                    actual = ngx_http_zstd_dcz_window_log(dicts[di], pledges[pi],
+                                                           conf, budget);
+                    if (actual < min_wlog || actual > max_wlog) {
+                        fail("cdict-range-cover", dicts[di], pledges[pi],
+                             conf, budget, actual, max_wlog);
+                    }
+                    swept++;
+                }
+            }
+        }
+    }
+
     printf("swept %lld combinations\n", swept);
 
     if (failures) {

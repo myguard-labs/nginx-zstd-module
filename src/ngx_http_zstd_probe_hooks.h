@@ -149,14 +149,12 @@ ngx_http_zstd_probe_codec_outcome_e
 
 
 /*
- * Dedicated dcz raw-prefix fault site.
+ * Dedicated dcz dictionary-attachment fault site.
  *
- * Armed with GET /__probe?fault_refprefix=<nth>. The nth
- * ZSTD_CCtx_refPrefix() call after the arm is replaced with a synthetic
- * ZSTD_isError()-true result. Negative values disarm. This is deliberately
- * separate from CODEC/CODEC_END: ordinary zstd requests never call
- * ZSTD_CCtx_refPrefix(), and folding the site into either codec counter would
- * let a plain request consume a fault intended for the dcz-only setup path.
+ * Armed with the historical GET /__probe?fault_refprefix=<nth> key. The nth
+ * dcz refCDict/refPrefix attachment after the arm is replaced with a synthetic
+ * ZSTD_isError()-true result. Negative values disarm. This stays separate from
+ * CODEC/CODEC_END so a plain request cannot consume a dcz-only setup fault.
  *
  * The counter is rendered as refprefix_calls so the harness can distinguish
  * "the dcz branch handled the fault" from "the arm was never reached".
@@ -168,6 +166,15 @@ typedef enum {
 
 ngx_http_zstd_probe_refprefix_outcome_e
     ngx_http_zstd_probe_refprefix_fault(void);
+
+
+/*
+ * Config-time build and request-time attach counters for the prepared dcz
+ * CDict cache. The reuse regression brackets repeated requests and requires
+ * attaches to advance while builds remain unchanged.
+ */
+void ngx_http_zstd_probe_note_dcz_cdict_build(void);
+void ngx_http_zstd_probe_note_dcz_cdict_attach(void);
 
 
 /*

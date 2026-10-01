@@ -23,7 +23,9 @@ scenario="$(basename "$1")"
 printf '%s\t%s\n' "$scenario" "${PROBER_ALLOW_LOG-unset}" >> "$CALLS"
 case "$scenario" in
     fault-arms)
-        printf '1..1\nok 1 - fault reached\n'
+        printf '1..14\n'
+        for n in $(seq 1 13); do printf 'ok %s - fault reached\n' "$n"; done
+        printf 'ok 14 - repeated dcz requests reused config-time CDict state (two attaches, zero rebuilds)\n'
         ;;
     alloc-neutral)
         printf '1..5\nok 1 - boot\nok 2 - probe\nok 3 - cycle used\nok 4 - cycle blocks\nok 5 - worker fds\n'
