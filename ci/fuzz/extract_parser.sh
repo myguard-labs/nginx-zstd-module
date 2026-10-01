@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #
 # Slice the verbatim bodies of the Accept-Encoding parser out of the
-# shipped ../../src/ngx_http_zstd_common.h into generated_parser.inc. That
-# is ngx_http_zstd_eval_qvalue() (the qvalue evaluator), its
-# ngx_http_zstd_parse_q_fraction() digit-walk helper, and its caller
-# ngx_http_zstd_coding_weight() and its chain/request-field callers, plus
-# ngx_http_zstd_accept_encoding(), in definition order so the .inc compiles
-# standalone.
+# shipped ../../src/ngx_http_zstd_accept_encoding.h, and the zstd wrappers
+# around it out of ../../src/ngx_http_zstd_common.h, into
+# generated_parser.inc. That is ngx_http_zstd_eval_qvalue() (the qvalue
+# evaluator), its ngx_http_zstd_parse_q_fraction() digit-walk helper, and
+# its caller ngx_http_zstd_coding_weight() and its chain/request-field
+# callers, plus ngx_http_zstd_accept_encoding(), in definition order so
+# the .inc compiles standalone.
 #
 # This keeps the fuzz target locked to production code: there is no
 # hand-maintained copy of the parser. If the function signature or body
@@ -16,13 +17,16 @@
 set -euo pipefail
 
 FUZZ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AE_HEADER="$FUZZ_DIR/../../src/ngx_http_zstd_accept_encoding.h"
 HEADER="$FUZZ_DIR/../../src/ngx_http_zstd_common.h"
 OUT="$FUZZ_DIR/generated_parser.inc"
 
-if [ ! -f "$HEADER" ]; then
-    echo "✗ cannot find $HEADER" >&2
-    exit 1
-fi
+for h in "$AE_HEADER" "$HEADER"; do
+    if [ ! -f "$h" ]; then
+        echo "✗ cannot find $h" >&2
+        exit 1
+    fi
+done
 
 # Extract each function from its return-type line through the matching
 # closing brace at column 0 (nginx style: definitions close with a bare
@@ -38,7 +42,9 @@ fi
 # source order (skip_quoted, then parse_q_fraction, then eval_qvalue --
 # which calls parse_q_fraction, so it must precede eval_qvalue in the
 # generated .inc -- then accept_encoding) so the generated .inc compiles
-# without forward declarations.
+# without forward declarations. The parser header is read before the
+# common header for the same reason: the wrappers in the common header
+# call into the parser.
 # The leading sub() strips a CR so extraction also works from a Windows
 # checkout smudged to CRLF (core.autocrlf=true): the `$0 == "}"`
 # terminator and the anchored regexes below otherwise never match and
@@ -54,19 +60,23 @@ awk '
         print
         if ($0 == "}") { capture = 0 }
     }
-' "$HEADER" >"$OUT"
+' "$AE_HEADER" "$HEADER" >"$OUT"
 
-if ! grep -q 'ngx_http_zstd_chain_coding_weight' "$OUT" \
-    || ! grep -q 'ngx_http_zstd_request_coding_weight' "$OUT" \
-    || ! grep -q 'ngx_http_zstd_skip_quoted' "$OUT" \
-    || ! grep -q 'ngx_http_zstd_parse_q_fraction' "$OUT" \
-    || ! grep -q 'ngx_http_zstd_eval_qvalue' "$OUT" \
+# Each check matches a DEFINITION line (column 0, name followed by the
+# opening parenthesis), never a bare substring: a call site inside another
+# captured function would satisfy a substring match and hide a missing or
+# renamed definition.
+if ! grep -Eq '^ngx_http_zstd_chain_coding_weight\(' "$OUT" \
+    || ! grep -Eq '^ngx_http_zstd_request_coding_weight\(' "$OUT" \
+    || ! grep -Eq '^ngx_http_zstd_skip_quoted\(' "$OUT" \
+    || ! grep -Eq '^ngx_http_zstd_parse_q_fraction\(' "$OUT" \
+    || ! grep -Eq '^ngx_http_zstd_eval_qvalue\(' "$OUT" \
     || ! grep -Eq '^ngx_http_zstd_coding_weight_ex\(' "$OUT" \
     || ! grep -Eq '^ngx_http_zstd_coding_weight\(' "$OUT" \
-    || ! grep -q 'ngx_http_zstd_accept_encoding' "$OUT" \
-    || ! grep -q 'ngx_http_zstd_accepts' "$OUT" \
+    || ! grep -Eq '^ngx_http_zstd_accept_encoding\(' "$OUT" \
+    || ! grep -Eq '^ngx_http_zstd_accepts\(' "$OUT" \
     || [ "$(tail -n1 "$OUT")" != "}" ]; then
-    echo "✗ failed to extract the Accept-Encoding parser from $HEADER" >&2
+    echo "✗ failed to extract the Accept-Encoding parser from $AE_HEADER + $HEADER" >&2
     echo "  (header layout changed? update extract_parser.sh)" >&2
     rm -f "$OUT"
     exit 1

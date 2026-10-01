@@ -113,7 +113,7 @@ struct ngx_http_request_s {
 #endif
 
 /*
- * The chain step, mirrored from src/ngx_http_zstd_common.h. The macro is
+ * The chain step, mirrored from src/ngx_http_zstd_accept_encoding.h. The macro is
  * defined OUTSIDE any function body there, so extract_parser.sh -- which
  * slices function bodies -- does not carry it into the .inc and this
  * layer has to supply it. Kept byte-identical to the production
