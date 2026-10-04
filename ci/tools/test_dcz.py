@@ -120,6 +120,13 @@ def nginx_has_ssl(nginx: pathlib.Path) -> bool:
     return "--with-http_ssl_module" in v.stderr
 
 
+def nginx_has_static_zstd_api(nginx: pathlib.Path) -> bool:
+    version = subprocess.run(
+        [str(nginx), "-V"], capture_output=True, text=True, check=False
+    )
+    return "-DZSTD_STATIC_LINKING_ONLY" in version.stderr
+
+
 def wait_for_port(port: int, timeout: float = 10.0, stderr_file=None) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -208,11 +215,21 @@ def write_config(
     insecure_port: int,
     modules,
     with_ssl: bool,
+    with_static_zstd_api: bool,
 ) -> pathlib.Path:
     conf_dir = root / "conf"
     conf_dir.mkdir()
     (root / "logs").mkdir()
     load = "".join(f"load_module {m};\n" for m in modules)
+    large_location = ""
+    if with_static_zstd_api:
+        large_location = f"""
+        location = /large {{
+            zstd_comp_level 19;
+            zstd_dcz_dict_file {root}/dicts/large.raw;
+            default_type text/plain;
+        }}
+"""
 
     # Only emitted for an SSL-capable binary: `listen ... ssl` against an
     # nginx without ngx_http_ssl_module is [emerg] at config parse, so an
@@ -264,6 +281,7 @@ http {{
         zstd_dcz_assume_secure_transport on;
         root html;
         access_log logs/zstd_bytes.log zstd_bytes_fmt;
+{large_location}
     }}
 
 {tls_server}
@@ -281,7 +299,7 @@ http {{
     return conf
 
 
-def fetch(port: int, headers: dict, tls: bool = False):
+def fetch(port: int, headers: dict, tls: bool = False, path: str = "/app.js"):
     """Returns (email.message.Message, body). The Message preserves
     repeated header lines — the module legitimately emits two Vary
     lines (Accept-Encoding via gzip_vary, Available-Dictionary its own),
@@ -293,7 +311,7 @@ def fetch(port: int, headers: dict, tls: bool = False):
     r->connection->ssl, not PKI."""
     scheme = "https" if tls else "http"
     request = urllib.request.Request(
-        f"{scheme}://127.0.0.1:{port}/app.js", headers=headers
+        f"{scheme}://127.0.0.1:{port}{path}", headers=headers
     )
     context = None
     if tls:
@@ -399,10 +417,29 @@ def main() -> int:
         os.chmod(tmp, 0o755)
         root = pathlib.Path(tmp)
         dict_bytes, resource = build_fixtures(root, args.fixture_lines)
+        with_static_zstd_api = nginx_has_static_zstd_api(nginx_path)
+        large_dict = root / "dicts" / "large.raw"
+        if with_static_zstd_api:
+            shared_tail = b"".join(
+                hashlib.sha256(i.to_bytes(4, "little")).digest() for i in range(128)
+            )
+            large_dict.write_bytes(
+                b"x" * (RFC_CLIENT_WINDOW - len(shared_tail)) + shared_tail
+            )
+            expected_large = b"cache limit fallback: " + shared_tail[:2048]
+            (root / "html" / "large").write_bytes(expected_large)
         tls_port = args.tls_port if args.tls_port else args.port + 1
         insecure_port = args.insecure_port if args.insecure_port else args.port + 2
         with_ssl = nginx_has_ssl(nginx_path)
-        conf = write_config(root, args.port, tls_port, insecure_port, modules, with_ssl)
+        conf = write_config(
+            root,
+            args.port,
+            tls_port,
+            insecure_port,
+            modules,
+            with_ssl,
+            with_static_zstd_api,
+        )
         dict_hash = hashlib.sha256(dict_bytes).digest()
         dict_b64 = base64.b64encode(dict_hash).decode()
         bad_b64 = base64.b64encode(b"\x01" * 32).decode()
@@ -425,6 +462,46 @@ def main() -> int:
                 "Accept-Encoding": "zstd, dcz",
                 "Available-Dictionary": f":{dict_b64}:",
             }
+
+            if with_static_zstd_api:
+                check(
+                    "cache limit fallback rejected prepared state",
+                    "a dcz prepared CDict profile was skipped"
+                    in (root / "logs" / "error.log").read_text(
+                        encoding="utf-8", errors="replace"
+                    ),
+                )
+                large_hash = hashlib.sha256(large_dict.read_bytes()).digest()
+                large_headers, large_body = fetch(
+                    args.port,
+                    {
+                        "Accept-Encoding": "zstd, dcz",
+                        "Available-Dictionary": f":{base64.b64encode(large_hash).decode()}:",
+                    },
+                    path="/large",
+                )
+                check(
+                    "cache limit fallback negotiates dcz",
+                    content_encoding(large_headers) == "dcz",
+                )
+                check(
+                    "cache limit fallback sends the configured dictionary hash",
+                    large_body[:8] == DCZ_MAGIC and large_body[8:40] == large_hash,
+                )
+                check(
+                    "cache limit fallback decodes to the origin bytes",
+                    decode_dcz(args.zstd_bin, large_body, large_dict, root)
+                    == expected_large,
+                )
+                plain_large_headers, plain_large_body = fetch(
+                    args.port, {"Accept-Encoding": "zstd"}, path="/large"
+                )
+                check(
+                    "cache limit fallback actually references the dictionary",
+                    content_encoding(plain_large_headers) == "zstd"
+                    and len(large_body) < len(plain_large_body),
+                    f"(dcz={len(large_body)}, plain={len(plain_large_body)})",
+                )
 
             if with_ssl:
                 tls_headers, tls_body = fetch(tls_port, dict(dcz_headers), tls=True)

@@ -241,6 +241,7 @@ ngx_http_zstd_dcz_dict_hash(const u_char *data, size_t len,
  * the module does not need to reason about the 1.25x branch.
  */
 #define NGX_HTTP_ZSTD_DCZ_MAX_WINDOW_LOG  23
+#define NGX_HTTP_ZSTD_DCZ_CDICT_CACHE_BYTES  (64 * 1024 * 1024)
 
 /*
  * ZSTD_WINDOWLOG_MIN, spelled without the libzstd macro: that name lives in
@@ -652,6 +653,9 @@ typedef struct {
     u_char                      *dict_buf;
     size_t                       dict_buf_size;
     ngx_array_t                 *dict_registry;  /* dict_entry_t entries */
+    /* Retained raw-content CDicts across all dcz locations in this cycle. */
+    size_t                       dcz_cdict_bytes;
+    ngx_flag_t                   dcz_cdict_cache_warned;
 
     /*
      * Conservative "could this cycle possibly serve a compressed
@@ -5684,10 +5688,11 @@ close:
     {
         return NGX_CONF_ERROR;
     }
-#else
+#endif
     /*
-     * Compatibility-build advisory: without the advanced API the module must
-     * retain the per-request refPrefix path and its table-build cost.
+     * Advisory for profiles that retain the per-request refPrefix path:
+     * every public-API build, and static-API profiles whose long-distance
+     * matching or target block size cannot be baked into a CDict.
      *
      * A dcz response references its negotiated dictionary with
      * ZSTD_CCtx_refPrefix() on EVERY request (see the two call sites in
@@ -5721,13 +5726,17 @@ close:
      * long-mode are what the operator can act on, so they are what the
      * advisory keys on and what it reports.
      *
-     * Production builds with ZSTD_STATIC_LINKING_ONLY no longer warn: they
-     * prepare raw-content CDicts above and pay this cost once at config load.
+     * Other static-API profiles use prepared CDicts. The separate cache-limit
+     * warning below covers profiles that fall back when its budget is full.
      */
     if (rc == NGX_CONF_OK && conf->enable
         && conf->dcz_dicts != NULL && conf->dcz_dicts->nelts > 0
         && (conf->level >= NGX_HTTP_ZSTD_DCZ_REFPREFIX_ADVISORY_LEVEL
-            || conf->long_mode))
+            || conf->long_mode)
+#if defined(ZSTD_STATIC_LINKING_ONLY) && ZSTD_VERSION_NUMBER >= 10400
+        && (conf->long_mode || conf->target_cblock_size > 0)
+#endif
+       )
     {
         ngx_http_zstd_dcz_dict_t  *dicts;
         size_t                     largest;
@@ -5762,7 +5771,6 @@ close:
                            conf->long_mode
                                ? ", disable \"zstd_long\"" : "");
     }
-#endif
 
     /*
      * G5: there is no longer a gzip_vary-off warning here. The header
@@ -6226,8 +6234,34 @@ ngx_http_zstd_dcz_cdict_lookup(ngx_http_zstd_dcz_dict_t *dict,
 }
 
 
+static void
+ngx_http_zstd_dcz_cdict_cache_warn(ngx_conf_t *cf,
+    ngx_http_zstd_main_conf_t *zmcf)
+{
+    if (zmcf->dcz_cdict_cache_warned) {
+        return;
+    }
+
+    zmcf->dcz_cdict_cache_warned = 1;
+    ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                       "a dcz prepared CDict profile was skipped to stay "
+                       "within the %uz-byte configuration-cycle limit "
+                       "(%uz bytes retained); skipped profiles use "
+                       "ZSTD_CCtx_refPrefix() per request. "
+                       "Lower zstd_comp_level or reduce the "
+                       "dictionary set to cache more profiles",
+                       (size_t) NGX_HTTP_ZSTD_DCZ_CDICT_CACHE_BYTES,
+                       zmcf->dcz_cdict_bytes);
+}
+
+
 /*
- * Prepare every raw-content CDict this location can select at request time.
+ * Prepare raw-content CDicts this location can select at request time, up to
+ * the cycle-wide memory limit. A libzstd estimate rejects likely oversized
+ * candidates before allocation; measured size is checked again after build.
+ * The estimate can reject a profile whose measured size would have fit.
+ * Profiles that do not fit retain refPrefix; later small profiles can still
+ * use the remaining budget, regardless of location merge order.
  * The dictionary bytes and the prepared tables share cf->pool's lifetime:
  * ZSTD_dlm_byRef keeps the bytes referenced, while one pool cleanup per CDict
  * releases libzstd's allocation before nginx frees the pool storage. Inherited
@@ -6239,11 +6273,13 @@ static char *
 ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
     ngx_http_zstd_loc_conf_t *conf)
 {
+    ngx_http_zstd_main_conf_t       *zmcf;
     ngx_http_zstd_dcz_dict_t         *dicts;
     ngx_http_zstd_dcz_cdict_entry_t  *entry;
     ngx_pool_cleanup_t               *cln;
     ZSTD_compressionParameters        cparams;
     ZSTD_CDict                       *cdict;
+    size_t                            cdict_size, estimated_size;
     ngx_int_t                         min_wlog, max_wlog, wlog;
     ngx_uint_t                        i;
 
@@ -6257,6 +6293,7 @@ ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
         return NGX_CONF_OK;
     }
 
+    zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
     dicts = conf->dcz_dicts->elts;
 
     for (i = 0; i < conf->dcz_dicts->nelts; i++) {
@@ -6287,6 +6324,15 @@ ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
                                       dicts[i].bytes.len);
             cparams.windowLog = (unsigned) wlog;
 
+            estimated_size = ZSTD_estimateCDictSize_advanced(
+                                 dicts[i].bytes.len, cparams, ZSTD_dlm_byRef);
+            if (estimated_size > NGX_HTTP_ZSTD_DCZ_CDICT_CACHE_BYTES
+                                 - zmcf->dcz_cdict_bytes)
+            {
+                ngx_http_zstd_dcz_cdict_cache_warn(cf, zmcf);
+                continue;
+            }
+
             cdict = ZSTD_createCDict_advanced(dicts[i].bytes.data,
                          dicts[i].bytes.len, ZSTD_dlm_byRef,
                          ZSTD_dct_rawContent, cparams, ZSTD_defaultCMem);
@@ -6297,6 +6343,15 @@ ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
                                    "window log %i",
                                    &dicts[i].file, conf->level, wlog);
                 return NGX_CONF_ERROR;
+            }
+
+            cdict_size = ZSTD_sizeof_CDict(cdict);
+            if (cdict_size > NGX_HTTP_ZSTD_DCZ_CDICT_CACHE_BYTES
+                             - zmcf->dcz_cdict_bytes)
+            {
+                ZSTD_freeCDict(cdict);
+                ngx_http_zstd_dcz_cdict_cache_warn(cf, zmcf);
+                continue;
             }
 
             cln = ngx_pool_cleanup_add(cf->pool, 0);
@@ -6319,6 +6374,7 @@ ngx_http_zstd_dcz_build_cdicts(ngx_conf_t *cf,
             entry->level = conf->level;
             entry->window_log = wlog;
             entry->dict = cdict;
+            zmcf->dcz_cdict_bytes += cdict_size;
 #ifdef NGX_TEST_HARNESS
             ngx_http_zstd_probe_note_dcz_cdict_build();
 #endif

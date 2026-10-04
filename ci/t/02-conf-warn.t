@@ -63,6 +63,15 @@ truncate($huge_fh, 10 * 1024 * 1024 + 1) or die "hugedict: truncate: $!";
 close $huge_fh or die "hugedict: close: $!";
 local $ENV{'TEST_NGINX_ZSTD_HUGEDICT'} = $huge_path;
 
+# A legal 1 MiB raw dictionary. At level 19 its prepared tables exceed the
+# cycle-wide CDict cache limit after the first reachable window. Sparse zero
+# bytes keep the fixture deterministic without adding a large tracked file.
+my ($cache_fh, $cache_path) = tempfile("zstd-cachelimit-XXXXXX",
+                                       TMPDIR => 1, UNLINK => 1);
+truncate($cache_fh, 1024 * 1024) or die "cachelimit: truncate: $!";
+close $cache_fh or die "cachelimit: close: $!";
+local $ENV{'TEST_NGINX_ZSTD_CACHELIMIT_DICT'} = $cache_path;
+
 add_block_preprocessor(sub {
     my $block = shift;
     return if !@dynamic_modules;
@@ -1156,12 +1165,8 @@ largest configured dictionary here is 59738 bytes
 
 
 
-=== TEST 35c: static-API dcz profiles replace the per-request advisory with prepared CDicts
-# The complement of TESTS 32/34/35b. A static-API build prepares raw-content
-# CDicts at configuration load, so even the old warning's strongest shape --
-# multiple dictionaries, high level, and long mode -- must stay silent. The
-# request proves configuration acceptance remains unchanged; live repeated
-# dcz attachment and decode are pinned by the harness scenario.
+=== TEST 35c: static-API long-mode dcz profiles retain the refPrefix warning
+# CDicts cannot preserve zstd_long, so this profile keeps the per-request path.
 --- skip_eval: 3: !$::static_linking
 --- config
     location /t {
@@ -1178,8 +1183,66 @@ largest configured dictionary here is 59738 bytes
 --- request
 GET /t
 --- error_code: 200
+--- error_log
+with "zstd_long on"
+disable "zstd_long"
 --- no_error_log eval
-[qr/ZSTD_CCtx_refPrefix/, qr/\[emerg\]/, qr/\[error\]/, qr/\[alert\]/]
+[qr/\[emerg\]/, qr/\[error\]/, qr/\[alert\]/]
+
+
+
+=== TEST 35d: static-API prepared CDicts have a cycle-wide memory limit
+# A 1 MiB raw dictionary at level 19 has a libzstd 1.5.7 estimate above
+# the 64 MiB admission limit, so this profile uses refPrefix. The test fails
+# if a future libzstd version changes that estimate enough to admit it.
+--- skip_eval: 3: !$::static_linking
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 19;
+        zstd_dcz_dict_file $TEST_NGINX_ZSTD_CACHELIMIT_DICT;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again";
+    }
+--- request
+GET /t
+--- error_code: 200
+--- error_log
+a dcz prepared CDict profile was skipped to stay within the 67108864-byte configuration-cycle limit
+skipped profiles use ZSTD_CCtx_refPrefix() per request
+--- no_error_log
+[emerg]
+[error]
+[alert]
+
+
+
+=== TEST 35e: static-API target-block-size profiles retain the refPrefix warning
+# A prepared CDict would supersede this request parameter, so a high-level
+# profile still pays the per-request dictionary cost.
+--- skip_eval: 3: !$::static_linking
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 9;
+        zstd_target_cblock_size 4096;
+        zstd_dcz_dict_file $TEST_NGINX_PERL_PATH/suite/dcz-dict;
+        zstd_min_length 1;
+        zstd_types text/plain;
+        default_type text/plain;
+        return 200 "the quick brown fox jumps over the lazy dog, again";
+    }
+--- request
+GET /t
+--- error_code: 200
+--- error_log
+ZSTD_CCtx_refPrefix()
+--- no_error_log
+[emerg]
+[error]
+[alert]
 
 
 

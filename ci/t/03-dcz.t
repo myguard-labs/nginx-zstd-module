@@ -20,6 +20,22 @@ if (defined $ENV{'TEST_NGINX_BINARY'}) {
     }
 }
 
+# The cache limit exists only in builds with libzstd's static API. The release
+# module deliberately omits that API and keeps refPrefix for every profile.
+our $static_linking = 0;
+if (defined $ENV{'TEST_NGINX_BINARY'}) {
+    my $pid = open(my $vh, '-|');
+    die "fork for nginx -V: $!" if !defined $pid;
+    if (!$pid) {
+        open(STDERR, '>&', \*STDOUT) or exit 127;
+        exec {$ENV{'TEST_NGINX_BINARY'}} $ENV{'TEST_NGINX_BINARY'}, '-V';
+        exit 127;
+    }
+    my $v = do { local $/; <$vh> };
+    close $vh;
+    $static_linking = 1 if defined $v && $v =~ /-DZSTD_STATIC_LINKING_ONLY/;
+}
+
 add_block_preprocessor(sub {
     my $block = shift;
 
@@ -83,6 +99,10 @@ binmode $big_fh;
 print {$big_fh} 'A' x (8 * 1024 * 1024 + 17) or die "bigdict: write: $!";
 close $big_fh or die "bigdict: close: $!";
 local $ENV{'TEST_NGINX_DCZ_BIGDICT'} = $big_path;
+open my $big_hash_fh, '<', $big_path or die "bigdict hash: open: $!";
+binmode $big_hash_fh;
+our $big_b64 = encode_base64(Digest::SHA->new(256)->addfile($big_hash_fh)->digest, "");
+close $big_hash_fh or die "bigdict hash: close: $!";
 
 # One byte over the 10 MB hard limit, for the too-large refusal (TEST 54).
 # Exposed via $TEST_NGINX_DCZ_HUGEDICT. The loader refuses it at fstat()
@@ -1533,5 +1553,31 @@ Accept-Encoding: zstd, dcz
 Available-Dictionary: :$::dict_b64:}
 --- response_headers
 Content-Encoding: dcz
+--- no_error_log
+[error]
+
+
+
+=== TEST 56: a cache-limit fallback still negotiates a raw dcz dictionary
+# At level 19 the prepared state for this legal 8 MiB dictionary exceeds
+# the 64 MiB cycle cache. The request must use refPrefix and still send dcz.
+--- skip_eval: 3: !$::static_linking
+--- config
+    location /t {
+        zstd on;
+        zstd_comp_level 19;
+        zstd_min_length 16;
+        zstd_dcz_dict_file $TEST_NGINX_DCZ_BIGDICT;
+        default_type text/plain;
+        return 200 "dcz negotiation body: shared-boilerplate compute render\n";
+    }
+--- request
+GET /t
+--- more_headers eval
+"Accept-Encoding: zstd, dcz\nAvailable-Dictionary: :$::big_b64:"
+--- response_headers
+Content-Encoding: dcz
+--- error_log
+a dcz prepared CDict profile was skipped to stay within the 67108864-byte configuration-cycle limit
 --- no_error_log
 [error]
