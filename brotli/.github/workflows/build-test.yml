@@ -1,0 +1,309 @@
+name: Build & Test
+
+# Third-party actions are pinned to commit SHAs for supply-chain safety.
+# actions/checkout@v5.1.0 -> fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+# actions/cache@v5.1.0    -> caa296126883cff596d87d8935842f9db880ef25
+
+env:
+  # Resolved at run time by the `resolve` job; nginx.org only keeps the
+  # newest mainline tarball, so a hardcoded version eventually 404s.
+  NGINX_VERSION: ""
+  # Single source of truth for both cpanm sites below (the zstd
+  # sibling's #214): an unpinned `cpanm Test::Nginx::Socket` resolves
+  # to whatever CPAN serves at run time, so a cold runner can silently
+  # change test behaviour with no repository diff. 0.32 is what every
+  # site already resolved to — a reproducibility pin, not a bump.
+  TEST_NGINX_SOCKET_VERSION: "0.32"
+
+on:
+  push:
+    branches: [master, main, hardening]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Weekly Monday 05:23 UTC — catches nginx API drift against new
+    # releases even when nothing is pushed.
+    - cron: "23 5 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve nginx version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      nginx_version: ${{ steps.v.outputs.nginx_version }}
+    steps:
+      - name: Resolve latest mainline nginx
+        id: v
+        run: |
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' \
+            | sort -V | tail -1)
+          if [ -z "$ver" ]; then
+            echo "::error::could not resolve mainline nginx version"
+            exit 1
+          fi
+          echo "Resolved nginx mainline: $ver"
+          echo "nginx_version=$ver" >> "$GITHUB_OUTPUT"
+
+  # ── System-first path: link the distro libbrotli via pkg-config ────────
+  build-system:
+    name: Build & smoke (system libbrotli)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: resolve
+    env:
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
+    steps:
+      - name: Checkout module (no submodule — system mode must not need it)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config wget \
+            libpcre2-dev zlib1g-dev libbrotli-dev brotli python3 \
+            libperl-dev cpanminus
+
+      - name: Build against PGP-verified nginx
+        run: |
+          bash tools/ci-build.sh system "$NGINX_VERSION"
+          echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/.build/nginx-$NGINX_VERSION/objs/nginx" >> "$GITHUB_ENV"
+          # This job is the accelerated-hash path: libcrypto must have
+          # been detected, or dictionary hashing silently regressed to
+          # the portable fallback (the bundled job covers that one).
+          grep -q 'NGX_HTTP_BROTLI_HAVE_LIBCRYPTO' \
+            ".build/nginx-$NGINX_VERSION/objs/ngx_auto_config.h"
+          echo "✓ libcrypto EVP SHA-256 detected"
+
+      - name: Assert clean config load with no gzip_vary anywhere
+        # Vary: Accept-Encoding is emitted by the modules by construction
+        # (parent #163): the header no longer depends on the operator's
+        # "gzip_vary" directive, the old gzip_vary-off warnings are gone,
+        # and the compression_vary stub machinery those warnings
+        # justified went with them. The config below has NO gzip_vary
+        # anywhere and must load with no gzip_vary advice of any kind.
+        # The runtime half — a Vary header on responses from a
+        # gzip_vary-free config — is pinned by t/00-brotli.t TEST 12a
+        # and the Vary checks in tools/test_dcb.py.
+        run: |
+          set -euo pipefail
+          cd ".build/nginx-$NGINX_VERSION"
+
+          mkdir -p wprefix/logs
+          cat > wprefix/novary.conf <<EOF
+          pid novary.pid;
+          events {}
+          http {
+              server {
+                  listen 127.0.0.1:8080;
+                  location / {
+                      brotli on;
+                      brotli_static on;
+                      root html;
+                  }
+              }
+          }
+          EOF
+
+          out=$(objs/nginx -p "$PWD/wprefix" -c novary.conf -t 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'test is successful'
+          if echo "$out" | grep -qi 'gzip_vary'; then
+            echo "✗ config load still mentions gzip_vary:"
+            echo "$out" | grep -i 'gzip_vary'
+            exit 1
+          fi
+          echo "✓ loads clean with no gzip_vary anywhere in the config"
+
+      - name: Roundtrip smoke test
+        run: |
+          python3 tools/test_encoding.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18180
+          echo "✓ system-libbrotli roundtrip passed"
+
+      - name: Cache Perl modules
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket-${{ env.TEST_NGINX_SOCKET_VERSION }}
+
+      - name: Install Test::Nginx::Socket
+        # The sibling's #214 + #249 shape: the version pin alone still
+        # trusts the CPAN index at run time, so the script also asserts
+        # the version->dist resolution and diffs the resolver's
+        # dependency graph against tools/test-nginx-socket.cpan.lock
+        # before installing. Drift fails loudly HERE, cache restore or
+        # fresh install alike, not as a confusing suite failure
+        # downstream.
+        run: |
+          bash tools/install_test_nginx_socket.sh --local-lib ~/perl5
+          echo "PERL5LIB=$HOME/perl5/lib/perl5" >> "$GITHUB_ENV"
+
+      - name: Run regression suite
+        run: |
+          export TEST_NGINX_SERVROOT=/tmp/nginx-servroot-brotli
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          perl t/00-brotli.t 2>&1 | tee t/brotli-tests.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ regression suite FAILED"; exit 1; fi
+          echo "✓ regression suite passed"
+
+      - name: Run dcb negotiation suite
+        run: |
+          export TEST_NGINX_SERVROOT=/tmp/nginx-servroot-dcb
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          perl t/01-dcb.t 2>&1 | tee t/dcb-tests.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then echo "❌ dcb suite FAILED"; exit 1; fi
+          echo "✓ dcb negotiation suite passed"
+
+      - name: Run dcb wire-format test
+        run: |
+          python3 tools/test_dcb.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18190
+          echo "✓ dcb wire-format test passed"
+
+      - name: Dictionary read-completeness unit test (short reads / EINTR / EOF)
+        run: bash tools/test_read_dict_file_unit.sh
+
+      - name: Ratio scaling unit oracle (overflow-safe $brotli_ratio)
+        run: bash tools/test_ratio_scaling_unit.sh
+
+      - name: max_length abort diagnostics contract (declared vs unknown length)
+        run: bash tools/test_max_length_diagnostics.sh
+
+  # ── ASan+UBSan over the chain-state paths ──────────────────────────────
+  # The zstd siblings' round-4 lesson, applied here: the filter's buffer
+  # and state-machine code never ran under a sanitizer, and their job's
+  # first run caught real UB (upstream-nginx's, but caught). Both suites
+  # and both wire tools run against the sanitized binary; everything is
+  # fatal, leak checking off (LSan's ptrace-dependent exit check is the
+  # flaky machinery the zstd repo wraps in verdict scripts). Both suites
+  # run at warn log level, so nginx core's debug-log UB sites (the
+  # nonnull family nginx PRs #1671/#1672 and #1679-#1682 address) never
+  # execute and no check class needs disabling.
+  build-asan:
+    name: ASan+UBSan (suites and wire tools)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: resolve
+    env:
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
+      ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+      UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+    steps:
+      - name: Checkout module (no submodule — system mode must not need it)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config wget \
+            libpcre2-dev zlib1g-dev libbrotli-dev brotli python3 \
+            libperl-dev cpanminus
+
+      - name: Build against PGP-verified nginx (sanitized)
+        run: |
+          NGX_BROTLI_SANITIZE=1 bash tools/ci-build.sh system "$NGINX_VERSION"
+          echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/.build/nginx-$NGINX_VERSION/objs/nginx" >> "$GITHUB_ENV"
+
+      - name: Cache Perl modules
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/perl5
+          key: perl-modules-${{ runner.os }}-Test-Nginx-Socket-${{ env.TEST_NGINX_SOCKET_VERSION }}
+
+      - name: Install Test::Nginx::Socket
+        # The sibling's #214 + #249 shape: the version pin alone still
+        # trusts the CPAN index at run time, so the script also asserts
+        # the version->dist resolution and diffs the resolver's
+        # dependency graph against tools/test-nginx-socket.cpan.lock
+        # before installing. Drift fails loudly HERE, cache restore or
+        # fresh install alike, not as a confusing suite failure
+        # downstream.
+        run: |
+          bash tools/install_test_nginx_socket.sh --local-lib ~/perl5
+          echo "PERL5LIB=$HOME/perl5/lib/perl5" >> "$GITHUB_ENV"
+
+      - name: Run regression suite (sanitized)
+        run: |
+          export TEST_NGINX_SERVROOT=/tmp/nginx-servroot-brotli-asan
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          perl t/00-brotli.t
+
+      - name: Run dcb negotiation suite (sanitized)
+        run: |
+          export TEST_NGINX_SERVROOT=/tmp/nginx-servroot-dcb-asan
+          mkdir -p "$TEST_NGINX_SERVROOT"
+          perl t/01-dcb.t
+
+      - name: Roundtrip smoke test (sanitized)
+        run: |
+          python3 tools/test_encoding.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18280
+
+      - name: dcb wire-format test (sanitized)
+        run: |
+          python3 tools/test_dcb.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18290
+
+  # ── Bundled fallback path: cmake-built submodule at the pinned tag ─────
+  build-bundled:
+    name: Build & smoke (bundled brotli v1.2.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: resolve
+    env:
+      NGINX_VERSION: ${{ needs.resolve.outputs.nginx_version }}
+    steps:
+      - name: Checkout module with submodule
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          submodules: true
+
+      # no libbrotli-dev on purpose — the fallback must build without it
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config wget cmake \
+            libpcre2-dev zlib1g-dev brotli python3
+
+      - name: Build against PGP-verified nginx
+        env:
+          # Keep the portable SHA-256 fallback covered: this job builds
+          # with libcrypto detection disabled, so its dcb wire-format
+          # test exercises the local implementation end-to-end.
+          NGX_BROTLI_NO_LIBCRYPTO: 1
+        run: |
+          bash tools/ci-build.sh bundled "$NGINX_VERSION"
+          echo "TEST_NGINX_BINARY=$GITHUB_WORKSPACE/.build/nginx-$NGINX_VERSION/objs/nginx" >> "$GITHUB_ENV"
+          if grep -q 'NGX_HTTP_BROTLI_HAVE_LIBCRYPTO' \
+            ".build/nginx-$NGINX_VERSION/objs/ngx_auto_config.h"; then
+            echo "libcrypto leaked into the portable-fallback job"; exit 1
+          fi
+          echo "✓ portable SHA-256 fallback in use"
+
+      - name: Roundtrip smoke test
+        run: |
+          python3 tools/test_encoding.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18181
+          echo "✓ bundled-brotli roundtrip passed"
+
+      - name: dcb wire-format test (bundled brotli)
+        run: |
+          python3 tools/test_dcb.py \
+            --nginx-binary "$TEST_NGINX_BINARY" --port 18191
+          echo "✓ dcb wire-format test passed (bundled)"
