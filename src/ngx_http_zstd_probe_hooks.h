@@ -78,7 +78,7 @@ void ngx_http_zstd_probe_note_ctx_state(ngx_uint_t free_links,
 
 
 /*
- * Codec fault injection (Phase 3).
+ * Codec fault injection.
  *
  * The outcome an armed site produces. The testkit's arm parser carries a
  * single integer per site (fault_codec=<nth>), and the probe contract is
