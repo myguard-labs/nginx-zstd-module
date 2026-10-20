@@ -51,12 +51,6 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # This scheduled workflow also falls back to ubuntu-latest for forks.
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl gh git gnupg python3
-
       # Secrets do not travel with a fork, so a fork's scheduled run has no
       # BUMP_PR_TOKEN. Without this step such a run stays green for as long
       # as nothing needs bumping and then dies at the branch push, mailing
@@ -65,7 +59,9 @@ jobs:
       # else it is a broken bumper and fails HERE, by name, rather than
       # downstream as a git authentication error. Whether this is a fork is
       # asked of the API with the run's own read-only token, and a failed
-      # lookup counts as "not a fork" -- the strict side.
+      # lookup counts as "not a fork" -- the strict side. The step comes
+      # before the apt install so a skipping fork pays nothing past the
+      # checkout; it needs only gh, which the hosted runner image ships.
       - name: Require BUMP_PR_TOKEN (a fork without one skips, green)
         id: token
         env:
@@ -85,6 +81,13 @@ jobs:
           fi
           echo "::error::BUMP_PR_TOKEN is not set (fork=$fork); the bump cannot push its branch or open its PR."
           exit 1
+
+      # This scheduled workflow also falls back to ubuntu-latest for forks.
+      - name: Install dependencies
+        if: steps.token.outputs.present == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gh git gnupg python3
 
       - name: Run bump script
         id: bump
