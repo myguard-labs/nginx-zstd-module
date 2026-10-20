@@ -29,6 +29,16 @@
 #                            as a VER_X/SHA_X pair. nasm is NOT bumped:
 #                            nasm.us publishes no release feed this script can
 #                            query, and it changes rarely -- edit by hand.
+#   - packaging/arch/PKGBUILD -- the Arch package's exact nginx pin
+#                            (_nginxver, with pkgrel stepped and the matching
+#                            .SRCINFO lines rewritten). Its feed is Arch's
+#                            own package data (archlinux.org's JSON for nginx
+#                            and nginx-src, which must agree), not nginx.org:
+#                            Arch packages a stable release some days after
+#                            nginx ships it, and the pin has to follow Arch's
+#                            clock or the local build stops at a missing
+#                            dependency. No digest: pacman verifies Arch's
+#                            signatures on the packages it installs.
 #
 # nginx mainline in the build-flavors matrix (label: mainline) and the
 # NGINX_VERSION: "" of build-test.yml / ci-deep.yml are resolved at CI run
@@ -81,6 +91,8 @@ KEYS_DIR="ci/tools/keys"
 MATRIX_FILE=".github/workflows/ci-deep.yml"
 PINS_FILE="ci/tools/windows-pins.sh"
 HARNESS_FILES=(".github/workflows/ci-deep.yml" ".github/workflows/harness-fault-arms.yml")
+ARCH_PKGBUILD="packaging/arch/PKGBUILD"
+ARCH_SRCINFO="packaging/arch/.SRCINFO"
 
 # --- discover latest versions -------------------------------------------
 
@@ -105,6 +117,49 @@ latest_zlib() { gh_latest_tag madler/zlib; }
 latest_openssl() { gh_latest_tag openssl/openssl; }
 latest_zstd() { gh_latest_tag facebook/zstd; }
 
+# The pkgver Arch's package database carries for PACKAGE, from
+# archlinux.org's JSON view of it (the same data the package pages render;
+# the Arch Linux Archive only mirrors what this database has already
+# published). The pkgrel is deliberately not read: the PKGBUILD's
+# `nginx=X.Y.Z` dependency matches every pkgrel of that pkgver, so Arch's
+# own rebuilds never move this pin. Anything but a dotted version string
+# is a refusal, never a blank.
+ARCH_PKGVER_PY='
+import json, re, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit("FATAL: archlinux.org package data for %s is not JSON -- refusing to guess" % sys.argv[1])
+pkgver = data.get("pkgver") if isinstance(data, dict) else None
+if not isinstance(pkgver, str) or not re.fullmatch(r"[0-9]+(\.[0-9]+)+", pkgver):
+    sys.exit("FATAL: archlinux.org package data for %s carries no dotted pkgver -- refusing to guess" % sys.argv[1])
+print(pkgver)
+'
+arch_pkgver() { # PACKAGE
+    local json
+    json="$(curl -fsSL "https://archlinux.org/packages/extra/x86_64/$1/json/")" || json=""
+    if [ -z "$json" ]; then
+        echo "error: could not query archlinux.org package data for $1" >&2
+        return 1
+    fi
+    printf '%s' "$json" | python3 -c "$ARCH_PKGVER_PY" "$1"
+}
+
+# nginx and nginx-src are one split package on Arch, so they carry one
+# pkgver; the PKGBUILD depends on nginx and builds against nginx-src at the
+# same version. Two different answers mean the database is mid-publish (or
+# the packaging changed under us), and neither is a pin to write.
+latest_arch_nginx() {
+    local pkg src
+    pkg="$(arch_pkgver nginx)" || return 1
+    src="$(arch_pkgver nginx-src)" || return 1
+    if [ "$pkg" != "$src" ]; then
+        echo "FATAL: Arch carries nginx $pkg but nginx-src $src -- the split package disagrees with itself; not pinning either" >&2
+        exit 1
+    fi
+    echo "$pkg"
+}
+
 read -r NEW_STABLE NEW_MAINLINE < <(nginx_lines)
 [ "$NEW_STABLE" != "-" ] || NEW_STABLE=""
 [ "$NEW_MAINLINE" != "-" ] || NEW_MAINLINE=""
@@ -113,8 +168,9 @@ NEW_PCRE2="$(latest_pcre2)"
 NEW_ZLIB="$(latest_zlib)"
 NEW_OPENSSL="$(latest_openssl)"
 NEW_ZSTD="$(latest_zstd)"
+NEW_ARCH="$(latest_arch_nginx)"
 
-for v in NEW_STABLE NEW_MAINLINE NEW_ANGIE NEW_PCRE2 NEW_ZLIB NEW_OPENSSL NEW_ZSTD; do
+for v in NEW_STABLE NEW_MAINLINE NEW_ANGIE NEW_PCRE2 NEW_ZLIB NEW_OPENSSL NEW_ZSTD NEW_ARCH; do
     if [ -z "${!v}" ]; then
         echo "FATAL: could not determine $v -- refusing to bump with a blank version" >&2
         exit 1
@@ -122,7 +178,8 @@ for v in NEW_STABLE NEW_MAINLINE NEW_ANGIE NEW_PCRE2 NEW_ZLIB NEW_OPENSSL NEW_ZS
 done
 
 echo "latest: nginx stable=$NEW_STABLE mainline=$NEW_MAINLINE angie=$NEW_ANGIE" \
-    "pcre2=$NEW_PCRE2 zlib=$NEW_ZLIB openssl=$NEW_OPENSSL zstd=$NEW_ZSTD"
+    "pcre2=$NEW_PCRE2 zlib=$NEW_ZLIB openssl=$NEW_OPENSSL zstd=$NEW_ZSTD" \
+    "arch nginx=$NEW_ARCH"
 
 # --- discover current pins ----------------------------------------------
 
@@ -188,9 +245,50 @@ for name in "${WINDOWS_NAMES[@]}"; do
     pin_value "SHA_$name" >/dev/null
 done
 
+# The value of KEY=value in the PKGBUILD. makepkg reads these as shell, so
+# the pin lines are plain assignments at column 0; a missing one is fatal
+# before any edit, like a missing Windows pin.
+pkgbuild_value() { # KEY
+    local line
+    line="$(grep -E "^$1=" "$ARCH_PKGBUILD" || true)"
+    if [ -z "$line" ]; then
+        echo "FATAL: $ARCH_PKGBUILD does not set $1 -- refusing to bump a pin that is not there" >&2
+        exit 1
+    fi
+    echo "${line#*=}"
+}
+
+# .SRCINFO is makepkg's rendering of the PKGBUILD and is what the AUR
+# indexes; the two must already agree before either is rewritten, or the
+# bump would carry a stale pair forward. Each line is matched whole (tab
+# indented, as `makepkg --printsrcinfo` writes it), exactly once.
+srcinfo_has_line() { # LINE
+    [ "$(grep -cFx -- "$1" "$ARCH_SRCINFO" || true)" -eq 1 ]
+}
+
+CUR_ARCH="$(pkgbuild_value _nginxver)"
+CUR_PKGREL="$(pkgbuild_value pkgrel)"
+case "$CUR_PKGREL" in
+    '' | *[!0-9]*)
+        echo "FATAL: $ARCH_PKGBUILD pkgrel=$CUR_PKGREL is not a plain integer -- refusing to step it" >&2
+        exit 1
+        ;;
+esac
+TAB="$(printf '\t')"
+for line in "${TAB}pkgrel = ${CUR_PKGREL}" \
+    "${TAB}makedepends = nginx-src=${CUR_ARCH}" \
+    "${TAB}depends = nginx=${CUR_ARCH}"; do
+    if ! srcinfo_has_line "$line"; then
+        echo "FATAL: $ARCH_SRCINFO does not carry exactly one '${line#"$TAB"}' line to match $ARCH_PKGBUILD" \
+            "-- regenerate it with makepkg --printsrcinfo first" >&2
+        exit 1
+    fi
+done
+
 echo "pinned: nginx stable=$CUR_STABLE angie=$CUR_ANGIE harness=$CUR_HARNESS" \
     "windows: nginx=${CUR_WIN[NGINX]} pcre2=${CUR_WIN[PCRE2]} zlib=${CUR_WIN[ZLIB]}" \
-    "openssl=${CUR_WIN[OPENSSL]} zstd=${CUR_WIN[ZSTD]} nasm=${CUR_WIN[NASM]}"
+    "openssl=${CUR_WIN[OPENSSL]} zstd=${CUR_WIN[ZSTD]} nasm=${CUR_WIN[NASM]}" \
+    "arch nginx=$CUR_ARCH (pkgrel $CUR_PKGREL)"
 
 CHANGED=0
 
@@ -431,6 +529,45 @@ bump_windows_pin() { # NAME NEW DIGEST
     bump_pins_line "SHA_$1" "$3"
 }
 
+# Rewrite the one line of FILE that is exactly FROM (a fixed string, matched
+# whole) to TO. The line was confirmed present up front, so a no-op here is
+# format drift between that check and this edit, and fails like every
+# other mutator.
+rewrite_fixed_line() { # FILE FROM TO
+    local file="$1" from="$2" to="$3" tmp
+    tmp="$(mktemp)"
+    if ! python3 - "$file" "$from" "$to" "$tmp" <<'PYEOF'
+import sys
+path, old, new, out = sys.argv[1:5]
+lines = open(path).read().split("\n")
+hits = [i for i, line in enumerate(lines) if line == old]
+if len(hits) != 1:
+    sys.exit(1)
+lines[hits[0]] = new
+open(out, "w").write("\n".join(lines))
+PYEOF
+    then
+        rm -f "$tmp"
+        echo "FATAL: no single '${from#"$TAB"}' line in $(tracked "$file") -- refusing a no-op pin" >&2
+        exit 1
+    fi
+    mv "$tmp" "$file"
+    CHANGED=1
+}
+
+# The Arch pin is five lines across two files -- _nginxver and pkgrel in
+# the PKGBUILD, and pkgrel plus the two nginx dependency lines in .SRCINFO
+# -- confirmed to agree up front, so the set lands whole or the script has
+# already died.
+bump_arch_pin() { # OLD NEW OLDREL NEWREL
+    local old="$1" new="$2" oldrel="$3" newrel="$4"
+    rewrite_fixed_line "$ARCH_PKGBUILD" "_nginxver=${old}" "_nginxver=${new}"
+    rewrite_fixed_line "$ARCH_PKGBUILD" "pkgrel=${oldrel}" "pkgrel=${newrel}"
+    rewrite_fixed_line "$ARCH_SRCINFO" "${TAB}pkgrel = ${oldrel}" "${TAB}pkgrel = ${newrel}"
+    rewrite_fixed_line "$ARCH_SRCINFO" "${TAB}makedepends = nginx-src=${old}" "${TAB}makedepends = nginx-src=${new}"
+    rewrite_fixed_line "$ARCH_SRCINFO" "${TAB}depends = nginx=${old}" "${TAB}depends = nginx=${new}"
+}
+
 # --- resolve: decide every bump and fetch every digest, editing nothing ---
 # All network work happens here, before the first file is touched, so a
 # download or verification failure part-way through leaves the tree
@@ -477,6 +614,19 @@ if bump_wanted "harness nginx" "$NEW_MAINLINE" "$CUR_HARNESS"; then
     echo "bump harness nginx: $CUR_HARNESS -> $NEW_MAINLINE"
     CHANGED=1
     BUMP_HARNESS=1
+fi
+
+# The Arch pin follows Arch's package database, not the nginx stable line
+# above: Arch publishes a stable release on its own schedule, and the pin
+# moving ahead of it would break the local build the same way as lagging
+# behind it. A rebuild against a new nginx is a new package release of the
+# same module version, so pkgrel steps by one.
+BUMP_ARCH=0
+NEW_PKGREL=$((CUR_PKGREL + 1))
+if bump_wanted "arch nginx" "$NEW_ARCH" "$CUR_ARCH"; then
+    echo "bump arch nginx: $CUR_ARCH -> $NEW_ARCH (pkgrel $CUR_PKGREL -> $NEW_PKGREL)"
+    CHANGED=1
+    BUMP_ARCH=1
 fi
 
 declare -A NEW_LIB=([PCRE2]="$NEW_PCRE2" [ZLIB]="$NEW_ZLIB" [OPENSSL]="$NEW_OPENSSL" [ZSTD]="$NEW_ZSTD")
@@ -543,7 +693,7 @@ trap 'exit 143' TERM
 # the transaction so each tracked path is installed and rolled back once.
 TRACKED=()
 declare -A TRACKED_SEEN=()
-for f in "$MATRIX_FILE" "$CI_BUILD_SH" "$PINS_FILE" "${HARNESS_FILES[@]}"; do
+for f in "$MATRIX_FILE" "$CI_BUILD_SH" "$PINS_FILE" "${HARNESS_FILES[@]}" "$ARCH_PKGBUILD" "$ARCH_SRCINFO"; do
     if [ -z "${TRACKED_SEEN[$f]:-}" ]; then
         TRACKED+=("$f")
         TRACKED_SEEN[$f]=1
@@ -557,6 +707,8 @@ done
 MATRIX_FILE="$UPDATES/$MATRIX_FILE"
 CI_BUILD_SH="$UPDATES/$CI_BUILD_SH"
 PINS_FILE="$UPDATES/$PINS_FILE"
+ARCH_PKGBUILD="$UPDATES/$ARCH_PKGBUILD"
+ARCH_SRCINFO="$UPDATES/$ARCH_SRCINFO"
 for i in "${!HARNESS_FILES[@]}"; do
     HARNESS_FILES[i]="$UPDATES/${HARNESS_FILES[i]}"
 done
@@ -586,6 +738,10 @@ for name in PCRE2 ZLIB OPENSSL ZSTD; do
         bump_windows_pin "$name" "${NEW_LIB[$name]}" "${LIB_DIGEST[$name]}"
     fi
 done
+
+if [ "$BUMP_ARCH" = 1 ]; then
+    bump_arch_pin "$CUR_ARCH" "$NEW_ARCH" "$CUR_PKGREL" "$NEW_PKGREL"
+fi
 
 # Every edit succeeded. Replace each changed file atomically and roll back
 # earlier replacements if a later install fails or the process is interrupted.

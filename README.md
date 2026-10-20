@@ -178,8 +178,11 @@ tree while the exported package continues to use the pinned release archive.
 
 The container intentionally updates packages from Arch's live repositories.
 The exact nginx dependency protects the dynamic-module ABI by failing closed
-after an Arch nginx update. When that happens, update `_nginxver`, bump
-`pkgrel`, regenerate `.SRCINFO`, and refresh the container image digests.
+after an Arch nginx update. The weekly version bump
+(`ci/tools/bump-versions.sh`) follows that update: it reads the nginx version
+Arch's package database carries, moves `_nginxver` to it, steps `pkgrel`, and
+rewrites the matching `.SRCINFO` lines, as a pull request like every other
+pin. The container image digests are still refreshed by hand.
 
 Build nginx with the module using `--add-dynamic-module`:
 

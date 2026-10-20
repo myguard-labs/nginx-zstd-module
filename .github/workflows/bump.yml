@@ -3,8 +3,10 @@ name: Bump versions
 # Weekly: check the upstream release feeds for newer releases than what's
 # pinned here -- nginx-stable/angie in ci-deep.yml's build-flavors matrix,
 # the harness jobs' static mainline pin (HARNESS_NGINX_VERSION in ci-deep.yml
-# and harness-fault-arms.yml), and the Windows build's sources in
-# ci/tools/windows-pins.sh. The matrix's own mainline entry is resolved
+# and harness-fault-arms.yml), the Windows build's sources in
+# ci/tools/windows-pins.sh, and the Arch package's exact nginx pin in
+# packaging/arch/PKGBUILD (from Arch's own package database, which lags
+# nginx.org by its packaging time). The matrix's own mainline entry is resolved
 # dynamically at CI run time (build-test.yml's `resolve` job / ci-deep.yml's
 # per-job resolve steps, through ci/tools/nginx-releases.sh) and has no
 # static pin; ci/tools/bump-versions.sh's header lists exactly what is and

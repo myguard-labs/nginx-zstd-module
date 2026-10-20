@@ -55,6 +55,7 @@ CUR_PCRE2=10.44
 CUR_ZLIB=1.3.1
 CUR_OPENSSL=4.0.1
 CUR_ZSTD=1.5.7
+CUR_ARCH=1.30.5
 
 # make_sandbox VARNAME  -- creates a scratch repo layout under a temp dir and
 # assigns its path to VARNAME.
@@ -116,6 +117,32 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   HARNESS_NGINX_VERSION: "1.31.4"
 EOF
+    mkdir -p "$dir/packaging/arch"
+    cat >"$dir/packaging/arch/PKGBUILD" <<'EOF'
+# sandbox copy of packaging/arch/PKGBUILD -- the pin lines, as makepkg reads them
+
+pkgname=nginx-mod-zstd
+pkgver=0.90.8
+pkgrel=2
+_nginxver=1.30.5
+
+depends=(
+  'glibc'
+  "nginx=${_nginxver}"
+  'zstd>=1.4.0'
+)
+makedepends=("nginx-src=${_nginxver}")
+EOF
+    printf '%s\n' \
+        'pkgbase = nginx-mod-zstd' \
+        '	pkgver = 0.90.8' \
+        '	pkgrel = 2' \
+        '	makedepends = nginx-src=1.30.5' \
+        '	depends = glibc' \
+        '	depends = nginx=1.30.5' \
+        '	depends = zstd>=1.4.0' \
+        '' \
+        'pkgname = nginx-mod-zstd' >"$dir/packaging/arch/.SRCINFO"
     cp "$BUMP_SCRIPT" "$dir/ci/tools/bump-versions.sh"
     cp "$REPO_ROOT/ci/tools/nginx-releases.sh" "$dir/ci/tools/nginx-releases.sh"
     # shellcheck disable=SC2034  # nameref out-parameter, read by the caller
@@ -248,6 +275,17 @@ case "\$url" in
     *api.github.com/repos/facebook/zstd/releases/latest*)
         echo "{\"tag_name\": \"v${NEW_ZSTD:-$CUR_ZSTD}\"}"
         exit 0 ;;
+    *archlinux.org/packages/extra/x86_64/nginx/json/*)
+        # Arch's package data. The pkgrel is deliberately high: it is Arch's
+        # own rebuild counter and must never move the pin.
+        case "${ARCH_FEED:-json}" in
+            html) echo "<html>nginx ${NEW_ARCH:-$CUR_ARCH}</html>" ;;
+            *) echo "{\"pkgname\": \"nginx\", \"pkgver\": \"${NEW_ARCH:-$CUR_ARCH}\", \"pkgrel\": \"7\", \"last_update\": \"2026-10-19T07:23:20.697Z\"}" ;;
+        esac
+        exit 0 ;;
+    *archlinux.org/packages/extra/x86_64/nginx-src/json/*)
+        echo "{\"pkgname\": \"nginx-src\", \"pkgver\": \"${NEW_ARCH_SRC:-${NEW_ARCH:-$CUR_ARCH}}\", \"pkgrel\": \"7\"}"
+        exit 0 ;;
 esac
 # tarball / .asc fetch: write a stand-in whose bytes depend only on the
 # file name, so the same tarball from two hosts (zlib) hashes the same and
@@ -282,6 +320,8 @@ TRACKED_FIXTURES=(
     .github/workflows/harness-fault-arms.yml
     ci/tools/ci-build.sh
     ci/tools/windows-pins.sh
+    packaging/arch/PKGBUILD
+    packaging/arch/.SRCINFO
 )
 declare -A TRACKED_BEFORE=()
 snapshot_tracked() { # remember every tracked file of $SANDBOX
@@ -823,6 +863,138 @@ elif ! grep -q 'must build the same nginx' "$SANDBOX/out.log"; then
     bad "harness-drift: exited non-zero but did not report the disagreement: $(cat "$SANDBOX/out.log")"
 else
     ok "harness-drift: exited non-zero, reported the disagreement, and edited nothing"
+fi
+
+pkgbuild_line() { grep -E "^$1=" "$SANDBOX/packaging/arch/PKGBUILD"; }
+srcinfo_count() { grep -cFx -- "$(printf '\t%s' "$1")" "$SANDBOX/packaging/arch/.SRCINFO" || true; }
+
+say "== case: arch pin bump (PKGBUILD _nginxver + pkgrel, the three .SRCINFO lines; nothing else) =="
+if run_case arch-only NEW_ARCH=1.30.6; then
+    if [ "$(pkgbuild_line _nginxver)" = "_nginxver=1.30.6" ] \
+        && [ "$(pkgbuild_line pkgrel)" = "pkgrel=3" ] \
+        && [ "$(pkgbuild_line pkgver)" = "pkgver=0.90.8" ] \
+        && [ "$(srcinfo_count 'pkgrel = 3')" = 1 ] \
+        && [ "$(srcinfo_count 'makedepends = nginx-src=1.30.6')" = 1 ] \
+        && [ "$(srcinfo_count 'depends = nginx=1.30.6')" = 1 ] \
+        && [ "$(srcinfo_count 'pkgver = 0.90.8')" = 1 ] \
+        && ! grep -q '1\.30\.5' "$SANDBOX/packaging/arch/PKGBUILD" "$SANDBOX/packaging/arch/.SRCINFO" \
+        && grep -q 'version: "1.30.4"' "$SANDBOX/.github/workflows/ci-deep.yml" \
+        && ! grep -q '1.30.6' "$SANDBOX/ci/tools/ci-build.sh" \
+        && grep -q 'bump arch nginx: 1.30.5 -> 1.30.6 (pkgrel 2 -> 3)' "$SANDBOX/out.log"; then
+        ok "arch-only: all five pin lines moved together, pkgver and every other pin untouched"
+    else
+        bad "arch-only: unexpected result: $(cat "$SANDBOX/out.log"); $(cat "$SANDBOX/packaging/arch/PKGBUILD" "$SANDBOX/packaging/arch/.SRCINFO")"
+    fi
+else
+    bad "arch-only: script exited non-zero unexpectedly: $(cat "$SANDBOX/out.log")"
+fi
+
+say "== case: arch pin follows Arch, not nginx.org (a stable release Arch has not packaged yet moves only the stable pin) =="
+if run_case arch-lags NEW_STABLE=1.30.6; then
+    if grep -q 'version: "1.30.6"' "$SANDBOX/.github/workflows/ci-deep.yml" \
+        && [ "$(pkgbuild_line _nginxver)" = "_nginxver=1.30.5" ] \
+        && [ "$(pkgbuild_line pkgrel)" = "pkgrel=2" ] \
+        && [ "$(srcinfo_count 'depends = nginx=1.30.5')" = 1 ] \
+        && ! grep -q 'bump arch nginx' "$SANDBOX/out.log"; then
+        ok "arch-lags: stable moved to 1.30.6, the Arch pin stayed on what Arch ships"
+    else
+        bad "arch-lags: unexpected result: $(cat "$SANDBOX/out.log")"
+    fi
+else
+    bad "arch-lags: script exited non-zero unexpectedly: $(cat "$SANDBOX/out.log")"
+fi
+
+say "== case: Arch behind the pin (must hold, never move backwards) =="
+if run_case arch-backwards NEW_ARCH=1.30.4; then
+    if grep -q 'CHANGED=0' "$SANDBOX/out.log" \
+        && grep -q 'hold arch nginx: release feed says 1.30.4, pinned 1.30.5 is newer' "$SANDBOX/out.log" \
+        && [ "$(pkgbuild_line _nginxver)" = "_nginxver=1.30.5" ] \
+        && [ "$(pkgbuild_line pkgrel)" = "pkgrel=2" ]; then
+        ok "arch-backwards: reported the hold, CHANGED=0, pin untouched"
+    else
+        bad "arch-backwards: unexpected result: $(cat "$SANDBOX/out.log")"
+    fi
+else
+    bad "arch-backwards: script exited non-zero unexpectedly: $(cat "$SANDBOX/out.log")"
+fi
+
+say "== case: Arch's nginx and nginx-src disagree (mid-publish -- must FAIL, no edit) =="
+make_sandbox SANDBOX
+snapshot_tracked
+bindir="$(NEW_ARCH=1.30.6 NEW_ARCH_SRC=1.30.5 NEW_STABLE=1.30.6 stub_bin "$SANDBOX")"
+rc=0
+(
+    cd "$SANDBOX"
+    PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+) || rc=$?
+if [ "$rc" -eq 0 ]; then
+    bad "arch-split: script exited 0 with nginx and nginx-src at different versions"
+elif [ -n "$(changed_tracked)" ]; then
+    bad "arch-split: a file was mutated despite the disagreement (partial edit):$(changed_tracked)"
+elif ! grep -q 'Arch carries nginx 1.30.6 but nginx-src 1.30.5' "$SANDBOX/out.log"; then
+    bad "arch-split: exited non-zero but did not report the disagreement: $(cat "$SANDBOX/out.log")"
+else
+    ok "arch-split: exited non-zero, named both versions, and edited nothing (the pending stable bump included)"
+fi
+
+say "== case: Arch package data is not JSON (HTML came back) fails closed without edits =="
+make_sandbox SANDBOX
+snapshot_tracked
+bindir="$(ARCH_FEED=html NEW_STABLE=1.30.6 stub_bin "$SANDBOX")"
+rc=0
+(
+    cd "$SANDBOX"
+    PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+) || rc=$?
+if [ "$rc" -eq 0 ]; then
+    bad "arch-not-json: script exited 0 on an HTML answer from archlinux.org"
+elif [ -n "$(changed_tracked)" ]; then
+    bad "arch-not-json: tracked file(s) changed despite the feed failure:$(changed_tracked)"
+elif ! grep -Fq 'archlinux.org package data for nginx is not JSON' "$SANDBOX/out.log"; then
+    bad "arch-not-json: unexpected log: $(cat "$SANDBOX/out.log")"
+else
+    ok "arch-not-json: failed closed, named the bad feed, and edited nothing"
+fi
+
+say "== case: .SRCINFO drift (its nginx line disagrees with the PKGBUILD -- must FAIL before ANY edit) =="
+make_sandbox SANDBOX
+sed -i 's/^\tdepends = nginx=1.30.5$/\tdepends = nginx=1.30.4/' "$SANDBOX/packaging/arch/.SRCINFO"
+snapshot_tracked
+# A stable bump is pending too: the agreement check must run before it lands.
+bindir="$(NEW_ARCH=1.30.6 NEW_STABLE=1.30.6 stub_bin "$SANDBOX")"
+rc=0
+(
+    cd "$SANDBOX"
+    PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+) || rc=$?
+if [ "$rc" -eq 0 ]; then
+    bad "srcinfo-drift: script exited 0 with .SRCINFO disagreeing with the PKGBUILD"
+elif [ -n "$(changed_tracked)" ]; then
+    bad "srcinfo-drift: a file was mutated before the drift was reported (partial edit):$(changed_tracked)"
+elif ! grep -q "does not carry exactly one 'depends = nginx=1.30.5' line" "$SANDBOX/out.log"; then
+    bad "srcinfo-drift: exited non-zero but did not name the stale line: $(cat "$SANDBOX/out.log")"
+else
+    ok "srcinfo-drift: exited non-zero, named the stale .SRCINFO line, and edited nothing"
+fi
+
+say "== case: PKGBUILD without a pkgrel line (must FAIL before ANY edit) =="
+make_sandbox SANDBOX
+sed -i '/^pkgrel=/d' "$SANDBOX/packaging/arch/PKGBUILD"
+snapshot_tracked
+bindir="$(NEW_ARCH=1.30.6 stub_bin "$SANDBOX")"
+rc=0
+(
+    cd "$SANDBOX"
+    PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+) || rc=$?
+if [ "$rc" -eq 0 ]; then
+    bad "pkgbuild-drift: script exited 0 with pkgrel missing from the PKGBUILD"
+elif [ -n "$(changed_tracked)" ]; then
+    bad "pkgbuild-drift: a file was mutated before the missing pin was reported (partial edit)"
+elif ! grep -q 'does not set pkgrel' "$SANDBOX/out.log"; then
+    bad "pkgbuild-drift: exited non-zero but did not name the missing pin: $(cat "$SANDBOX/out.log")"
+else
+    ok "pkgbuild-drift: exited non-zero, named the missing pin, and edited nothing"
 fi
 
 if [ "$fail" -eq 0 ]; then
