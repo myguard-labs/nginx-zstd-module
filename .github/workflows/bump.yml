@@ -60,8 +60,18 @@ jobs:
       # downstream as a git authentication error. Whether this is a fork is
       # asked of the API with the run's own read-only token, and a failed
       # lookup counts as "not a fork" -- the strict side. The step comes
-      # before the apt install so a skipping fork pays nothing past the
-      # checkout; it needs only gh, which the hosted runner image ships.
+      # before the full apt install so a skipping fork pays nothing past
+      # the checkout; it needs only gh, which the hosted runner image
+      # ships. A POOL runner without gh would otherwise turn the lookup
+      # into "unknown" and fail a fork by name, so gh alone is installed
+      # when it is missing.
+      - name: Ensure gh is available
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+
       - name: Require BUMP_PR_TOKEN (a fork without one skips, green)
         id: token
         env:
