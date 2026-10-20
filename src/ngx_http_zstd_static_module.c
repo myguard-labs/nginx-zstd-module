@@ -329,6 +329,23 @@ typedef struct {
      * all.
      */
     ngx_flag_t  dict_bypass_enabled;
+
+#if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
+    /*
+     * The directio frame probe's scratch buffer and its bookkeeping
+     * (see ngx_http_zstd_static_dio_buf()). In the conf, not in
+     * file-scope static variables: the buffer comes from dio_scratch_pool,
+     * the pool this conf itself came from, so the two share one
+     * lifetime by construction -- the same rule every other piece of
+     * this module's state follows (module state lives in cycle-owned
+     * conf, never in process-wide variables).
+     */
+    u_char      *dio_scratch;
+    size_t       dio_scratch_cap;
+    size_t       dio_scratch_align;
+    ngx_uint_t   dio_scratch_busy;
+    ngx_pool_t  *dio_scratch_pool;
+#endif
 } ngx_http_zstd_static_main_conf_t;
 
 
@@ -669,26 +686,29 @@ ngx_http_zstd_static_pread(ngx_fd_t fd, u_char *buf, size_t size,
  * exactly as before this change, rather than corrupting the shared
  * buffer or its bookkeeping.
  *
- * SAFETY — worker/cycle lifetime, not global/cross-reload: this is a
- * file-scope `static`, so it is private per OS PROCESS already — a
- * config reload always forks NEW worker processes (the old ones drain
- * and exit; nginx does not mutate a running worker's cycle in place),
- * and each process gets its own zero-initialized copy of this storage
- * at fork/exec. There is no path by which an old worker's buffer
- * pointer is visible to, or reused by, a new one: they do not share an
- * address space. Freed automatically at worker exit with the rest of
- * the process image — nothing to release explicitly, and nothing for
- * LSan-at-exit to flag as a leak, since a live, still-reachable
- * file-scope pointer is not a leak.
+ * SAFETY — one lifetime for the buffer and its bookkeeping: both live
+ * in the static module's main conf, and the buffer is allocated from
+ * the pool that conf came from (recorded at create_main_conf), not
+ * from whatever ngx_cycle points at when the first probe runs. A
+ * request reaches the buffer through its own r->main_conf, so it can
+ * only ever see a buffer owned by the cycle it belongs to. With a
+ * master process the two shapes behave the same -- a worker lives in
+ * exactly one cycle, and a reload forks new workers -- so this is not a
+ * fix for a reachable fault; it removes the one pointer into pool
+ * memory this module kept outside cycle-owned state, and with it the
+ * need to reason about cycle replacement at all (under "master_process
+ * off" SIGHUP does replace the cycle in place, and the old pool is
+ * destroyed once its connections drain; nginx's own single-process
+ * reconfigure leaves the event layer un-reinitialised, so in practice
+ * no request is served on the replaced cycle -- the conf-owned shape
+ * does not depend on that). Nothing to release explicitly: the buffer
+ * goes with its pool, and a live pointer inside a live pool is not a
+ * leak for LSan at exit.
  */
-static u_char  *ngx_http_zstd_static_dio_scratch;
-static size_t   ngx_http_zstd_static_dio_scratch_cap;
-static size_t   ngx_http_zstd_static_dio_scratch_align;
-static ngx_uint_t  ngx_http_zstd_static_dio_scratch_busy;
 
 /*
  * Returns a buffer of at least `want` bytes, aligned to `align`, good
- * until the next call on this worker — NOT scoped to `pool`, unlike
+ * until the next call on this cycle -- NOT scoped to `pool`, unlike
  * every other allocation in this file. `pool` is used only for the
  * fallback path (request-scoped, exactly the pre-existing behaviour),
  * so the two return values must not be told apart by the caller: both
@@ -712,40 +732,39 @@ static ngx_uint_t  ngx_http_zstd_static_dio_scratch_busy;
  * aligned for the CURRENT request, not merely large enough.
  */
 static u_char *
-ngx_http_zstd_static_dio_buf(ngx_pool_t *pool, size_t want, size_t align)
+ngx_http_zstd_static_dio_buf(ngx_http_zstd_static_main_conf_t *zsmcf,
+    ngx_pool_t *pool, size_t want, size_t align)
 {
     u_char  *p;
 
-    if (ngx_http_zstd_static_dio_scratch_busy) {
+    if (zsmcf->dio_scratch_busy) {
         return ngx_pmemalign(pool, want, align);
     }
 
-    if (ngx_http_zstd_static_dio_scratch_cap < want
-        || ngx_http_zstd_static_dio_scratch_align < align)
-    {
+    if (zsmcf->dio_scratch_cap < want || zsmcf->dio_scratch_align < align) {
         /*
-         * ngx_cycle->pool, not r->pool: worker-lifetime storage, freed
-         * automatically when this worker's cycle pool is destroyed at
-         * process exit, and untouched by any single request's pool
+         * The conf's own pool, not r->pool: cycle-lifetime storage,
+         * freed with the conf that points at it when that cycle's pool
+         * is destroyed, and untouched by any single request's pool
          * being reset or destroyed. NOT ngx_pmemalign() into the OLD
          * (too-small) buffer's memory — a fresh allocation, so a probe
          * already using the previous buffer (there cannot be one, see
          * `busy` above, but the allocation itself must not assume it)
          * is never invalidated out from under it.
          */
-        p = ngx_pmemalign((ngx_pool_t *) ngx_cycle->pool, want, align);
+        p = ngx_pmemalign(zsmcf->dio_scratch_pool, want, align);
         if (p == NULL) {
             return ngx_pmemalign(pool, want, align);
         }
 
-        ngx_http_zstd_static_dio_scratch = p;
-        ngx_http_zstd_static_dio_scratch_cap = want;
-        ngx_http_zstd_static_dio_scratch_align = align;
+        zsmcf->dio_scratch = p;
+        zsmcf->dio_scratch_cap = want;
+        zsmcf->dio_scratch_align = align;
     }
 
-    ngx_http_zstd_static_dio_scratch_busy = 1;
+    zsmcf->dio_scratch_busy = 1;
 
-    return ngx_http_zstd_static_dio_scratch;
+    return zsmcf->dio_scratch;
 }
 
 /*
@@ -757,9 +776,9 @@ ngx_http_zstd_static_dio_buf(ngx_pool_t *pool, size_t want, size_t align)
  * error/decline ones.
  */
 static void
-ngx_http_zstd_static_dio_buf_release(void)
+ngx_http_zstd_static_dio_buf_release(ngx_http_zstd_static_main_conf_t *zsmcf)
 {
-    ngx_http_zstd_static_dio_scratch_busy = 0;
+    zsmcf->dio_scratch_busy = 0;
 }
 
 #endif /* NGX_HTTP_ZSTD_STATIC_HAVE_PROBE */
@@ -1133,6 +1152,10 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
     ngx_err_t    read_err;
     off_t        pos, base, have_base;
     ngx_int_t    probe_rc;
+    ngx_http_zstd_static_main_conf_t  *zsmcf;
+
+    /* the probe's scratch lives here, with the cycle that owns this request */
+    zsmcf = ngx_http_get_module_main_conf(r, ngx_http_zstd_static_module);
 
     *malformed = 0;
 
@@ -1189,12 +1212,12 @@ ngx_http_zstd_static_probe_file(ngx_http_request_t *r,
          * pool fallback), so the single release point below only
          * clears the reuse guard when it was this call that set it.
          */
-        hdr = ngx_http_zstd_static_dio_buf(r->pool, want, align);
+        hdr = ngx_http_zstd_static_dio_buf(zsmcf, r->pool, want, align);
         if (hdr == NULL) {
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
 
-        scratch = (hdr == ngx_http_zstd_static_dio_scratch);
+        scratch = (hdr == zsmcf->dio_scratch);
 
     } else {
         align = 0;
@@ -1427,7 +1450,7 @@ probe_done:
      * caller.
      */
     if (scratch) {
-        ngx_http_zstd_static_dio_buf_release();
+        ngx_http_zstd_static_dio_buf_release(zsmcf);
     }
 
     return probe_rc;
@@ -1897,7 +1920,19 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
 static void *
 ngx_http_zstd_static_create_main_conf(ngx_conf_t *cf)
 {
-    return ngx_pcalloc(cf->pool, sizeof(ngx_http_zstd_static_main_conf_t));
+    ngx_http_zstd_static_main_conf_t  *zsmcf;
+
+    zsmcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_zstd_static_main_conf_t));
+    if (zsmcf == NULL) {
+        return NULL;
+    }
+
+#if (NGX_HTTP_ZSTD_STATIC_HAVE_PROBE)
+    /* the directio scratch is allocated from the pool that owns this conf */
+    zsmcf->dio_scratch_pool = cf->pool;
+#endif
+
+    return zsmcf;
 }
 
 
