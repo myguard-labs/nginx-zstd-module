@@ -1,0 +1,10 @@
+# Pinned at 028fb5a23661f123017c060daa546b55cf4bde29 = google/brotli's
+# v1.2.0 RELEASE tag commit (2025-10-27). The target is always the
+# latest release, never master: reproducible builds, a release-noted
+# CVE surface, and bumps as deliberate commits. A gitlink can only
+# record a commit SHA -- tools/ci-build.sh asserts the equivalence so
+# a drive-by bump to a non-release commit fails CI instead of hiding
+# behind an opaque hash.
+[submodule "deps/brotli"]
+	path = deps/brotli
+	url = https://github.com/google/brotli.git
