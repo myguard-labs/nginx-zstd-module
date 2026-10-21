@@ -4,10 +4,14 @@
  * nginx 1.22.1-shaped regression checks.  Its ngx_table_elt_t has no next
  * member; repeated request headers remain in headers_in.headers.
  *
- * This TU is compiled twice by ci/tests/unit/run.sh: once with
+ * This TU is compiled three times by ci/tests/unit/run.sh: with
  * -DNGX_ZSTD_LEGACY_SHIM (the pre-1.23.0 shape, exercising the #else branch
  * of ngx_http_zstd_request_coding_weight() that walks headers_in.headers),
- * and once without it (the >= 1.23.0 shape, exercising the ->next chain via
+ * with -DNGX_ZSTD_GZIPLESS_SHIM (the >= 1.23.0 shape of a build that
+ * declares no headers_in.accept_encoding -- --without-http_gzip_module and
+ * no --with-compat -- exercising the same #else branch by build shape, with
+ * the ->next links present and ignored), and with neither (the >= 1.23.0
+ * gzip shape, exercising the ->next chain via
  * ngx_http_zstd_chain_coding_weight()). Every case below therefore runs
  * under both branches and must agree -- branch-equivalence is the oracle
  * for A30-F1 ("repeated Accept-Encoding fields must not be dropped on
@@ -101,7 +105,7 @@ request_decide_named(const char *names[], const char *values[], size_t n)
     }
 
     r.main = &r;
-#if !defined(NGX_ZSTD_LEGACY_SHIM)
+#if !defined(NGX_ZSTD_LEGACY_SHIM) && !defined(NGX_ZSTD_GZIPLESS_SHIM)
     r.headers_in.accept_encoding = first_ae;
 #endif
     r.headers_in.headers.part.elts = headers;

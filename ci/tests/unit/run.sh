@@ -49,11 +49,13 @@ FUZZ_DIR="$ROOT/ci/fuzz"
 BIN="$DIR/test_accept_encoding"
 LEGACY_BIN="$DIR/test_accept_encoding_legacy"
 CHAIN_BIN="$DIR/test_accept_encoding_chain"
+GZIPLESS_BIN="$DIR/test_accept_encoding_gzipless"
 PROBE_BIN="$DIR/test_static_probe"
 VERSION_BIN="$DIR/test_version_policy"
 
 if [ "${1:-}" = "clean" ]; then
-    rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$PROBE_BIN" "$VERSION_BIN" "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
+    rm -f "$BIN" "$LEGACY_BIN" "$CHAIN_BIN" "$GZIPLESS_BIN" "$PROBE_BIN" "$VERSION_BIN" \
+        "$DIR"/*.o "$DIR"/*.gcda "$DIR"/*.gcno
     echo "unit test binary removed"
     exit 0
 fi
@@ -114,6 +116,62 @@ $CC "${LINK_EXTRA[@]}" -o "$CHAIN_BIN" "$DIR/test_accept_encoding_chain.o"
 
 echo "==> Running nginx 1.23+-shaped Accept-Encoding checks"
 timeout 60s "$CHAIN_BIN"
+
+echo "==> Building $GZIPLESS_BIN with ${CC} (nginx 1.23+, no accept_encoding field)"
+# The shape of a --without-http_gzip_module build without --with-compat:
+# ngx_http_request.h declares headers_in.accept_encoding only under
+# NGX_HTTP_GZIP || NGX_HTTP_HEADERS, and this shim omits the member the same
+# way. The request-field helper must take the list walk here by build shape,
+# not by version; the fixture's cases then run under that arm with the
+# ->next links present and ignored.
+# shellcheck disable=SC2086
+$CC "${OWN_CFLAGS[@]}" -DNGX_ZSTD_GZIPLESS_SHIM -I"$FUZZ_DIR" \
+    -c "$DIR/test_accept_encoding_legacy.c" -o "$DIR/test_accept_encoding_gzipless.o"
+# shellcheck disable=SC2086
+$CC "${LINK_EXTRA[@]}" -o "$GZIPLESS_BIN" "$DIR/test_accept_encoding_gzipless.o"
+
+echo "==> Running nginx 1.23+ gzip-less Accept-Encoding checks"
+timeout 60s "$GZIPLESS_BIN"
+
+echo "==> Control: a helper that selects on version alone must not compile gzip-less"
+# The build above proves the shipped guard compiles against the gzip-less
+# shim; this proves the shim would catch the guard regressing to its old
+# version-only form. The slice is mutated back to that form in a scratch
+# tree mirroring the fixture's relative includes, and the same compile must
+# fail on the missing member. The mutation has to match exactly once, or the
+# control is checking nothing.
+GUARD='#if (nginx_version >= 1023000) && (NGX_HTTP_GZIP || NGX_HTTP_HEADERS)'
+if [ "$(grep -cFx -- "$GUARD" "$FUZZ_DIR/generated_parser.inc")" != 1 ]; then
+    echo "FAIL: generated_parser.inc does not carry the field guard exactly once; the control cannot mutate it" >&2
+    exit 1
+fi
+CONTROL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zstd-ae-guard-control.XXXXXX")"
+trap 'rm -rf "$CONTROL_DIR"' EXIT
+mkdir -p "$CONTROL_DIR/x/unit" "$CONTROL_DIR/fuzz"
+cp "$DIR/test_accept_encoding_legacy.c" "$CONTROL_DIR/x/unit/"
+cp "$FUZZ_DIR/ngx_shim.h" "$CONTROL_DIR/fuzz/"
+# Whole-line fixed-string replacement: the guard carries && and ||, which
+# no sed delimiter survives.
+awk -v old="$GUARD" -v new='#if (nginx_version >= 1023000)' \
+    '$0 == old { print new; next } { print }' "$FUZZ_DIR/generated_parser.inc" \
+    >"$CONTROL_DIR/fuzz/generated_parser.inc"
+if grep -qF 'NGX_HTTP_HEADERS' "$CONTROL_DIR/fuzz/generated_parser.inc"; then
+    echo "FAIL: the control's mutation did not remove the field guard" >&2
+    exit 1
+fi
+# shellcheck disable=SC2086
+if $CC "${OWN_CFLAGS[@]}" -DNGX_ZSTD_GZIPLESS_SHIM -I"$CONTROL_DIR/fuzz" \
+    -c "$CONTROL_DIR/x/unit/test_accept_encoding_legacy.c" \
+    -o "$CONTROL_DIR/version_only.o" 2>"$CONTROL_DIR/version_only.err"; then
+    echo "FAIL: a version-only guard compiled against the gzip-less shim; the shim still declares accept_encoding" >&2
+    exit 1
+fi
+if ! grep -q 'accept_encoding' "$CONTROL_DIR/version_only.err"; then
+    echo "FAIL: the version-only control failed for a reason other than the missing field:" >&2
+    head -5 "$CONTROL_DIR/version_only.err" >&2
+    exit 1
+fi
+echo "    version-only guard refused gzip-less on the missing accept_encoding member, as required"
 
 # ---------------------------------------------------------------------------
 # The .zst frame-header probe (src/ngx_http_zstd_frame_probe.h:

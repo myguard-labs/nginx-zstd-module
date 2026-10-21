@@ -16,13 +16,17 @@
  *
  * CONSUMER CONTRACT. Inside nginx, include after the nginx headers and
  * everything below resolves: ngx_str_t, ngx_table_elt_t (its ->next
- * link on nginx >= 1.23.0), ngx_http_request_t with the
- * headers_in.accept_encoding field the gzip and headers modules
- * declare, ngx_strncasecmp() and ngx_inline. Outside nginx, the fuzz
- * target and the unit suite do not include this file: they slice the
- * function bodies out of it with ci/fuzz/extract_parser.sh and supply
- * those few names from ci/fuzz/ngx_shim.h, so the code they exercise is
- * the shipped code and never a copy.
+ * link on nginx >= 1.23.0), ngx_http_request_t with headers_in.headers
+ * and, where the gzip or headers module declares it, the
+ * headers_in.accept_encoding field (the request-level helper walks the
+ * list when the build has no such field), ngx_strncasecmp() and
+ * ngx_inline.
+ *
+ * Outside nginx, the fuzz target and the unit suite do not include this
+ * file: they slice the function bodies out of it with
+ * ci/fuzz/extract_parser.sh and supply those few names from
+ * ci/fuzz/ngx_shim.h, so the code they exercise is the shipped code and
+ * never a copy.
  *
  * Every function is ngx_http_zstd_common.h's, moved verbatim. The zstd
  * wrappers that fix the coding name -- ngx_http_zstd_accept_encoding(),
@@ -631,12 +635,23 @@ ngx_http_zstd_chain_coding_weight(const ngx_table_elt_t *ae,
  * accept_encoding names the first one and every later occurrence remains in
  * headers_in.headers. RFC 9110 section 5.3 still requires all occurrences to
  * be treated as one comma-joined field.
+ *
+ * The chained field is also conditional on the build, not only the version:
+ * ngx_http_request.h declares headers_in.accept_encoding under
+ * NGX_HTTP_GZIP || NGX_HTTP_HEADERS, and NGX_HTTP_HEADERS is set only by
+ * --with-compat (auto/modules; there is no --without-http_headers_module),
+ * so a --without-http_gzip_module build without --with-compat has no such
+ * field and the header must walk headers_in.headers there as well. This
+ * module's own filter cannot build in that shape (it latches r->gzip_tested,
+ * declared under NGX_HTTP_GZIP alone); the guard keeps the header to the
+ * contract stated at the top -- the field is used where a module declares
+ * it -- for any consumer that does build gzip-less.
  */
 static ngx_inline ngx_int_t
 ngx_http_zstd_request_coding_weight(ngx_http_request_t *r, const char *coding,
     size_t coding_len, ngx_uint_t allow_wildcard)
 {
-#if (nginx_version >= 1023000)
+#if (nginx_version >= 1023000) && (NGX_HTTP_GZIP || NGX_HTTP_HEADERS)
     return ngx_http_zstd_chain_coding_weight(r->headers_in.accept_encoding,
                                               coding, coding_len,
                                               allow_wildcard);
