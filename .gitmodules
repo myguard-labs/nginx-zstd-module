@@ -1,3 +1,21 @@
+# The brotli/ subtree (the grafted ngx_brotli hardened fork) carries a
+# gitlink at brotli/deps/brotli. Submodule path->URL mappings resolve
+# from the SUPERPROJECT's root .gitmodules — the subtree's own copy at
+# brotli/.gitmodules is inert here — so without this entry every
+# `git submodule` invocation (including the one actions/checkout runs
+# even with submodules disabled) fails with "No url found for
+# submodule path 'brotli/deps/brotli'". Same pin as the fork: the
+# submodule is only needed for the fork's bundled-libbrotli build mode;
+# plain checkouts never fetch it.
+[submodule "brotli/deps/brotli"]
+	path = brotli/deps/brotli
+	url = https://github.com/google/brotli.git
+
+# eilandert's externalized test harness (nginx-module-testkit, the
+# ci/t/harness submodule master carries): same path and pin as master
+# so the next master->phase0 sync merges the gitlink clean. The
+# compression suites consume it from here (compression/t reaches over
+# via ../../ci/t/harness).
 [submodule "ci/t/harness"]
 	path = ci/t/harness
 	url = https://github.com/myguard-labs/nginx-module-testkit.git
