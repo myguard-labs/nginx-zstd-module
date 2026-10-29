@@ -86,8 +86,17 @@ typedef struct {
     ngx_list_part_t  part;
 } ngx_list_t;
 
+/*
+ * ngx_http_request.h declares accept_encoding only under
+ * NGX_HTTP_GZIP || NGX_HTTP_HEADERS. The gzip-less shim omits it the same
+ * way, so a request-field helper that reads the field on nginx version
+ * alone fails to compile here, as it does on a --without-http_gzip_module
+ * build without --with-compat.
+ */
 typedef struct {
+#if !defined(NGX_ZSTD_GZIPLESS_SHIM)
     ngx_table_elt_t  *accept_encoding;
+#endif
     ngx_list_t        headers;
 } ngx_http_headers_in_t;
 
@@ -105,11 +114,29 @@ struct ngx_http_request_s {
  * NGX_ZSTD_LEGACY_SHIM variant instead pins nginx 1.22.1: it removes ->next
  * and lets the request-field helper walk headers_in.headers. The dedicated
  * legacy unit test populates that list with repeated Accept-Encoding fields.
+ *
+ * The request-field helper also asks whether the build declares
+ * headers_in.accept_encoding at all (NGX_HTTP_GZIP || NGX_HTTP_HEADERS in
+ * ngx_http_request.h). Three shapes cover the helper's selection:
+ *
+ *   default                  1.23+, NGX_HTTP_GZIP set: the chained arm,
+ *                            as a gzip-enabled nginx builds it. The fuzz
+ *                            target and the default unit suite use this.
+ *   NGX_ZSTD_LEGACY_SHIM     1.22.1, no ->next: the list-walk arm by
+ *                            version. Both feature macros undefined.
+ *   NGX_ZSTD_GZIPLESS_SHIM   1.23+ with ->next, both feature macros
+ *                            undefined and no accept_encoding member: the
+ *                            list-walk arm by build shape. A helper that
+ *                            selected on version alone does not compile
+ *                            here, which is the point of this shape.
  */
 #if defined(NGX_ZSTD_LEGACY_SHIM)
 #define nginx_version  1022001
+#elif defined(NGX_ZSTD_GZIPLESS_SHIM)
+#define nginx_version  1023000
 #else
 #define nginx_version  1023000
+#define NGX_HTTP_GZIP  1
 #endif
 
 /*
