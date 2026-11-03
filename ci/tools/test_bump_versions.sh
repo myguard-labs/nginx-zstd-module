@@ -269,8 +269,55 @@ case "\$url" in
     *api.github.com/repos/madler/zlib/releases/latest*)
         echo "{\"tag_name\": \"v${NEW_ZLIB:-$CUR_ZLIB}\"}"
         exit 0 ;;
-    *api.github.com/repos/openssl/openssl/releases/latest*)
-        echo "{\"tag_name\": \"openssl-${NEW_OPENSSL:-$CUR_OPENSSL}\"}"
+    *api.github.com/repos/openssl/openssl/releases?per_page=100\&page=*)
+        # The paged list, newest-created first as GitHub serves it. The
+        # pinned line's release is NEW_OPENSSL (default: the pin itself);
+        # every shape also carries decoys the reader must skip: a draft and
+        # a prerelease above everything, and a tag of another shape.
+        page="\${url##*page=}"
+        decoys() {
+            echo " {\"tag_name\": \"openssl-9.9.9\", \"draft\": true, \"prerelease\": false},"
+            echo " {\"tag_name\": \"openssl-9.9.8\", \"draft\": false, \"prerelease\": true},"
+            echo " {\"tag_name\": \"OpenSSL_1_1_1w\", \"draft\": false, \"prerelease\": false},"
+        }
+        case "${OPENSSL_FEED:-json}" in
+            multiline)
+                # Four lines shipped the same day, the OLDEST line created
+                # LAST: GitHub's "latest release" is 3.4.8 here, and a
+                # reader that took it would hold at the pin and miss the
+                # pinned line's patch.
+                echo "["; decoys
+                echo " {\"tag_name\": \"openssl-3.4.8\", \"draft\": false, \"prerelease\": false},"
+                echo " {\"tag_name\": \"openssl-3.5.9\", \"draft\": false, \"prerelease\": false},"
+                echo " {\"tag_name\": \"openssl-3.6.5\", \"draft\": false, \"prerelease\": false},"
+                echo " {\"tag_name\": \"openssl-${NEW_OPENSSL:-$CUR_OPENSSL}\", \"draft\": false, \"prerelease\": false}]" ;;
+            newer-major)
+                # A new major above the pinned line, created after it.
+                echo "["; decoys
+                echo " {\"tag_name\": \"openssl-5.0.0\", \"draft\": false, \"prerelease\": false},"
+                echo " {\"tag_name\": \"openssl-${NEW_OPENSSL:-$CUR_OPENSSL}\", \"draft\": false, \"prerelease\": false},"
+                echo " {\"tag_name\": \"openssl-3.5.9\", \"draft\": false, \"prerelease\": false}]" ;;
+            major-only)
+                # Only a newer major on the feed: nothing on the pinned line.
+                echo "["; decoys
+                echo " {\"tag_name\": \"openssl-5.0.0\", \"draft\": false, \"prerelease\": false}]" ;;
+            paged)
+                # Page one is full of an older line; the pinned line's
+                # release is on page two.
+                if [ "\$page" = 1 ]; then
+                    echo "["
+                    for i in \$(seq 1 99); do
+                        echo " {\"tag_name\": \"openssl-3.5.\$i\", \"draft\": false, \"prerelease\": false},"
+                    done
+                    echo " {\"tag_name\": \"openssl-3.5.100\", \"draft\": false, \"prerelease\": false}]"
+                else
+                    echo "[{\"tag_name\": \"openssl-${NEW_OPENSSL:-$CUR_OPENSSL}\", \"draft\": false, \"prerelease\": false}]"
+                fi ;;
+            *)
+                echo "["; decoys
+                echo " {\"tag_name\": \"openssl-${NEW_OPENSSL:-$CUR_OPENSSL}\", \"draft\": false, \"prerelease\": false},"
+                echo " {\"tag_name\": \"openssl-3.5.9\", \"draft\": false, \"prerelease\": false}]" ;;
+        esac
         exit 0 ;;
     *api.github.com/repos/facebook/zstd/releases/latest*)
         echo "{\"tag_name\": \"v${NEW_ZSTD:-$CUR_ZSTD}\"}"
@@ -447,7 +494,10 @@ else
 fi
 
 say "== case: release feed behind the pin (must hold, never move backwards) =="
-if run_case backwards NEW_OPENSSL=3.5.5; then
+# An OpenSSL release on the pinned major line but below the pin -- the
+# only way that feed can now sit behind the pin, since other lines are
+# never candidates.
+if run_case backwards NEW_OPENSSL=4.0.0; then
     if grep -q 'CHANGED=0' "$SANDBOX/out.log" \
         && grep -q 'not moving a pin backwards' "$SANDBOX/out.log" \
         && [ "$(pins_line VER_OPENSSL)" = "VER_OPENSSL=4.0.1" ] \
@@ -995,6 +1045,109 @@ elif ! grep -q 'does not set pkgrel' "$SANDBOX/out.log"; then
     bad "pkgbuild-drift: exited non-zero but did not name the missing pin: $(cat "$SANDBOX/out.log")"
 else
     ok "pkgbuild-drift: exited non-zero, named the missing pin, and edited nothing"
+fi
+
+say "== case: OpenSSL patch of the pinned line behind three other lines created later (must find it) =="
+# The regression control for the line-aware reader: GitHub's "latest
+# release" here is 3.4.8, created last. Taken as the answer it sorts below
+# the 4.0.1 pin, so a latest-based reader holds and never sees 4.0.3.
+make_sandbox SANDBOX
+bindir="$(OPENSSL_FEED=multiline NEW_OPENSSL=4.0.3 stub_bin "$SANDBOX")"
+if (
+    cd "$SANDBOX"
+    PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+); then
+    if [ "$(pins_line VER_OPENSSL)" = "VER_OPENSSL=4.0.3" ] \
+        && [ "$(pins_line SHA_OPENSSL)" = "SHA_OPENSSL=$(stub_sha openssl-4.0.3.tar.gz)" ] \
+        && grep -q 'bump windows openssl: 4.0.1 -> 4.0.3' "$SANDBOX/out.log" \
+        && ! grep -q 'hold windows openssl' "$SANDBOX/out.log" \
+        && ! grep -q 'notice openssl' "$SANDBOX/out.log"; then
+        ok "openssl-multiline: found the pinned line's 4.0.3 behind the other lines, no hold, no notice"
+    else
+        bad "openssl-multiline: unexpected result: $(cat "$SANDBOX/out.log"); $(pins_line VER_OPENSSL)"
+    fi
+else
+    bad "openssl-multiline: script exited non-zero unexpectedly: $(cat "$SANDBOX/out.log")"
+fi
+
+say "== case: a newer OpenSSL major is reported, never written; the pinned line still moves =="
+make_sandbox SANDBOX
+bindir="$(OPENSSL_FEED=newer-major NEW_OPENSSL=4.0.3 stub_bin "$SANDBOX")"
+if (
+    cd "$SANDBOX"
+    PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+); then
+    if [ "$(pins_line VER_OPENSSL)" = "VER_OPENSSL=4.0.3" ] \
+        && ! grep -q '5\.0\.0' "$SANDBOX/ci/tools/windows-pins.sh" \
+        && grep -q 'notice openssl: 5.0.0 is out on a newer major line; the Windows pin stays on 4.x until moved by hand' "$SANDBOX/out.log" \
+        && grep -q 'bump windows openssl: 4.0.1 -> 4.0.3' "$SANDBOX/out.log"; then
+        ok "openssl-newer-major: pin moved to 4.0.3, 5.0.0 reported and left alone"
+    else
+        bad "openssl-newer-major: unexpected result: $(cat "$SANDBOX/out.log"); $(pins_line VER_OPENSSL)"
+    fi
+else
+    bad "openssl-newer-major: script exited non-zero unexpectedly: $(cat "$SANDBOX/out.log")"
+fi
+
+say "== case: a newer OpenSSL major with the pinned line current is a notice and CHANGED=0 =="
+make_sandbox SANDBOX
+snapshot_tracked
+bindir="$(OPENSSL_FEED=newer-major stub_bin "$SANDBOX")"
+if (
+    cd "$SANDBOX"
+    PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+); then
+    if grep -q 'CHANGED=0' "$SANDBOX/out.log" \
+        && grep -q 'notice openssl: 5.0.0' "$SANDBOX/out.log" \
+        && [ -z "$(changed_tracked)" ]; then
+        ok "openssl-newer-major-only: notice printed, CHANGED=0, nothing edited"
+    else
+        bad "openssl-newer-major-only: unexpected result: $(cat "$SANDBOX/out.log")"
+    fi
+else
+    bad "openssl-newer-major-only: script exited non-zero unexpectedly: $(cat "$SANDBOX/out.log")"
+fi
+
+say "== case: OpenSSL feed with nothing on the pinned major fails closed without edits =="
+make_sandbox SANDBOX
+snapshot_tracked
+bindir="$(OPENSSL_FEED=major-only NEW_STABLE=1.30.5 stub_bin "$SANDBOX")"
+rc=0
+(
+    cd "$SANDBOX"
+    PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+) || rc=$?
+if [ "$rc" -eq 0 ]; then
+    bad "openssl-major-only: script exited 0 with no release on the pinned major"
+elif [ -n "$(changed_tracked)" ]; then
+    bad "openssl-major-only: tracked file(s) changed despite the missing line:$(changed_tracked)"
+elif ! grep -Fq 'could not determine NEW_OPENSSL' "$SANDBOX/out.log"; then
+    bad "openssl-major-only: unexpected log: $(cat "$SANDBOX/out.log")"
+elif ! grep -Fq 'notice openssl: 5.0.0 is out on a newer major line' "$SANDBOX/out.log"; then
+    # The run that dies by name is the one where the notice explains why;
+    # it has to print before the blank-version check ends the run.
+    bad "openssl-major-only: the newer-major notice did not print before the fatal: $(cat "$SANDBOX/out.log")"
+else
+    ok "openssl-major-only: said 5.0.0 is out, then refused to pin a major the feed does not show, edited nothing (the pending stable bump included)"
+fi
+
+say "== case: OpenSSL release of the pinned line only on page two is still found =="
+make_sandbox SANDBOX
+argv_log="$SANDBOX/curl.argv"
+bindir="$(OPENSSL_FEED=paged NEW_OPENSSL=4.0.3 stub_bin "$SANDBOX")"
+if (
+    cd "$SANDBOX"
+    CURL_ARGV_LOG="$argv_log" PATH="$bindir:$PATH" bash ci/tools/bump-versions.sh >"$SANDBOX/out.log" 2>&1
+); then
+    if [ "$(pins_line VER_OPENSSL)" = "VER_OPENSSL=4.0.3" ] \
+        && grep -q 'openssl/openssl/releases?per_page=100&page=2' "$argv_log" \
+        && ! grep -q 'openssl/openssl/releases?per_page=100&page=3' "$argv_log"; then
+        ok "openssl-page-two: read page two, found 4.0.3 there, stopped at the short page"
+    else
+        bad "openssl-page-two: unexpected result: $(cat "$SANDBOX/out.log"); pages: $(grep -o 'openssl/openssl/releases?per_page=100&page=[0-9]*' "$argv_log" | tr '\n' ' ')"
+    fi
+else
+    bad "openssl-page-two: script exited non-zero unexpectedly: $(cat "$SANDBOX/out.log")"
 fi
 
 if [ "$fail" -eq 0 ]; then

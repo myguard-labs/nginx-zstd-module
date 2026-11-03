@@ -62,6 +62,16 @@
 # taken from a release API only moves FORWARD: a "latest" that sorts below
 # the pinned version is reported and left alone, never written.
 #
+# OpenSSL is read for a LINE, not for "latest": GitHub's latest release is
+# the most recently created one, which on a four-line release day is
+# whichever line the team pushed last, so a patch of the pinned line can
+# hide behind an older line's patch. The reader pages the release list
+# like the nginx one and keeps the newest release whose MAJOR matches the
+# pin. OpenSSL's versioning promise is that a minor adds and a patch fixes
+# without breaking, and a major may break, so minors and patches are
+# written and a newer major is reported, never written: the Windows build
+# crosses a major only by hand.
+#
 # A version bump with a stale sha256 pin is worse than no pin (ci-build.sh
 # treats a missing pin as "print a warning", but a WRONG pin is a hard FATAL
 # for a pinned version; build-windows.sh refuses outright) -- so every
@@ -114,8 +124,102 @@ gh_latest_tag() {
 latest_angie() { gh_latest_tag webserver-llc/angie; }
 latest_pcre2() { gh_latest_tag PCRE2Project/pcre2; }
 latest_zlib() { gh_latest_tag madler/zlib; }
-latest_openssl() { gh_latest_tag openssl/openssl; }
 latest_zstd() { gh_latest_tag facebook/zstd; }
+
+# The value of KEY=value in windows-pins.sh. The file is data-only (its
+# header says so), so the key's line IS the pin; a key that is not there is
+# fatal up front, before anything is rewritten -- never a blank "current".
+pin_value() {
+    local line
+    line="$(grep -E "^$1=" "$PINS_FILE" || true)"
+    if [ -z "$line" ]; then
+        echo "FATAL: $PINS_FILE does not set $1 -- refusing to bump a pin that is not there" >&2
+        exit 1
+    fi
+    echo "${line#*=}"
+}
+
+# OpenSSL: the newest release on the pinned MAJOR line, from the paged
+# release list, with the short-page rule and the full-page-at-the-cap
+# refusal of the nginx reader (ci/tools/nginx-releases.sh). The page size
+# is GitHub's maximum and the cap ten pages because this feed is long:
+# it reaches back to 2000 (the older entries carry tags of the
+# OpenSSL_0_9_7c shape, which the reader skips), 323 entries as of
+# 2026-10 at twenty to thirty a year, so the whole list is four calls
+# today and a thousand entries is decades away. Drafts, prereleases and
+# tags of another shape are skipped. The newest release of a HIGHER major
+# is carried alongside so the caller can report it; it is never the
+# answer.
+OPENSSL_FEED_PAGE=100
+OPENSSL_FEED_PAGES=10
+
+OPENSSL_LINE_PY=$(cat <<'PYEOF'
+import json, re, sys
+# argv: pinned major, best on that major so far, best newer major so far
+# ("-" when none yet). stdout: "<best on major> <best newer> <entries>".
+major = int(sys.argv[1])
+best = {"line": sys.argv[2], "newer": sys.argv[3]}
+try:
+    releases = json.load(sys.stdin)
+except ValueError:
+    sys.exit("FATAL: the OpenSSL release feed is not JSON -- refusing to guess")
+if not isinstance(releases, list):
+    sys.exit("FATAL: the OpenSSL release feed is not a release list -- refusing to guess")
+def parse(v):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", v)
+    return tuple(int(x) for x in m.groups()) if m else None
+for r in releases:
+    if (not isinstance(r, dict) or r.get("draft") is not False
+            or r.get("prerelease") is not False):
+        continue
+    m = re.fullmatch(r"openssl-(\d+\.\d+\.\d+)", str(r.get("tag_name", "")))
+    if not m:
+        continue
+    v = parse(m.group(1))
+    if v[0] == major:
+        slot = "line"
+    elif v[0] > major:
+        slot = "newer"
+    else:
+        continue
+    cur = parse(best[slot]) if best[slot] != "-" else None
+    if cur is None or v > cur:
+        best[slot] = "%d.%d.%d" % v
+print(best["line"], best["newer"], len(releases))
+PYEOF
+)
+
+# openssl_line MAJOR -- prints "<newest on MAJOR> <newest newer major>",
+# "-" for either the feed did not show.
+openssl_line() {
+    local page line="-" newer="-" json count
+    for ((page = 1; page <= OPENSSL_FEED_PAGES; page++)); do
+        json="$(gh_api_json "repos/openssl/openssl/releases?per_page=${OPENSSL_FEED_PAGE}&page=${page}")" \
+            || return 1
+        read -r line newer count < <(printf '%s' "$json" | python3 -c "$OPENSSL_LINE_PY" "$1" "$line" "$newer")
+        if [ "$count" -lt "$OPENSSL_FEED_PAGE" ]; then
+            break   # a short page is the end of the list
+        fi
+    done
+    if [ "$count" -ge "$OPENSSL_FEED_PAGE" ]; then
+        echo "FATAL: the OpenSSL release feed did not end within ${OPENSSL_FEED_PAGES} pages" \
+            "of ${OPENSSL_FEED_PAGE} -- refusing to pick from an incomplete read" >&2
+        return 1
+    fi
+    printf '%s %s\n' "$line" "$newer"
+}
+
+# The pinned major is read here, ahead of the full pin check below, because
+# the OpenSSL feed is read for that line; a missing VER_OPENSSL is the same
+# fatal either way, and still before any edit.
+OPENSSL_MAJOR="$(pin_value VER_OPENSSL)"
+OPENSSL_MAJOR="${OPENSSL_MAJOR%%.*}"
+case "$OPENSSL_MAJOR" in
+    '' | *[!0-9]*)
+        echo "FATAL: VER_OPENSSL in $PINS_FILE does not start with a major version number" >&2
+        exit 1
+        ;;
+esac
 
 # The pkgver Arch's package database carries for PACKAGE, from
 # archlinux.org's JSON view of it (the same data the package pages render;
@@ -166,9 +270,21 @@ read -r NEW_STABLE NEW_MAINLINE < <(nginx_lines)
 NEW_ANGIE="$(latest_angie)"
 NEW_PCRE2="$(latest_pcre2)"
 NEW_ZLIB="$(latest_zlib)"
-NEW_OPENSSL="$(latest_openssl)"
+read -r NEW_OPENSSL OPENSSL_NEWER < <(openssl_line "$OPENSSL_MAJOR")
+[ "$NEW_OPENSSL" != "-" ] || NEW_OPENSSL=""
 NEW_ZSTD="$(latest_zstd)"
 NEW_ARCH="$(latest_arch_nginx)"
+
+# A newer OpenSSL major is news, not a bump: OpenSSL's promise is that a
+# major may break what a minor or patch may not, so the Windows build
+# crosses one only by hand (VER_OPENSSL in windows-pins.sh, digest from
+# the release tarball). Reported every run until that happens -- ahead of
+# the blank-version check below, so the run in which the feed shows
+# nothing on the pinned major and dies by name says why first.
+if [ -n "${OPENSSL_NEWER:-}" ] && [ "$OPENSSL_NEWER" != "-" ]; then
+    echo "notice openssl: $OPENSSL_NEWER is out on a newer major line; the Windows pin" \
+        "stays on ${OPENSSL_MAJOR}.x until moved by hand"
+fi
 
 for v in NEW_STABLE NEW_MAINLINE NEW_ANGIE NEW_PCRE2 NEW_ZLIB NEW_OPENSSL NEW_ZSTD NEW_ARCH; do
     if [ -z "${!v}" ]; then
@@ -196,19 +312,6 @@ matrix_version_for_label() {
         /label:/   { split($0, a, ":"); l = a[2]; gsub(/[ \t]/, "", l) }
         END { if (!found) emit() }
     ' "$MATRIX_FILE"
-}
-
-# The value of KEY=value in windows-pins.sh. The file is data-only (its
-# header says so), so the key's line IS the pin; a key that is not there is
-# fatal up front, before anything is rewritten -- never a blank "current".
-pin_value() {
-    local line
-    line="$(grep -E "^$1=" "$PINS_FILE" || true)"
-    if [ -z "$line" ]; then
-        echo "FATAL: $PINS_FILE does not set $1 -- refusing to bump a pin that is not there" >&2
-        exit 1
-    fi
-    echo "${line#*=}"
 }
 
 harness_pin() { # FILE
