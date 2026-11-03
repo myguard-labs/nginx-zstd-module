@@ -1123,8 +1123,12 @@ elif [ -n "$(changed_tracked)" ]; then
     bad "openssl-major-only: tracked file(s) changed despite the missing line:$(changed_tracked)"
 elif ! grep -Fq 'could not determine NEW_OPENSSL' "$SANDBOX/out.log"; then
     bad "openssl-major-only: unexpected log: $(cat "$SANDBOX/out.log")"
+elif ! grep -Fq 'notice openssl: 5.0.0 is out on a newer major line' "$SANDBOX/out.log"; then
+    # The run that dies by name is the one where the notice explains why;
+    # it has to print before the blank-version check ends the run.
+    bad "openssl-major-only: the newer-major notice did not print before the fatal: $(cat "$SANDBOX/out.log")"
 else
-    ok "openssl-major-only: refused to pin a major the feed does not show, edited nothing (the pending stable bump included)"
+    ok "openssl-major-only: said 5.0.0 is out, then refused to pin a major the feed does not show, edited nothing (the pending stable bump included)"
 fi
 
 say "== case: OpenSSL release of the pinned line only on page two is still found =="

@@ -275,6 +275,17 @@ read -r NEW_OPENSSL OPENSSL_NEWER < <(openssl_line "$OPENSSL_MAJOR")
 NEW_ZSTD="$(latest_zstd)"
 NEW_ARCH="$(latest_arch_nginx)"
 
+# A newer OpenSSL major is news, not a bump: OpenSSL's promise is that a
+# major may break what a minor or patch may not, so the Windows build
+# crosses one only by hand (VER_OPENSSL in windows-pins.sh, digest from
+# the release tarball). Reported every run until that happens -- ahead of
+# the blank-version check below, so the run in which the feed shows
+# nothing on the pinned major and dies by name says why first.
+if [ -n "${OPENSSL_NEWER:-}" ] && [ "$OPENSSL_NEWER" != "-" ]; then
+    echo "notice openssl: $OPENSSL_NEWER is out on a newer major line; the Windows pin" \
+        "stays on ${OPENSSL_MAJOR}.x until moved by hand"
+fi
+
 for v in NEW_STABLE NEW_MAINLINE NEW_ANGIE NEW_PCRE2 NEW_ZLIB NEW_OPENSSL NEW_ZSTD NEW_ARCH; do
     if [ -z "${!v}" ]; then
         echo "FATAL: could not determine $v -- refusing to bump with a blank version" >&2
@@ -719,15 +730,6 @@ if bump_wanted "arch nginx" "$NEW_ARCH" "$CUR_ARCH"; then
     echo "bump arch nginx: $CUR_ARCH -> $NEW_ARCH (pkgrel $CUR_PKGREL -> $NEW_PKGREL)"
     CHANGED=1
     BUMP_ARCH=1
-fi
-
-# A newer OpenSSL major is news, not a bump: OpenSSL's promise is that a
-# major may break what a minor or patch may not, so the Windows build
-# crosses one only by hand (VER_OPENSSL in windows-pins.sh, digest from
-# the release tarball). Reported every run until that happens.
-if [ -n "${OPENSSL_NEWER:-}" ] && [ "$OPENSSL_NEWER" != "-" ]; then
-    echo "notice openssl: $OPENSSL_NEWER is out on a newer major line; the Windows pin" \
-        "stays on ${OPENSSL_MAJOR}.x until moved by hand"
 fi
 
 declare -A NEW_LIB=([PCRE2]="$NEW_PCRE2" [ZLIB]="$NEW_ZLIB" [OPENSSL]="$NEW_OPENSSL" [ZSTD]="$NEW_ZSTD")
