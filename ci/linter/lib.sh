@@ -57,7 +57,11 @@ mapfile_checked() {
 # and a hand-edit is reverted by the next refresh. Same regex shape as the
 # top-level exclude in .pre-commit-config.yaml, so the hook and these scripts
 # select the same files.
-LINT_EXCLUDE_RE='^ci/fuzz/corpus/|^ci/fuzz/regressions/|(^|/)vendor/|(^|/)objs/|(^|/)\.build/|(^|/)node_modules/|(^|/)\.venv/'
+#
+# `^brotli/` is the same rule under a different name: a subtree merge of the
+# hardened ngx_brotli fork, carried with its original history intact. It is
+# upstream's tree, so its style findings are not ours to fix.
+LINT_EXCLUDE_RE='^ci/fuzz/corpus/|^ci/fuzz/regressions/|^brotli/|(^|/)vendor/|(^|/)objs/|(^|/)\.build/|(^|/)node_modules/|(^|/)\.venv/'
 
 # lint_files <match-regex> [explicit files...]
 lint_files() {
