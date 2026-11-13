@@ -1685,6 +1685,33 @@ ngx_http_compression_validate_bypass_vary(ngx_conf_t *cf,
 }
 
 
+/*
+ * The tuning slot of a registry backend: its index in
+ * ngx_http_compression_backends[], which is also its index in the
+ * conf's per-coding arrays (levels[], window_bits[]). Returns
+ * NGX_HTTP_COMPRESSION_CONF_SLOTS when `b` is not a registry entry.
+ *
+ * The walk is bounded by the slot count, not by the registry's NULL
+ * terminator, so the result indexes those arrays by construction
+ * rather than by what the registry happens to hold. `b` must not be
+ * NULL (the zero-backend build keeps one slot, and its registry is the
+ * terminator alone).
+ */
+static ngx_uint_t
+ngx_http_compression_backend_slot(const ngx_http_compression_backend_t *b)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < NGX_HTTP_COMPRESSION_CONF_SLOTS; i++) {
+        if (ngx_http_compression_backends[i] == b) {
+            return i;
+        }
+    }
+
+    return NGX_HTTP_COMPRESSION_CONF_SLOTS;
+}
+
+
 static char *
 ngx_http_compression_merge_conf(ngx_conf_t *cf, void *parent, void *child)
 {
@@ -1891,13 +1918,9 @@ ngx_http_compression_merge_conf(ngx_conf_t *cf, void *parent, void *child)
                 continue;   /* gzip token, or no servable dict coding */
             }
 
-            for (i = 0; ngx_http_compression_backends[i] != NULL
-                        && ngx_http_compression_backends[i] != b; i++)
-            {
-                /* void */
-            }
+            i = ngx_http_compression_backend_slot(b);
 
-            if (ngx_http_compression_backends[i] == NULL
+            if (i == NGX_HTTP_COMPRESSION_CONF_SLOTS
                 || conf->levels[i] < b->dict_advisory_level)
             {
                 continue;
@@ -2426,13 +2449,9 @@ ngx_http_compression_header_filter(ngx_http_request_t *r)
 
     /* resolve this coding's tuning slot (concrete post-merge;
      * the dict variant shares the base coding's values) */
-    for (i = 0; ngx_http_compression_backends[i] != NULL; i++) {
-        if (ngx_http_compression_backends[i] == elected) {
-            break;
-        }
-    }
+    i = ngx_http_compression_backend_slot(elected);
 
-    if (ngx_http_compression_backends[i] == NULL) {
+    if (i == NGX_HTTP_COMPRESSION_CONF_SLOTS) {
         /* unreachable: every order token is a registry pointer */
         return NGX_ERROR;
     }
