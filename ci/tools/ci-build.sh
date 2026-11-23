@@ -81,6 +81,7 @@ fi
 
 # --- pinned sha256 for angie tarballs we've actually verified ---
 declare -A ANGIE_SHA256=(
+    ["1.12.5"]="0930e568719846ec9e63b0de0673bb902e66fb7679e4ac6de495c27f5e7c9f99"
     ["1.12.2"]="4f0a51b1de8dd9f09248b2845bbfa4df4f034877bf92f605e499fd7fff09c77c"
     ["1.12.1"]="5f4f203be2aca6fe20770b489c720e46e51d337e521065e7e472b61e24e3d2f5"
     ["1.11.5"]="b5f297c6df2a74b9d0091a7cdd747fffd2d0e1d0be43632da61c1c7539db2043"
@@ -90,6 +91,7 @@ declare -A ANGIE_SHA256=(
 # actually verified (floating mainline, resolved at CI run time, has no
 # entry here and relies on the PGP check alone) ---
 declare -A NGINX_SHA256=(
+    ["1.30.7"]="2565b5c837050e958f70fb0f73c48e2bca4542ad349fd356f46fb0c72610bc6e"
     ["1.30.5"]="6c20565aa2325cb82216ae804f4a4ff1875179014759a381c42ddc8e11c4906d"
     ["1.30.4"]="4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b"
     ["1.30.3"]="e5823dc6f45610993def93ebf6cfce68264af4958c77e874b7d20f3709001b8f"
